@@ -148,6 +148,7 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -225,450 +226,11 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-data class JellyfinUiState(
-    val serverUrl: String = "",
-    val username: String = "",
-    val password: String = "",
-    val isLoading: Boolean = false,
-    val errorMessage: String? = null,
-    val tracks: List<Track>? = null,
-    // 发现页：随机专辑，null 表示尚未加载。
-    val discoverAlbums: List<Album>? = null,
-    // 专辑浏览：albums 为 null 表示专辑列表尚未加载；albumTracks/selectedAlbum 仅在专辑详情页使用。
-    val albums: List<Album>? = null,
-    val albumTracks: List<Track>? = null,
-    val selectedAlbum: Album? = null,
-    // 播放列表浏览：playlists 为 null 表示列表尚未加载；playlistTracks/selectedPlaylist 仅在播放列表详情页使用。
-    val playlists: List<Playlist>? = null,
-    val playlistTracks: List<Track>? = null,
-    val selectedPlaylist: Playlist? = null,
-    // 搜索：searchResults 为 null 表示尚未完成一次搜索；isSearching 表示请求进行中。
-    val searchQuery: String = "",
-    val searchResults: SearchResults? = null,
-    val isSearching: Boolean = false
-)
-
-class JellyfinViewModel(application: Application) : AndroidViewModel(application) {
-    private val _state = MutableStateFlow(JellyfinUiState())
-    val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
-    private val sessionStore = SessionStore(getApplication<PulsarApplication>().pulsarPreferencesDataStore)
-    private var session: com.example.pulsar.data.jellyfin.JellyfinSession? = null
-    private var dataSource: JellyfinDataSource? = null
-    private var loginJob: Job? = null
-    private var loginGeneration = 0
-    private var albumsJob: Job? = null
-    private var albumsGeneration = 0
-    private var searchJob: Job? = null
-    private var searchGeneration = 0
-
-    // 播放会话 UI 状态：当前队列索引 + 当前曲目。放 ViewModel 而非 Composable，
-    // 这样从后台回来 Activity 被系统重建时信息仍在，底部浮窗不丢歌名/封面。
-    private val _playbackTracks = MutableStateFlow<Map<String, Track>>(emptyMap())
-    val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
-
-    private val _currentTrack = MutableStateFlow<Track?>(null)
-    val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
-
-    init { restoreSavedLogin() }
-
-    fun updateServerUrl(value: String) { _state.value = _state.value.copy(serverUrl = value, errorMessage = null) }
-    fun updateUsername(value: String) { _state.value = _state.value.copy(username = value, errorMessage = null) }
-    fun updatePassword(value: String) { _state.value = _state.value.copy(password = value, errorMessage = null) }
-
-    fun login() {
-        loginJob?.cancel()
-        val current = _state.value
-        if (current.serverUrl.isBlank() || current.username.isBlank() || current.password.isBlank()) {
-            _state.value = current.copy(errorMessage = "请填写服务器地址、用户名和密码", password = "")
-            return
-        }
-        val username = current.username
-        val password = current.password
-        val generation = ++loginGeneration
-        _state.value = current.copy(isLoading = true, errorMessage = null, password = "")
-        loginJob = viewModelScope.launch {
-            try {
-                val source = getApplication<PulsarApplication>().jellyfinDataSource(current.serverUrl)
-                val signedIn = source.login(username, password).getOrThrow()
-                val tracks = source.getMusicItems(signedIn.userId, signedIn.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == loginGeneration) {
-                    session = signedIn
-                    dataSource = source
-                    getApplication<PulsarApplication>().activeAuthorization =
-                        source.authorizationHeader(signedIn.accessToken)
-                    _state.value = _state.value.copy(isLoading = false, tracks = tracks)
-                    sessionStore.save(
-                        SavedSession(
-                            serverUrl = current.serverUrl,
-                            userId = signedIn.userId,
-                            username = username,
-                            accessToken = signedIn.accessToken
-                        )
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == loginGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 启动时如果有已保存的登录会话，自动恢复登录（直接用 token 拉取音乐列表）。
-     * token 失效时清除会话回到登录页；网络失败保留会话，下次启动再试。
-     */
-    private fun restoreSavedLogin() {
-        viewModelScope.launch {
-            val saved = sessionStore.load() ?: return@launch
-            val generation = ++loginGeneration
-            _state.value = _state.value.copy(isLoading = true)
-            try {
-                val source = getApplication<PulsarApplication>().jellyfinDataSource(saved.serverUrl)
-                val tracks = source.getMusicItems(saved.userId, saved.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == loginGeneration) {
-                    session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
-                    dataSource = source
-                    getApplication<PulsarApplication>().activeAuthorization =
-                        source.authorizationHeader(saved.accessToken)
-                    _state.value = _state.value.copy(isLoading = false, tracks = tracks)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == loginGeneration) {
-                    if (error is JellyfinError.Unauthorized) sessionStore.clear()
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    fun signOut() {
-        loginGeneration++
-        loginJob?.cancel()
-        loginJob = null
-        albumsJob?.cancel()
-        albumsJob = null
-        albumsGeneration++
-        searchJob?.cancel()
-        searchJob = null
-        searchGeneration++
-        session = null
-        dataSource = null
-        getApplication<PulsarApplication>().activeAuthorization = null
-        _playbackTracks.value = emptyMap()
-        _currentTrack.value = null
-        _state.value = JellyfinUiState()
-        viewModelScope.launch { sessionStore.clear() }
-    }
-
-    /** 根据当前登录会话构造歌曲流地址；未登录时返回 null。 */
-    fun streamUrl(track: Track): String? {
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
-        return src.streamUrl(track.id, currentSession.accessToken)
-    }
-
-    /** 构造专辑封面请求；未登录或专辑无封面时返回 null（UI 显示占位色块）。 */
-    fun albumCover(album: Album): JellyfinRequest? = coverRequest(album.id, album.imageTag)
-
-    /** 构造播放列表封面请求；未登录或无封面时返回 null（UI 显示占位色块）。 */
-    fun playlistCover(playlist: Playlist): JellyfinRequest? = coverRequest(playlist.id, playlist.imageTag)
-
-    /**
-     * 构造歌曲封面请求（用于底部播放条）；未登录时返回 null。
-     * 封面 tag 缺失（歌曲本身无图，或后台播放回来信息丢失）时仍按歌曲 id 请求不带 tag 的图，
-     * 服务器无图会返回 404，UI 显示占位块，不影响播放。
-     */
-    fun trackCover(track: Track): JellyfinRequest? {
-        if (track.id.isBlank()) return null
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
-        return src.imageRequest(track.id, track.imageTag, currentSession.accessToken)
-    }
-
-    private fun coverRequest(itemId: String, imageTag: String?): JellyfinRequest? {
-        val tag = imageTag ?: return null
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
-        return src.imageRequest(itemId, tag, currentSession.accessToken)
-    }
-
-    /** 记录播放队列与起始曲目，供底部浮窗显示当前歌曲。 */
-    fun setPlaybackQueue(tracks: List<Track>, startTrackId: String) {
-        val byId = tracks.associateBy { it.id }
-        _playbackTracks.value = byId
-        _currentTrack.value = byId[startTrackId]
-    }
-
-    /** 播放器切歌时按 mediaId 更新当前曲目；优先查队列索引，查不到（重建后队列未恢复）时从播放器条目兜底恢复。 */
-    fun onMediaItemTransition(mediaItem: MediaItem?) {
-        _currentTrack.value = mediaItem?.let { mi ->
-            mi.mediaId?.let { _playbackTracks.value[it] } ?: mi.toRecoveredTrack()
-        }
-    }
-
-    /** 从播放器当前条目恢复曲目信息：ViewModel 重建后队列索引丢失时，用条目里存的歌名/歌手/封面信息兜底。 */
-    private fun MediaItem.toRecoveredTrack(): Track = Track(
-        id = mediaId,
-        title = mediaMetadata.title?.toString() ?: "未知歌曲",
-        artist = mediaMetadata.artist?.toString() ?: "未知歌手",
-        album = mediaMetadata.albumTitle?.toString().orEmpty(),
-        durationMs = mediaMetadata.durationMs,
-        imageTag = localConfiguration?.tag as? String
-    )
-
-    /**
-     * 加载专辑列表；仅当已登录且尚未加载时执行，避免重复请求。
-     * 失败时复用 [friendlyError] 设置错误信息，切回专辑页可重试。
-     */
-    fun loadAlbums() {
-        if (_state.value.albums != null) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(isLoading = true, errorMessage = null)
-        albumsJob = viewModelScope.launch {
-            try {
-                val albums = src.getAlbums(currentSession.userId, currentSession.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, albums = albums)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 加载发现页随机专辑；仅当已登录且尚未加载时执行，避免重复请求。
-     * 失败时复用 [friendlyError] 设置错误信息，切回发现页可重试。
-     */
-    fun loadDiscoverAlbums() {
-        if (_state.value.discoverAlbums != null) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(isLoading = true, errorMessage = null)
-        albumsJob = viewModelScope.launch {
-            try {
-                val albums = src.getRandomAlbums(currentSession.userId, currentSession.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, discoverAlbums = albums)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 强制刷新发现页随机专辑（"换一批"）；忽略当前是否已加载，直接重新请求。
-     */
-    fun refreshDiscoverAlbums() {
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(isLoading = true, errorMessage = null)
-        albumsJob = viewModelScope.launch {
-            try {
-                val albums = src.getRandomAlbums(currentSession.userId, currentSession.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, discoverAlbums = albums)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 加载某个专辑的歌曲列表并记录当前选中专辑；重复进入同一专辑不重复请求。
-     */
-    fun loadAlbumTracks(album: Album) {
-        if (_state.value.selectedAlbum?.id == album.id && _state.value.albumTracks != null) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(
-            isLoading = true,
-            errorMessage = null,
-            selectedAlbum = album,
-            albumTracks = null
-        )
-        albumsJob = viewModelScope.launch {
-            try {
-                val tracks = src.getAlbumTracks(currentSession.userId, currentSession.accessToken, album.id).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, albumTracks = tracks)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 加载播放列表列表；仅当已登录且尚未加载时执行，避免重复请求。
-     * 失败时复用 [friendlyError] 设置错误信息，切回播放列表页可重试。
-     */
-    fun loadPlaylists() {
-        if (_state.value.playlists != null) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(isLoading = true, errorMessage = null)
-        albumsJob = viewModelScope.launch {
-            try {
-                val playlists = src.getPlaylists(currentSession.userId, currentSession.accessToken).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, playlists = playlists)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /** 加载某个播放列表的歌曲列表并记录当前选中播放列表；重复进入同一播放列表不重复请求。 */
-    fun loadPlaylistTracks(playlist: Playlist) {
-        if (_state.value.selectedPlaylist?.id == playlist.id && _state.value.playlistTracks != null) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = _state.value.copy(
-            isLoading = true,
-            errorMessage = null,
-            selectedPlaylist = playlist,
-            playlistTracks = null
-        )
-        albumsJob = viewModelScope.launch {
-            try {
-                val tracks = src.getPlaylistTracks(currentSession.userId, currentSession.accessToken, playlist.id).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, playlistTracks = tracks)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                }
-            }
-        }
-    }
-
-    /**
-     * 搜索输入：每次输入先取消上一个搜索任务，停顿 [SEARCH_DEBOUNCE_MS] 后才真正请求（防抖）。
-     * 关键词清空时清掉结果；结果用 generation 校验，过期响应不覆盖新结果。
-     */
-    fun updateSearchQuery(value: String) {
-        _state.value = _state.value.copy(searchQuery = value, errorMessage = null)
-        searchJob?.cancel()
-        val query = value.trim()
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        if (query.isEmpty()) {
-            searchGeneration++
-            _state.value = _state.value.copy(searchResults = null, isSearching = false)
-            return
-        }
-        val generation = ++searchGeneration
-        _state.value = _state.value.copy(isSearching = true)
-        searchJob = viewModelScope.launch {
-            delay(SEARCH_DEBOUNCE_MS)
-            if (coroutineContext.isActive && generation == searchGeneration) {
-                try {
-                    val results = src.search(currentSession.userId, currentSession.accessToken, query).getOrThrow()
-                    if (coroutineContext.isActive && generation == searchGeneration) {
-                        _state.value = _state.value.copy(isSearching = false, searchResults = results)
-                    }
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    if (generation == searchGeneration) {
-                        _state.value = _state.value.copy(isSearching = false, errorMessage = friendlyError(error))
-                    }
-                }
-            }
-        }
-    }
-
-    /**
-     * 清空专辑详情，回到专辑列表。
-     * albumTracks 刻意保留：详情页退场滑动动画期间仍在渲染，数据被清会让退场页闪「该专辑暂无歌曲」。
-     * 重进专辑时 loadAlbumTracks 会重新加载，不会读到残留。
-     */
-    fun clearAlbumDetail() {
-        albumsJob?.cancel()
-        albumsGeneration++
-        _state.value = _state.value.copy(selectedAlbum = null, errorMessage = null)
-    }
-
-    /**
-     * 清空播放列表详情，回到播放列表页。
-     * playlistTracks 刻意保留：详情页退场滑动动画期间仍在渲染，数据被清会让退场页闪「该播放列表暂无歌曲」。
-     * 重进播放列表时 loadPlaylistTracks 会重新加载，不会读到残留。
-     */
-    fun clearPlaylistDetail() {
-        albumsJob?.cancel()
-        albumsGeneration++
-        _state.value = _state.value.copy(selectedPlaylist = null, errorMessage = null)
-    }
-
-    override fun onCleared() {
-        loginJob?.cancel()
-        albumsJob?.cancel()
-        searchJob?.cancel()
-        super.onCleared()
-    }
-
-    private fun friendlyError(error: Throwable): String = when (error) {
-        is JellyfinError.InvalidCredentials -> "用户名或密码不正确"
-        is JellyfinError.Unauthorized -> "登录已失效，请重新登录"
-        is JellyfinError.Network -> "无法连接服务器，请检查地址和网络"
-        is JellyfinError.Http -> "服务器请求失败（${error.statusCode}）"
-        is JellyfinError.InvalidResponse -> "服务器返回了无法识别的数据"
-        is IllegalArgumentException -> error.message ?: "服务器地址无效"
-        else -> "登录失败，请检查服务器地址和网络"
-    }
-}
-
 @Composable
 private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
     val viewModel: JellyfinViewModel = viewModel()
     val state by viewModel.state.collectAsStateWithLifecycle()
-    // 使用 Pulsar 液态玻璃主题（默认浅色模式）
-    PulsarTheme(darkTheme = false) {
+    PulsarTheme(darkTheme = isSystemInDarkTheme()) {
         if (state.tracks == null) {
             LoginScreen(state, viewModel)
         } else {
@@ -682,6 +244,39 @@ private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
 }
 
 @Composable
+private fun ErrorState(
+    message: String,
+    modifier: Modifier = Modifier,
+    onRetry: (() -> Unit)? = null
+) {
+    Column(
+        modifier = modifier.padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = message,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        onRetry?.let { retry ->
+            TextButton(onClick = retry) { Text("重新加载") }
+        }
+    }
+}
+
+@Composable
+private fun EmptyState(
+    message: String,
+    modifier: Modifier = Modifier
+) {
+    Text(
+        text = message,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier.padding(16.dp)
+    )
+}
+@Composable
 private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -691,35 +286,16 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
             OutlinedTextField(state.serverUrl, viewModel::updateServerUrl, Modifier.fillMaxWidth(), label = { Text("服务器地址") }, placeholder = { Text("https://example.com 或 http://192.168.1.2:8096") }, singleLine = true)
             OutlinedTextField(state.username, viewModel::updateUsername, Modifier.fillMaxWidth(), label = { Text("用户名") }, singleLine = true)
             OutlinedTextField(state.password, viewModel::updatePassword, Modifier.fillMaxWidth(), label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
-            state.errorMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            state.errorMessage?.let { ErrorState(it) }
             Button(
                 onClick = viewModel::login,
                 modifier = Modifier.fillMaxWidth(),
                 enabled = !state.isLoading
             ) {
                 if (state.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
-        }
+            }
     }
 }
-
-/** 音乐库页面的本地导航状态：全部歌曲 / 专辑列表 / 专辑详情 / 播放列表 / 播放列表详情。 */
-private sealed interface LibrarySection {
-    data object Discover : LibrarySection
-    data object Tracks : LibrarySection
-    data object Albums : LibrarySection
-    data object Playlists : LibrarySection
-    data object Search : LibrarySection
-    data object Settings : LibrarySection
-    data class AlbumDetail(val album: Album) : LibrarySection
-    data class PlaylistDetail(val playlist: Playlist) : LibrarySection
-}
-
-/** 搜索防抖时长：停顿这么久才真正请求服务器，避免每敲一个字都打一次接口。 */
-private const val SEARCH_DEBOUNCE_MS = 300L
-
-/** 是否为详情页（专辑 / 播放列表 / 设置）：详情页隐藏顶部玻璃岛、用系统返回键返回。 */
-private fun LibrarySection.isDetail(): Boolean =
-    this is LibrarySection.AlbumDetail || this is LibrarySection.PlaylistDetail || this is LibrarySection.Settings
 
 /** 顶部玻璃岛的固定占位高度：岛本身 56dp + 上下外边距各 8dp；状态栏高度由各列表的 statusBars inset 另算。 */
 private val GlassIslandTopSpacing = 72.dp
@@ -839,9 +415,9 @@ private fun MusicLibraryScreen(
     }
     // 背景渐变：液态玻璃风格，顶部浅紫蓝渐变到底部白色，营造空气感和深度。
     val backgroundBrush = Brush.verticalGradient(
-        0f to Color(0xFFE0E7FF), // 极浅靛蓝（primaryContainer）
-        0.3f to Color(0xFFF1F5F9), // 极浅灰蓝
-        1f to Color(0xFFF8FAFC)    // 主背景色
+        0f to MaterialTheme.colorScheme.primaryContainer,
+        0.3f to MaterialTheme.colorScheme.surfaceVariant,
+        1f to MaterialTheme.colorScheme.background
     )
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
     Box(Modifier.fillMaxSize().background(backgroundBrush)) {
@@ -1193,7 +769,7 @@ private fun TracksContent(
     ) {
         item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp)) }
         item { Button(onClick = onLocalAudio, Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), enabled = controllerState.controller != null) { Text("选择手机里的音频") } }
-        if (tracks.isEmpty()) item { Text("暂无音乐") }
+        if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             TrackRow(
                 track = track,
@@ -1506,8 +1082,8 @@ private fun DiscoverContent(
                         }
                     }
                 }
-                albums == null && state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                albums.orEmpty().isEmpty() -> Text("暂无专辑")
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
                 else -> {
                     val albumList = albums.orEmpty()
                     // 换一批后按新批次内容淡入淡出替换，避免硬切；用本批专辑 id 拼接作为批次 key。
@@ -1622,8 +1198,8 @@ private fun AlbumsContent(
                         }
                     }
                 }
-                albums == null && state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                albums.orEmpty().isEmpty() -> Text("暂无专辑")
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
                 else -> {
                     val albumList = albums.orEmpty()
                     LazyVerticalGrid(
@@ -1693,8 +1269,8 @@ private fun AlbumDetailContent(
             val albumTracks = state.albumTracks
             when {
                 albumTracks == null && state.isLoading -> CircularProgressIndicator()
-                albumTracks == null && state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                albumTracks.orEmpty().isEmpty() -> Text("该专辑暂无歌曲")
+                albumTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albumTracks.orEmpty().isEmpty() -> EmptyState("该专辑暂无歌曲")
                 else -> {
                     val trackList = albumTracks.orEmpty()
                     LazyColumn(
@@ -1789,8 +1365,8 @@ private fun PlaylistsContent(
                         }
                     }
                 }
-                playlists == null && state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                playlists.orEmpty().isEmpty() -> Text("暂无播放列表")
+                playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                playlists.orEmpty().isEmpty() -> EmptyState("暂无播放列表")
                 else -> {
                     val playlistList = playlists.orEmpty()
                     LazyVerticalGrid(
@@ -1884,9 +1460,9 @@ private fun SearchContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 state.isSearching -> CircularProgressIndicator()
-                state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                isEmptyResult -> Text("未找到相关内容", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                results == null -> Text("未找到相关内容", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                state.errorMessage != null -> ErrorState(state.errorMessage)
+                isEmptyResult -> EmptyState("未找到相关内容")
+                results == null -> EmptyState("未找到相关内容")
                 else -> {
                     val searchResults = results
                     LazyColumn(
@@ -2025,8 +1601,8 @@ private fun PlaylistDetailContent(
             val playlistTracks = state.playlistTracks
             when {
                 playlistTracks == null && state.isLoading -> CircularProgressIndicator()
-                playlistTracks == null && state.errorMessage != null -> Text(state.errorMessage, color = MaterialTheme.colorScheme.error)
-                playlistTracks.orEmpty().isEmpty() -> Text("该播放列表暂无歌曲")
+                playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                playlistTracks.orEmpty().isEmpty() -> EmptyState("该播放列表暂无歌曲")
                 else -> {
                     val trackList = playlistTracks.orEmpty()
                     LazyColumn(
@@ -2287,15 +1863,17 @@ private fun MiniPlayerBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    currentTrack?.let { t ->
-                        Text(
-                            text = t.artist,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    Text(
+                        text = controllerState.playbackError ?: currentTrack?.artist ?: controllerState.status,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (controllerState.playbackError != null) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                 // 上一首
                 IconButton(
@@ -2624,6 +2202,7 @@ private data class QueueTrack(
 private data class ControllerState(
     val controller: MediaController?,
     val status: String,
+    val playbackError: String? = null,
     val positionMs: Long = 0L,
     val durationMs: Long = C.TIME_UNSET,
     val isPlaying: Boolean = false,
@@ -2662,6 +2241,7 @@ private fun MediaController.queueSnapshot(): List<QueueTrack> {
 private fun rememberMediaController(controllerFuture: ListenableFuture<MediaController>?): ControllerState {
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var status by remember { mutableStateOf("正在连接播放服务…") }
+    var playbackError by remember { mutableStateOf<String?>(null) }
     var positionMs by remember { mutableStateOf(0L) }
     var durationMs by remember { mutableStateOf(C.TIME_UNSET) }
     var isPlaying by remember { mutableStateOf(false) }
@@ -2684,61 +2264,111 @@ private fun rememberMediaController(controllerFuture: ListenableFuture<MediaCont
         val current = controller
         if (current == null) onDispose { } else {
             val listener = object : Player.Listener {
-                override fun onIsPlayingChanged(playing: Boolean) { isPlaying = playing; status = controllerStatus(current) }
-                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { status = controllerStatus(current) }
-                override fun onPlaybackStateChanged(playbackState: Int) { status = controllerStatus(current) }
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    isPlaying = playing
+                    if (playing) playbackError = null
+                    status = controllerStatus(current, playbackError)
+                }
+
+                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                    playbackError = null
+                    status = controllerStatus(current, playbackError)
+                }
+
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_BUFFERING) playbackError = null
+                    status = controllerStatus(current, playbackError)
+                }
+
+                override fun onPlayerError(error: PlaybackException) {
+                    playbackError = friendlyPlaybackError(error)
+                    status = controllerStatus(current, playbackError)
+                }
             }
             current.addListener(listener)
             // 连接后立即同步播放状态，避免图标与播放器不一致（如后台回来正在播放却显示播放箭头）。
             isPlaying = current.isPlaying
-            status = controllerStatus(current)
+            status = controllerStatus(current, playbackError)
             onDispose { current.removeListener(listener) }
         }
     }
     // 轮询刷新进度与播放状态：每 500ms 读取一次当前位置、总时长、播放中标记、播放队列快照。
     LaunchedEffect(controller) {
-        while (true) {
-            controller?.let {
-                positionMs = it.currentPosition
-                durationMs = it.duration
-                isPlaying = it.isPlaying
-                queue = it.queueSnapshot()
-                runCatching {
-                    val result = it.sendCustomCommand(
-                        UsbExclusiveMediaCommands.getCommand(), Bundle.EMPTY
-                    ).get()
-                    if (result.resultCode == SessionResult.RESULT_SUCCESS) {
-                        val extras = result.extras
-                        if (extras.containsKey(UsbExclusiveMediaCommands.KEY_STATE)) {
-                            usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
-                            usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
-                            usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
-                            if (extras.containsKey(UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT)) {
-                                usbVolumePercent = extras.getInt(
-                                    UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT, usbVolumePercent
-                                )
-                            }
-                        }
+        val current = controller
+        var isActive = true
+        var usbQueryInFlight = false
+        var silenceQueryInFlight = false
+        try {
+            while (isActive) {
+                current?.let {
+                    positionMs = it.currentPosition
+                    durationMs = it.duration
+                    isPlaying = it.isPlaying
+                    queue = it.queueSnapshot()
+                    if (!usbQueryInFlight) {
+                        usbQueryInFlight = true
+                        runCatching {
+                            it.sendCustomCommand(
+                                UsbExclusiveMediaCommands.getCommand(), Bundle.EMPTY
+                            )
+                        }.onSuccess { future ->
+                            future.addListener({
+                                if (isActive && controller === current) {
+                                    runCatching {
+                                        val result = future.get()
+                                        if (result.resultCode == SessionResult.RESULT_SUCCESS) {
+                                            val extras = result.extras
+                                            if (extras.containsKey(UsbExclusiveMediaCommands.KEY_STATE)) {
+                                                usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
+                                                usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
+                                                usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
+                                                if (extras.containsKey(UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT)) {
+                                                    usbVolumePercent = extras.getInt(
+                                                        UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT, usbVolumePercent
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                usbQueryInFlight = false
+                            }, { runnable -> runnable.run() })
+                        }.onFailure { usbQueryInFlight = false }
+                    }
+                    if (!silenceQueryInFlight) {
+                        silenceQueryInFlight = true
+                        runCatching {
+                            it.sendCustomCommand(
+                                SilenceSkipMediaCommands.getCommand(), Bundle.EMPTY
+                            )
+                        }.onSuccess { future ->
+                            future.addListener({
+                                if (isActive && controller === current) {
+                                    runCatching {
+                                        val result = future.get()
+                                        if (result.resultCode == SessionResult.RESULT_SUCCESS) {
+                                            val extras = result.extras
+                                            if (extras.containsKey(SilenceSkipMediaCommands.KEY_ENABLED)) {
+                                                silenceSkipEnabled = extras.getBoolean(SilenceSkipMediaCommands.KEY_ENABLED)
+                                            }
+                                        }
+                                    }
+                                }
+                                silenceQueryInFlight = false
+                            }, { runnable -> runnable.run() })
+                        }.onFailure { silenceQueryInFlight = false }
                     }
                 }
-                runCatching {
-                    val result = it.sendCustomCommand(
-                        SilenceSkipMediaCommands.getCommand(), Bundle.EMPTY
-                    ).get()
-                    if (result.resultCode == SessionResult.RESULT_SUCCESS) {
-                        val extras = result.extras
-                        if (extras.containsKey(SilenceSkipMediaCommands.KEY_ENABLED)) {
-                            silenceSkipEnabled = extras.getBoolean(SilenceSkipMediaCommands.KEY_ENABLED)
-                        }
-                    }
-                }
+                delay(500)
             }
-            delay(500)
+        } finally {
+            isActive = false
         }
     }
     return ControllerState(
         controller = controller,
         status = status,
+        playbackError = playbackError,
         positionMs = positionMs,
         durationMs = durationMs,
         isPlaying = isPlaying,
@@ -2757,29 +2387,40 @@ private fun rememberMediaController(controllerFuture: ListenableFuture<MediaCont
                 UsbExclusiveMediaCommands.setArgs(enabled)
             ).addListener({
                 runCatching {
-                    val result = current.sendCustomCommand(
+                    val resultFuture = current.sendCustomCommand(
                         UsbExclusiveMediaCommands.getCommand(), Bundle.EMPTY
-                    ).get()
-                    if (result.resultCode != SessionResult.RESULT_SUCCESS) {
-                        throw IllegalStateException("USB 独占设置命令失败")
-                    }
-                    val extras = result.extras
-                    usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
-                    usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
-                    usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
-                }.onFailure { usbExclusiveError = "USB 独占设置失败" }
-                usbExclusivePending = false
+                    )
+                    resultFuture.addListener({
+                        runCatching {
+                            val result = resultFuture.get()
+                            if (result.resultCode != SessionResult.RESULT_SUCCESS) {
+                                throw IllegalStateException("USB 独占设置命令失败")
+                            }
+                            val extras = result.extras
+                            usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
+                            usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
+                            usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
+                        }.onFailure { usbExclusiveError = "USB 独占设置失败" }
+                        usbExclusivePending = false
+                    }, { runnable -> runnable.run() })
+                }.onFailure {
+                    usbExclusiveError = "USB 独占设置失败"
+                    usbExclusivePending = false
+                }
             }, { runnable -> runnable.run() })
         },
         onUsbVolumeChange = { newPercent ->
             usbVolumePercent = newPercent
             val current = controller ?: return@ControllerState
-            runCatching {
-                current.sendCustomCommand(
-                    SessionCommand(UsbExclusiveMediaCommands.SET_VOLUME, Bundle.EMPTY),
-                    UsbExclusiveMediaCommands.setVolumeArgs(newPercent)
-                ).get()
-            }.onFailure { usbExclusiveError = "USB 音量设置失败" }
+            val future = current.sendCustomCommand(
+                SessionCommand(UsbExclusiveMediaCommands.SET_VOLUME, Bundle.EMPTY),
+                UsbExclusiveMediaCommands.setVolumeArgs(newPercent)
+            )
+            future.addListener({
+                if (future.get().resultCode != SessionResult.RESULT_SUCCESS) {
+                    usbExclusiveError = "USB 音量设置失败"
+                }
+            }, { runnable -> runnable.run() })
         },
         onSilenceSkipChange = { enabled ->
             silenceSkipEnabled = enabled
@@ -2805,11 +2446,24 @@ private fun usbExclusiveStateLabel(state: ControllerState): String = when (state
     else -> "状态未知"
 }
 
-private fun controllerStatus(controller: MediaController?): String {
+private fun controllerStatus(controller: MediaController?, playbackError: String? = null): String {
+    if (playbackError != null) return playbackError
     if (controller == null) return "播放服务不可用"
     val title = controller.currentMediaItem?.mediaMetadata?.title ?: "未选择媒体"
-    val state = when { controller.isPlaying -> "播放中"; controller.playbackState == Player.STATE_ENDED -> "已结束"; controller.playbackState == Player.STATE_BUFFERING -> "缓冲中"; else -> "已暂停" }
+    val state = when {
+        controller.playbackState == Player.STATE_BUFFERING -> "缓冲中"
+        controller.playbackState == Player.STATE_ENDED -> "已结束"
+        controller.isPlaying -> "播放中"
+        else -> "已暂停"
+    }
     return "$title · $state"
+}
+
+private fun friendlyPlaybackError(error: PlaybackException): String = when {
+    error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "播放失败：网络连接中断"
+    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
+        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED -> "播放失败：音频格式不受支持"
+    else -> "播放失败：请检查服务器或网络"
 }
 
 /** 把 [mode] 应用到播放器：设置 repeatMode 与 shuffle 开关。 */

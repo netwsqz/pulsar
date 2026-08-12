@@ -6,7 +6,7 @@
 
     <application
         android:name=".PulsarApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:usesCleartextTraffic="true"
         android:label="Pulsar"
         android:supportsRtl="true"

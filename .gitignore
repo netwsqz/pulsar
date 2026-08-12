@@ -1,0 +1,32 @@
+# Gradle and Android build output
+.gradle/
+.kotlin/
+**/build/
+**/.cxx/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.externalNativeBuild/
+
+# Kotlin/Native and tooling caches
+**/.kotlin/
+
+# Local tooling and generated reports
+.pi/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local secrets and temporary files
+*.keystore
+*.jks
+*.log
+
+# Project-local experiments and downloaded assets
+node_modules/
+qq-music-api-v2/
+qrcode*.png
+qrresp*.json

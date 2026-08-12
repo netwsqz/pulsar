@@ -453,6 +453,7 @@ private fun MusicLibraryScreen(
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
                         onRefresh = viewModel::refreshDiscoverAlbums,
+                        onRetry = viewModel::loadDiscoverAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Tracks -> TracksContent(
@@ -469,12 +470,14 @@ private fun MusicLibraryScreen(
                         state = state,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
+                        onRetry = viewModel::loadAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Playlists -> PlaylistsContent(
                         state = state,
                         onOpenPlaylist = openPlaylist,
                         coverFor = viewModel::playlistCover,
+                        onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
@@ -483,6 +486,7 @@ private fun MusicLibraryScreen(
                         albumCoverFor = viewModel::albumCover,
                         playlistCoverFor = viewModel::playlistCover,
                         onSearchQueryChange = viewModel::updateSearchQuery,
+                        onRetry = { viewModel.updateSearchQuery(state.searchQuery) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         onOpenAlbum = openAlbum,
@@ -496,6 +500,7 @@ private fun MusicLibraryScreen(
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         albumCoverFor = viewModel::albumCover,
+                        onRetry = { viewModel.loadAlbumTracks(s.album) },
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
@@ -505,6 +510,7 @@ private fun MusicLibraryScreen(
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         playlistCoverFor = viewModel::playlistCover,
+                        onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -994,6 +1000,7 @@ private fun DiscoverContent(
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRefresh: () -> Unit,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // 换一批按钮转圈动画：请求进行中持续旋转，结束后停在当前角度。
@@ -1082,7 +1089,7 @@ private fun DiscoverContent(
                         }
                     }
                 }
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
                 else -> {
                     val albumList = albums.orEmpty()
@@ -1133,6 +1140,7 @@ private fun AlbumsContent(
     state: JellyfinUiState,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -1198,7 +1206,7 @@ private fun AlbumsContent(
                         }
                     }
                 }
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
                 else -> {
                     val albumList = albums.orEmpty()
@@ -1248,6 +1256,7 @@ private fun AlbumDetailContent(
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     albumCoverFor: (Album) -> JellyfinRequest?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -1269,7 +1278,7 @@ private fun AlbumDetailContent(
             val albumTracks = state.albumTracks
             when {
                 albumTracks == null && state.isLoading -> CircularProgressIndicator()
-                albumTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                albumTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albumTracks.orEmpty().isEmpty() -> EmptyState("该专辑暂无歌曲")
                 else -> {
                     val trackList = albumTracks.orEmpty()
@@ -1300,6 +1309,7 @@ private fun PlaylistsContent(
     state: JellyfinUiState,
     onOpenPlaylist: (Playlist) -> Unit,
     coverFor: (Playlist) -> JellyfinRequest?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -1365,7 +1375,7 @@ private fun PlaylistsContent(
                         }
                     }
                 }
-                playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 playlists.orEmpty().isEmpty() -> EmptyState("暂无播放列表")
                 else -> {
                     val playlistList = playlists.orEmpty()
@@ -1415,6 +1425,7 @@ private fun SearchContent(
     albumCoverFor: (Album) -> JellyfinRequest?,
     playlistCoverFor: (Playlist) -> JellyfinRequest?,
     onSearchQueryChange: (String) -> Unit,
+    onRetry: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
@@ -1460,7 +1471,7 @@ private fun SearchContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 state.isSearching -> CircularProgressIndicator()
-                state.errorMessage != null -> ErrorState(state.errorMessage)
+                state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 isEmptyResult -> EmptyState("未找到相关内容")
                 results == null -> EmptyState("未找到相关内容")
                 else -> {
@@ -1580,6 +1591,7 @@ private fun PlaylistDetailContent(
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     playlistCoverFor: (Playlist) -> JellyfinRequest?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -1601,7 +1613,7 @@ private fun PlaylistDetailContent(
             val playlistTracks = state.playlistTracks
             when {
                 playlistTracks == null && state.isLoading -> CircularProgressIndicator()
-                playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage)
+                playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 playlistTracks.orEmpty().isEmpty() -> EmptyState("该播放列表暂无歌曲")
                 else -> {
                     val trackList = playlistTracks.orEmpty()

@@ -75,7 +75,7 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
                 throw error
             } catch (error: Throwable) {
                 if (generation == loginGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
+                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error, isLogin = true))
                 }
             }
         }
@@ -294,13 +294,13 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
         super.onCleared()
     }
 
-    private fun friendlyError(error: Throwable): String = when (error) {
+    private fun friendlyError(error: Throwable, isLogin: Boolean = false): String = when (error) {
         is JellyfinError.InvalidCredentials -> "用户名或密码不正确"
         is JellyfinError.Unauthorized -> "登录已失效，请重新登录"
         is JellyfinError.Network -> "无法连接服务器，请检查地址和网络"
         is JellyfinError.Http -> "服务器请求失败（${error.statusCode}）"
         is JellyfinError.InvalidResponse -> "服务器返回了无法识别的数据"
-        is IllegalArgumentException -> error.message ?: "服务器地址无效"
-        else -> "登录失败，请检查服务器地址和网络"
+        is IllegalArgumentException -> error.message ?: if (isLogin) "服务器地址无效" else "请求参数无效"
+        else -> if (isLogin) "登录失败，请检查服务器地址和网络" else "加载失败，请稍后重试"
     }
 }

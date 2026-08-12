@@ -1,4 +1,0 @@
-E:/nsmic/app/.cxx/RelWithDebInfo/1q116966/arm64-v8a/CMakeFiles/libusb.dir
-E:/nsmic/app/.cxx/RelWithDebInfo/1q116966/arm64-v8a/CMakeFiles/pulsar_usb.dir
-E:/nsmic/app/.cxx/RelWithDebInfo/1q116966/arm64-v8a/CMakeFiles/edit_cache.dir
-E:/nsmic/app/.cxx/RelWithDebInfo/1q116966/arm64-v8a/CMakeFiles/rebuild_cache.dir

@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="com.example.pulsar.InstallationIdStoreTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-08-03T05:11:50" hostname="NETWSQ" time="0.232">
-  <properties/>
-  <testcase name="replaces a blank stored installation ID with a stable UUID" classname="com.example.pulsar.InstallationIdStoreTest" time="0.232"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

@@ -1,2 +1,0 @@
-ninja: Entering directory `E:\nsmic\app\.cxx\RelWithDebInfo\1q116966\arm64-v8a'
-ninja: no work to do.

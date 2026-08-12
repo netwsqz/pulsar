@@ -1,2 +1,0 @@
-ninja: Entering directory `E:\nsmic\app\.cxx\Debug\4m5h6e5y\arm64-v8a'
-ninja: no work to do.

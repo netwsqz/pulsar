@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.data.jellyfin.JellyfinDtoTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-08-03T05:11:51" hostname="NETWSQ" time="0.005">
+  <properties/>
+  <testcase name="uses stable fallback for missing artist" classname="com.example.pulsar.data.jellyfin.JellyfinDtoTest" time="0.004"/>
+  <testcase name="uses album artist and nullable duration when item lacks artists" classname="com.example.pulsar.data.jellyfin.JellyfinDtoTest" time="0.0"/>
+  <testcase name="maps ticks and artist fields to track" classname="com.example.pulsar.data.jellyfin.JellyfinDtoTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

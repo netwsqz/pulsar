@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.usb.PcmFloatConverterTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.003">
+  <properties/>
+  <testcase name="float samples convert to packed 24 bit little endian" classname="com.example.pulsar.playback.usb.PcmFloatConverterTest" time="0.002"/>
+  <testcase name="input position advances only for complete output" classname="com.example.pulsar.playback.usb.PcmFloatConverterTest" time="0.0"/>
+  <testcase name="float samples convert to 16 and 32 bit" classname="com.example.pulsar.playback.usb.PcmFloatConverterTest" time="0.0"/>
+  <testcase name="values are clipped and special values are safe" classname="com.example.pulsar.playback.usb.PcmFloatConverterTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

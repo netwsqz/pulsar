@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.usb.UsbDescriptorParserTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.004">
+  <properties/>
+  <testcase name="UAC2 可读写主音量 Feature Unit 关联到对应流格式" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.002"/>
+  <testcase name="解析 UAC1 设备得到一个 16bit 双采样率格式" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.001"/>
+  <testcase name="AudioControl 接口号非零时被捕获为 controlInterfaceNumber" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="UAC2 所有声道不可写时不声明硬件音量" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="UAC2 通过输入终端到时钟源映射反查得到 clockId" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="解析多 alt setting 设备得到两个格式并跳过零带宽" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="多个 UAC2 Audio Function 的控制接口与 Feature Unit 不串用" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="空字节流返回空列表" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="UAC2 立体声不会因 bmChannelConfig 被误读成 3 声道" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="UAC2 主声道无音量但左右声道可写时仍识别硬件音量" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.001"/>
+  <testcase name="UAC2 只读主音量不声明可设置硬件音量" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="截断的描述符不会崩溃" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="UAC1 没有时钟实体 clockId 为 0" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <testcase name="解析 UAC2 设备得到一个 24bit 格式且采样率列表为空" classname="com.example.pulsar.playback.usb.UsbDescriptorParserTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

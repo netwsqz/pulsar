@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.SilenceSkipDetectorTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.001">
+  <properties/>
+  <testcase name="evaluate does nothing when duration is non positive" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate does nothing when duration is unknown" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate resets silence tracking when level rises above threshold" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate treats position just past the tail window boundary as outside" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate does not skip before required silence duration elapses" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate treats exact tail window boundary as inside the window" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate resets tracking when position moves back outside the tail window" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate skips once required silence duration elapses" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate starts tracking silence start when entering tail window" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <testcase name="evaluate ignores silence outside the tail window" classname="com.example.pulsar.playback.SilenceSkipDetectorTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

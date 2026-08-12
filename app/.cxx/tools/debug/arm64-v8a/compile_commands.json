@@ -1,0 +1,62 @@
+[
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\core.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\core.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\core.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\descriptor.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\descriptor.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\descriptor.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\hotplug.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\hotplug.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\hotplug.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\io.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\io.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\io.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\sync.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\sync.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\sync.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\strerror.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\strerror.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\strerror.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\os\\linux_usbfs.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\linux_usbfs.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\linux_usbfs.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\os\\events_posix.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\events_posix.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\events_posix.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\os\\threads_posix.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\threads_posix.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\threads_posix.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -IE:/nsmic/app/src/main/cpp/libusb/android -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -fno-limit-debug-info  -fPIC -pthread -fvisibility=hidden -Wno-unused-parameter -Wno-unused-function -std=gnu11 -o CMakeFiles\\libusb.dir\\libusb\\os\\linux_netlink.c.o -c E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\linux_netlink.c",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\libusb\\os\\linux_netlink.c"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dpulsar_usb_EXPORTS -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -pthread -std=c++17 -o CMakeFiles\\pulsar_usb.dir\\usb_audio_driver.cpp.o -c E:\\nsmic\\app\\src\\main\\cpp\\usb_audio_driver.cpp",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\usb_audio_driver.cpp"
+},
+{
+  "directory": "E:/nsmic/app/.cxx/Debug/4m5h6e5y/arm64-v8a",
+  "command": "C:\\Users\\netws\\AppData\\Local\\Android\\Sdk\\ndk\\27.0.12077973\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android26 --sysroot=C:/Users/netws/AppData/Local/Android/Sdk/ndk/27.0.12077973/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dpulsar_usb_EXPORTS -IE:/nsmic/app/src/main/cpp/libusb -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -pthread -std=c++17 -o CMakeFiles\\pulsar_usb.dir\\usb_jni.cpp.o -c E:\\nsmic\\app\\src\\main\\cpp\\usb_jni.cpp",
+  "file": "E:\\nsmic\\app\\src\\main\\cpp\\usb_jni.cpp"
+}
+]

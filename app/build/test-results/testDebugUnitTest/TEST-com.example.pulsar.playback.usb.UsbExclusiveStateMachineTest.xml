@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" tests="5" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.012">
+  <properties/>
+  <testcase name="打开句柄失败进入 Error 后重试成功" classname="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" time="0.001"/>
+  <testcase name="完整生命周期从开启到流输出再关闭" classname="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" time="0.0"/>
+  <testcase name="无效迁移保持原状态且 state 与返回值一致" classname="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" time="0.007"/>
+  <testcase name="无设备开启进入 NoDevice 后设备接入继续走授权" classname="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" time="0.0"/>
+  <testcase name="迁移表全部有效迁移得到正确新状态" classname="com.example.pulsar.playback.usb.UsbExclusiveStateMachineTest" time="0.004"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

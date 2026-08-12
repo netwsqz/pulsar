@@ -1,0 +1,19 @@
+{
+  "name": "nsmic",
+  "version": "1.0.0",
+  "description": "Pulsar 是一个面向普通 Android 手机的 Jellyfin 音乐播放器 MVP。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "glob": "^13.0.6"
+  }
+}

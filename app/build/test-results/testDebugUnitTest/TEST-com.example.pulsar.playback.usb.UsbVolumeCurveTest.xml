@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.usb.UsbVolumeCurveTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.004">
+  <properties/>
+  <testcase name="percent=100 映射为 100" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.0"/>
+  <testcase name="结果始终落在 0 到 100 之间" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.003"/>
+  <testcase name="percent=0 映射为 0" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.0"/>
+  <testcase name="曲线在 0 到 100 全程单调不减" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.001"/>
+  <testcase name="越界百分比先钳位再映射" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.0"/>
+  <testcase name="percent=50 立方映射为 13" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.0"/>
+  <testcase name="低滑块位置映射到更小但可分辨的档位" classname="com.example.pulsar.playback.usb.UsbVolumeCurveTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

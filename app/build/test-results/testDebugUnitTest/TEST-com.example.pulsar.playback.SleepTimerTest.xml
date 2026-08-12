@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.SleepTimerTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.011">
+  <properties/>
+  <testcase name="restart overrides previous timer" classname="com.example.pulsar.playback.SleepTimerTest" time="0.003"/>
+  <testcase name="start activates timer and counts down every second" classname="com.example.pulsar.playback.SleepTimerTest" time="0.001"/>
+  <testcase name="start with non-positive duration throws" classname="com.example.pulsar.playback.SleepTimerTest" time="0.001"/>
+  <testcase name="cancel resets state and does not fire timeout" classname="com.example.pulsar.playback.SleepTimerTest" time="0.003"/>
+  <testcase name="timer fires onTimeout once and resets to inactive" classname="com.example.pulsar.playback.SleepTimerTest" time="0.002"/>
+  <testcase name="fraction reflects remaining proportion and zero when idle" classname="com.example.pulsar.playback.SleepTimerTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

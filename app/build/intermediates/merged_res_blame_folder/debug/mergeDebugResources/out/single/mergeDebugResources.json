@@ -1,0 +1,50 @@
+[
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_poppins_bold.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/poppins_bold.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_poppins_medium.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\poppins_medium.ttf"
+    },
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_poppins_regular.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/poppins_regular.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_righteous.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\righteous.ttf"
+    },
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_poppins_light.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/poppins_light.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_poppins_semibold.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\poppins_semibold.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_poppins_regular.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\poppins_regular.ttf"
+    },
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_poppins_medium.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/poppins_medium.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_poppins_light.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\poppins_light.ttf"
+    },
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_poppins_semibold.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/poppins_semibold.ttf"
+    },
+    {
+        "merged": "com.example.pulsar.app-debug-45:/font_righteous.ttf.flat",
+        "source": "com.example.pulsar.app-main-47:/font/righteous.ttf"
+    },
+    {
+        "merged": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-debug-45:\\font_poppins_bold.ttf.flat",
+        "source": "C:\\Users\\netws\\.gradle\\daemon\\8.10.2\\com.example.pulsar.app-main-47:\\font\\poppins_bold.ttf"
+    }
+]

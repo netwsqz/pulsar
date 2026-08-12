@@ -1,0 +1,20 @@
+{
+    "logs": [
+        {
+            "outputFile": "com.example.pulsar.app-mergeDebugResources-43:/values-night-v8/values-night-v8.xml",
+            "map": [
+                {
+                    "source": "E:\\nsmic\\app\\src\\main\\res\\values-night\\themes.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endLines": "8",
+                        "endColumns": "12",
+                        "endOffsets": "432"
+                    }
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.SessionStoreTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:36" hostname="NETWSQ" time="0.019">
+  <properties/>
+  <testcase name="savedSessionFromStoreMap returns null when a field is missing" classname="com.example.pulsar.SessionStoreTest" time="0.001"/>
+  <testcase name="savedSessionFromStoreMap returns null when values are blank" classname="com.example.pulsar.SessionStoreTest" time="0.0"/>
+  <testcase name="save then load returns the same session" classname="com.example.pulsar.SessionStoreTest" time="0.006"/>
+  <testcase name="load returns null when nothing was saved" classname="com.example.pulsar.SessionStoreTest" time="0.003"/>
+  <testcase name="toStoreMap round-trips all fields" classname="com.example.pulsar.SessionStoreTest" time="0.0"/>
+  <testcase name="clear removes the saved session" classname="com.example.pulsar.SessionStoreTest" time="0.008"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

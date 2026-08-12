@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-08-12T13:48:37" hostname="NETWSQ" time="0.001">
+  <properties/>
+  <testcase name="卡死后即使推进也不会复活直到重置" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.0"/>
+  <testcase name="暖机后持续无推进判定卡死" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.0"/>
+  <testcase name="未开始写入不会判定卡死" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.0"/>
+  <testcase name="暖机期内有推进会顺延卡死窗口" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.0"/>
+  <testcase name="暖机期内无推进不判定卡死" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.0"/>
+  <testcase name="播放帧持续推进则不会判定卡死" classname="com.example.pulsar.playback.usb.IsoPumpWatchdogTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

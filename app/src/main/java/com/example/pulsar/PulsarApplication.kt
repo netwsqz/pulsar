@@ -2,6 +2,8 @@ package com.example.pulsar
 
 import android.app.Application
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
+import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
@@ -9,10 +11,10 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 
-class PulsarApplication : Application() {
+class PulsarApplication : Application(), AuthorizationSink {
     /** 当前登录会话的 Jellyfin Authorization 头（仅内存，不持久化）。 */
     @Volatile
-    var activeAuthorization: String? = null
+    override var activeAuthorization: String? = null
 
     private val jellyfinClient: HttpClient by lazy {
         HttpClient(Android) {
@@ -34,5 +36,11 @@ class PulsarApplication : Application() {
             urlBuilder = com.example.pulsar.data.jellyfin.JellyfinUrlBuilder(serverUrl),
             deviceId = InstallationIdStore(pulsarPreferencesDataStore).getOrCreate()
         )
+    }
+
+    fun sessionRepository(): SessionRepository = SessionStore(pulsarPreferencesDataStore)
+
+    fun jellyfinApiFactory(): JellyfinApiFactory = object : JellyfinApiFactory {
+        override suspend fun create(serverUrl: String): JellyfinApi = jellyfinDataSource(serverUrl)
     }
 }

@@ -1,10 +1,10 @@
 package com.example.pulsar
 
-import android.app.Application
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
-import com.example.pulsar.data.jellyfin.JellyfinDataSource
+import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.domain.model.Album
@@ -19,15 +19,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 
 private const val SEARCH_DEBOUNCE_MS = 300L
 
-class JellyfinViewModel(application: Application) : AndroidViewModel(application) {
+class JellyfinViewModel(
+    private val sessionStore: SessionRepository,
+    private val apiFactory: JellyfinApiFactory,
+    private val authorizationSink: AuthorizationSink,
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate
+) : ViewModel() {
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
-    private val sessionStore = SessionStore(getApplication<PulsarApplication>().pulsarPreferencesDataStore)
     private var session: com.example.pulsar.data.jellyfin.JellyfinSession? = null
-    private var dataSource: JellyfinDataSource? = null
+    private var dataSource: JellyfinApi? = null
     private var loginJob: Job? = null
     private var loginGeneration = 0
     private var albumsJob: Job? = null
@@ -56,17 +62,38 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
         }
         val username = current.username
         val password = current.password
+        invalidateSessionRequests()
+        session = null
+        dataSource = null
+        authorizationSink.activeAuthorization = null
+        _playbackTracks.value = emptyMap()
+        _currentTrack.value = null
         val generation = ++loginGeneration
-        _state.value = current.copy(isLoading = true, errorMessage = null, password = "")
-        loginJob = viewModelScope.launch {
+        _state.value = current.copy(
+            isLoading = true,
+            errorMessage = null,
+            password = "",
+            tracks = null,
+            discoverAlbums = null,
+            albums = null,
+            albumTracks = null,
+            selectedAlbum = null,
+            playlists = null,
+            playlistTracks = null,
+            selectedPlaylist = null,
+            searchQuery = "",
+            searchResults = null,
+            isSearching = false
+        )
+        loginJob = viewModelScope.launch(dispatcher) {
             try {
-                val source = getApplication<PulsarApplication>().jellyfinDataSource(current.serverUrl)
+                val source = apiFactory.create(current.serverUrl)
                 val signedIn = source.login(username, password).getOrThrow()
                 val tracks = source.getMusicItems(signedIn.userId, signedIn.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     session = signedIn
                     dataSource = source
-                    getApplication<PulsarApplication>().activeAuthorization =
+                    authorizationSink.activeAuthorization =
                         source.authorizationHeader(signedIn.accessToken)
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
                     sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
@@ -82,48 +109,57 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
     }
 
     private fun restoreSavedLogin() {
-        viewModelScope.launch {
-            val saved = sessionStore.load() ?: return@launch
-            val generation = ++loginGeneration
-            _state.value = _state.value.copy(isLoading = true)
+        loginJob = viewModelScope.launch(dispatcher) {
             try {
-                val source = getApplication<PulsarApplication>().jellyfinDataSource(saved.serverUrl)
+                val saved = sessionStore.load() ?: return@launch
+                val generation = ++loginGeneration
+                _state.value = _state.value.copy(isLoading = true)
+                val source = apiFactory.create(saved.serverUrl)
                 val tracks = source.getMusicItems(saved.userId, saved.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
                     dataSource = source
-                    getApplication<PulsarApplication>().activeAuthorization =
+                    authorizationSink.activeAuthorization =
                         source.authorizationHeader(saved.accessToken)
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (generation == loginGeneration) {
-                    if (error is JellyfinError.Unauthorized) sessionStore.clear()
+                // 只在代次仍匹配时才修改状态与会话，防止已取消的恢复任务误清新登录的 token。
+                val currentGeneration = loginGeneration
+                if (error is JellyfinError.Unauthorized && currentGeneration == loginGeneration) {
+                    sessionStore.clear()
+                    authorizationSink.activeAuthorization = null
+                }
+                if (currentGeneration == loginGeneration) {
                     _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
                 }
             }
         }
     }
 
-    fun signOut() {
-        loginGeneration++
-        loginJob?.cancel()
-        loginJob = null
+    private fun invalidateSessionRequests() {
         albumsJob?.cancel()
         albumsJob = null
         albumsGeneration++
         searchJob?.cancel()
         searchJob = null
         searchGeneration++
+    }
+
+    fun signOut() {
+        loginGeneration++
+        loginJob?.cancel()
+        loginJob = null
+        invalidateSessionRequests()
         session = null
         dataSource = null
-        getApplication<PulsarApplication>().activeAuthorization = null
+        authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
         _state.value = JellyfinUiState()
-        viewModelScope.launch { sessionStore.clear() }
+        viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }
 
     fun streamUrl(track: Track): String? {
@@ -221,7 +257,7 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
 
     private fun <T> loadLibrary(
         before: () -> JellyfinUiState = { _state.value.copy(isLoading = true, errorMessage = null) },
-        request: suspend (JellyfinDataSource, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<T>,
+        request: suspend (JellyfinApi, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<T>,
         success: (T) -> JellyfinUiState
     ) {
         val src = dataSource ?: return
@@ -229,7 +265,7 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
         albumsJob?.cancel()
         val generation = ++albumsGeneration
         _state.value = before()
-        albumsJob = viewModelScope.launch {
+        albumsJob = viewModelScope.launch(dispatcher) {
             try {
                 val result = request(src, currentSession).getOrThrow()
                 if (coroutineContext.isActive && generation == albumsGeneration) _state.value = success(result)
@@ -237,7 +273,11 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
                 throw error
             } catch (error: Throwable) {
                 if (generation == albumsGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
+                    if (error is JellyfinError.Unauthorized) {
+                        expireSession()
+                    } else {
+                        _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
+                    }
                 }
             }
         }
@@ -256,7 +296,7 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
         }
         val generation = ++searchGeneration
         _state.value = _state.value.copy(isSearching = true)
-        searchJob = viewModelScope.launch {
+        searchJob = viewModelScope.launch(dispatcher) {
             delay(SEARCH_DEBOUNCE_MS)
             if (coroutineContext.isActive && generation == searchGeneration) {
                 try {
@@ -268,11 +308,46 @@ class JellyfinViewModel(application: Application) : AndroidViewModel(application
                     throw error
                 } catch (error: Throwable) {
                     if (generation == searchGeneration) {
-                        _state.value = _state.value.copy(isSearching = false, errorMessage = friendlyError(error))
+                        if (error is JellyfinError.Unauthorized) {
+                            expireSession()
+                        } else {
+                            _state.value = _state.value.copy(isSearching = false, errorMessage = friendlyError(error))
+                        }
                     }
                 }
             }
         }
+    }
+
+    private fun expireSession() {
+        loginGeneration++
+        loginJob?.cancel()
+        loginJob = null
+        invalidateSessionRequests()
+        session = null
+        dataSource = null
+        authorizationSink.activeAuthorization = null
+        _playbackTracks.value = emptyMap()
+        _currentTrack.value = null
+        _state.value = _state.value.copy(
+            serverUrl = _state.value.serverUrl,
+            username = _state.value.username,
+            password = "",
+            isLoading = false,
+            errorMessage = "登录已失效，请重新登录",
+            tracks = null,
+            discoverAlbums = null,
+            albums = null,
+            albumTracks = null,
+            selectedAlbum = null,
+            playlists = null,
+            playlistTracks = null,
+            selectedPlaylist = null,
+            searchQuery = "",
+            searchResults = null,
+            isSearching = false
+        )
+        viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }
 
     fun clearAlbumDetail() {

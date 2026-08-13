@@ -26,8 +26,8 @@ class JellyfinDataSource(
     private val urlBuilder: JellyfinUrlBuilder,
     val deviceId: String,
     private val json: Json = Json { ignoreUnknownKeys = true }
-) {
-    suspend fun login(username: String, password: String): Result<JellyfinSession> =
+) : JellyfinApi {
+    override suspend fun login(username: String, password: String): Result<JellyfinSession> =
         execute {
             require(username.isNotBlank()) { "Username must not be blank" }
             require(password.isNotBlank()) { "Password must not be blank" }
@@ -48,7 +48,7 @@ class JellyfinDataSource(
             JellyfinSession(body.user.id, body.accessToken)
         }
 
-    suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> =
+    override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -63,7 +63,7 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toTrack)
         }
 
-    suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
+    override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -81,7 +81,7 @@ class JellyfinDataSource(
         }
 
     /** 拉取随机专辑（发现页用）：与 [getAlbums] 复用同一接口，仅排序方式换成 Random 并限制返回数量。 */
-    suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int = 12): Result<List<Album>> =
+    override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -98,7 +98,7 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toAlbum)
         }
 
-    suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String): Result<List<Track>> =
+    override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String): Result<List<Track>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -106,7 +106,7 @@ class JellyfinDataSource(
             fetchChildTracks(userId, accessToken, albumId)
         }
 
-    suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =
+    override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -123,7 +123,7 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toPlaylist)
         }
 
-    suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String): Result<List<Track>> =
+    override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String): Result<List<Track>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -136,7 +136,7 @@ class JellyfinDataSource(
      * 走标准 /Users/{userId}/Items 接口 + SearchTerm 参数，token 只进 header 不进 URL。
      * Limit=50 限制返回量，避免结果过多拖慢响应。
      */
-    suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> =
+    override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }
             require(accessToken.isNotBlank()) { "Access token must not be blank" }
@@ -162,19 +162,19 @@ class JellyfinDataSource(
             )
         }
 
-    fun streamUrl(mediaId: String, accessToken: String): String {
+    override fun streamUrl(mediaId: String, accessToken: String): String {
         require(accessToken.isNotBlank()) { "Access token must not be blank" }
         return urlBuilder.mediaStreamRequest(mediaId, accessToken, deviceId).url
     }
 
     /** 构建专辑封面请求：token 只进 header，不进 URL。imageTag 为空时省略 ?tag 参数。 */
-    fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest {
+    override fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest {
         require(itemId.isNotBlank()) { "Item ID must not be blank" }
         require(accessToken.isNotBlank()) { "Access token must not be blank" }
         return urlBuilder.imageRequest(itemId, imageTag, accessToken, deviceId)
     }
 
-    fun authorizationHeader(accessToken: String): String {
+    override fun authorizationHeader(accessToken: String): String {
         require(accessToken.isNotBlank()) { "Access token must not be blank" }
         return mediaBrowserAuthorization(deviceId, accessToken)
     }

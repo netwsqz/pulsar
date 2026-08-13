@@ -228,7 +228,9 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
-    val viewModel: JellyfinViewModel = viewModel()
+    val application = LocalContext.current.applicationContext as PulsarApplication
+    val viewModelFactory = remember(application) { JellyfinViewModelFactory(application) }
+    val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
     val state by viewModel.state.collectAsStateWithLifecycle()
     PulsarTheme(darkTheme = isSystemInDarkTheme()) {
         if (state.tracks == null) {

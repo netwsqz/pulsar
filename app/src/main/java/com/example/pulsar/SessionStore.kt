@@ -43,14 +43,14 @@ fun savedSessionFromStoreMap(map: Map<String, String>): SavedSession? {
 }
 
 /** 用 DataStore 保存/读取/清除登录会话。 */
-class SessionStore(private val dataStore: DataStore<Preferences>) {
-    suspend fun load(): SavedSession? {
+class SessionStore(private val dataStore: DataStore<Preferences>) : SessionRepository {
+    override suspend fun load(): SavedSession? {
         val preferences = dataStore.data.first()
         val map = allKeys.associateWith { key -> preferences[stringPreferencesKey(key)].orEmpty() }
         return savedSessionFromStoreMap(map)
     }
 
-    suspend fun save(session: SavedSession) {
+    override suspend fun save(session: SavedSession) {
         dataStore.edit { preferences ->
             session.toStoreMap().forEach { (key, value) ->
                 preferences[stringPreferencesKey(key)] = value
@@ -58,7 +58,7 @@ class SessionStore(private val dataStore: DataStore<Preferences>) {
         }
     }
 
-    suspend fun clear() {
+    override suspend fun clear() {
         dataStore.edit { preferences ->
             allKeys.forEach { key -> preferences.remove(stringPreferencesKey(key)) }
         }

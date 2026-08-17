@@ -118,7 +118,20 @@ class LibusbAudioSink(
             return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         }
         if (!buffer.hasRemaining()) return true
-        if (startTimeUs == C.TIME_UNSET) startTimeUs = presentationTimeUs
+        if (startTimeUs == C.TIME_UNSET) {
+            anchorTo(presentationTimeUs)
+        } else {
+            // 与 DefaultAudioSink 的 200ms 阈值一致：codec 复用的自然切歌不会触发
+            // flush/handleDiscontinuity，靠 PTS 与锚点+已写帧的偏差检测重锚定，
+            // 否则位置会沿用旧曲坐标系推进（进度条不归零）。
+            val rate = positionSampleRate()
+            if (rate > 0) {
+                val expectedUs = startTimeUs + framesWritten * 1_000_000L / rate
+                if (Math.abs(presentationTimeUs - expectedUs) > POSITION_RESYNC_THRESHOLD_US) {
+                    anchorTo(presentationTimeUs)
+                }
+            }
+        }
 
         val frameBytes = inputBytesPerFrame
         if (frameBytes <= 0 || outputBitsPerSample <= 0) return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
@@ -158,11 +171,40 @@ class LibusbAudioSink(
         return computePositionUs()
     }
 
+    /** 以指定 PTS 为新坐标系原点重新锚定，丢弃 ring 中旧曲的尾巴数据。 */
+    private fun anchorTo(presentationTimeUs: Long) {
+        driver.flushRing()
+        framesWritten = 0L
+        playedFramesBase = driver.playedFrames()
+        startTimeUs = presentationTimeUs
+    }
+
+    override fun handleDiscontinuity() {
+        super.handleDiscontinuity()
+        // 切歌（onProcessedStreamChange）通知：Media3 契约要求 sink 在下一个
+        // buffer 到达时重新锚定位置坐标系（对齐 DefaultAudioSink 的
+        // startMediaTimeUsNeedsSync），否则进度条沿用旧曲坐标继续推进。
+        if (bypassActive) {
+            driver.flushRing()
+            framesWritten = 0L
+            playedFramesBase = driver.playedFrames()
+            startTimeUs = C.TIME_UNSET
+        }
+    }
+
+    /** 计算位置用的采样率：USB 协商出的实际速率优先（playedFrames 按它推进）。 */
+    private fun positionSampleRate(): Int {
+        val usbRate = driver.sampleRate
+        if (usbRate != null && usbRate > 0) return usbRate
+        return configuredFormat?.sampleRate ?: 0
+    }
+
     private fun computePositionUs(): Long {
-        val rate = configuredFormat?.sampleRate ?: return C.TIME_UNSET
-        if (rate <= 0) return C.TIME_UNSET
+        val rate = positionSampleRate()
+        if (rate <= 0) return AudioSink.CURRENT_POSITION_NOT_SET
+        if (startTimeUs == C.TIME_UNSET) return AudioSink.CURRENT_POSITION_NOT_SET
         val playedUs = (driver.playedFrames() - playedFramesBase).coerceAtLeast(0L) * 1_000_000L / rate
-        return (if (startTimeUs == C.TIME_UNSET) 0L else startTimeUs) + playedUs
+        return startTimeUs + playedUs
     }
 
     override fun hasPendingData(): Boolean {
@@ -213,8 +255,10 @@ class LibusbAudioSink(
             driver.setMuted(false)
             // playedFrames 在静音期间冻结（native 不计入），必须重置基准，否则用暂停
             // 时冻结的位置作为新起点后会把这段冻结量重复计入，导致位置突然跳跃。
+            // pausedPositionUs 可能已被 flush（seek）清空——那时锚点由新 buffer 的
+            // PTS 重新建立，不得用 UNSET 把它覆盖掉。
             playedFramesBase = driver.playedFrames()
-            startTimeUs = pausedPositionUs
+            if (pausedPositionUs != C.TIME_UNSET) startTimeUs = pausedPositionUs
             pausedPositionUs = C.TIME_UNSET
             // 看门狗在暂停期间没被喂（见 handleBuffer 的 pausedByUser 判断），
             // lastAdvanceNs 是暂停前的旧值；不重置会在恢复后立即被判定为"卡死太久"。
@@ -229,6 +273,11 @@ class LibusbAudioSink(
             framesWritten = 0L
             playedFramesBase = driver.playedFrames()
             startTimeUs = C.TIME_UNSET
+            // seek 会经 onPositionReset → flush：暂停中的拖动进度条也走这条路。
+            // 必须清掉暂停冻结，否则 getCurrentPositionUs 一直返回 seek 前的旧值、
+            // play() 又把它写回锚点，进度条永久停在暂停位置（音频实际已跳）。
+            pausedByUser = false
+            pausedPositionUs = C.TIME_UNSET
         }
         lastEngageFailHash = 0
         watchdog.reset(SystemClock.elapsedRealtimeNanos())
@@ -362,5 +411,8 @@ class LibusbAudioSink(
         private const val ISO_STALL_NS = 400_000_000L
         private const val PREFERRED_FLOAT_OUTPUT_BITS = 32
         private val FALLBACK_FLOAT_OUTPUT_BITS = intArrayOf(24, 16)
+
+        /** PTS 与锚点+已写帧的偏差超过该值即重锚定（与 DefaultAudioSink 阈值一致）。 */
+        private const val POSITION_RESYNC_THRESHOLD_US = 200_000L
     }
 }

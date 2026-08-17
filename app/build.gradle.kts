@@ -59,6 +59,14 @@ android {
     buildFeatures { compose = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 
+    // 单元测试里 android.util.Log / SystemClock 等桩方法返回默认值而非抛异常
+    //（LibusbAudioSink 等生产类内嵌日志与看门狗时钟调用）
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
     // 禁用 lint 任务（release 构建时 lint 崩溃）
     tasks.whenTaskAdded {
         if (name.contains("lint", ignoreCase = true)) {

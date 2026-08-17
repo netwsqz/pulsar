@@ -5,13 +5,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 项目概况
 
 **Pulsar**：单模块 Android Kotlin 应用，面向普通手机的 Jellyfin 音乐播放器 MVP。
-技术栈：Jetpack Compose + Material 3、ViewModel + StateFlow、Ktor + kotlinx.serialization（数据层）、Media3/ExoPlayer + MediaSessionService（播放）、DataStore（会话/安装 ID）、Coil（封面图）。minSdk 26 / targetSdk 35 / Java 17。
+技术栈：Jetpack Compose + Material 3、ViewModel + StateFlow、Ktor + kotlinx.serialization（数据层）、Media3/ExoPlayer + MediaSessionService（播放）、DataStore（会话/安装 ID）、Coil（封面图）。minSdk 26 / targetSdk 35 / Java 17。构建含 C++17 NDK 层（CMake 3.22.1，ABI 仅 `arm64-v8a`）。
 
 代码内注释为中文；与用户沟通默认用中文。**本项目是 TDD 强约定**：先写失败测试（RED）→ 最小实现（GREEN）→ 重构。
 
 ## 构建与测试命令（Windows）
 
-**关键环境要求：** 项目**没有 Gradle wrapper**，用系统 Gradle 8.10.2；且必须先设置 Android SDK 环境变量，否则报 "SDK location not found"。
+**关键环境要求：** 项目**没有 Gradle wrapper**，用系统 Gradle 8.10.2；且必须先设置 Android SDK 环境变量，否则报 "SDK location not found"。构建同时编译 C++17 NDK 层（CMake 3.22.1，ABI 仅 `arm64-v8a`）。
 
 ```bash
 # 每次新开终端，先设置环境变量
@@ -28,7 +28,8 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 # 构建 debug APK（产物：app/build/outputs/apk/debug/app-debug.apk）
 "$GRADLE" --no-daemon :app:assembleDebug
 
-# 安装到真机（项目约定设备序列号 kngqay9deamvswww，小米机型需在开发者选项开"USB 安装"）
+# 无线调试安装（连接后执行）
+"$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" connect <ip>:<port>
 "$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe" install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
@@ -40,7 +41,8 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 ### 数据层 `data/jellyfin/`
 
-- **`JellyfinDataSource`**：Ktor 客户端封装。所有网络调用返回 `Result<T>`，错误统一映射为 `JellyfinError` sealed class（`InvalidCredentials` / `Unauthorized` / `Http(statusCode)` / `InvalidResponse` / `Network`）。`execute {}` 包装器把异常转成 `Result.failure`，**`CancellationException` 一律重新抛出**。
+- **`JellyfinApi`**（接口）/ **`JellyfinDataSource`**（实现）：Ktor 客户端封装。所有网络调用返回 `Result<T>`，错误统一映射为 `JellyfinError` sealed class（`InvalidCredentials` / `Unauthorized` / `Http(statusCode)` / `InvalidResponse` / `Network`）。`execute {}` 包装器把异常转成 `Result.failure`，**`CancellationException` 一律重新抛出**。
+- **`JellyfinApiFactory`**（接口）：允许测试时注入 Fake 实现，生产时通过 `PulsarApplication.jellyfinApiFactory()` 创建真实实例。
 - **`JellyfinUrlBuilder`**：纯函数式 URL 构建，**把凭据排除在 URL 之外**是它的核心职责。校验 baseUrl 必须是 HTTPS 或私网 HTTP（`normalizeBaseUrl`）；ID/token 空值抛 `IllegalArgumentException`；路径段做百分号编码（`pathSegment`）。返回 `JellyfinRequest(url, headers)` 结构——token 只进 `Authorization` header，不进 URL。
 - **`JellyfinDtos`**：kotlinx.serialization DTO（`@SerialName` 映射 Jellyfin 大写字段）+ `toTrack()` / `toAlbum()` 转换函数。注意：`toAlbum()` 的 imageTag 只取 `imageTags["Primary"]`（不要回退到 Backdrop）。
 
@@ -48,32 +50,72 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 - **Token 绝不出现在 URL、日志或 UI**。请求头用 MediaBrowser 格式：
   `MediaBrowser Client="Pulsar", Device="Android", DeviceId="$deviceId", Version="0.1.0", Token="$token"`
-- `PulsarApplication.activeAuthorization`（`@Volatile`，仅内存）：登录/恢复登录时写入完整 Authorization 头，退出登录时清空。它是**播放流**和**封面图**共用的鉴权来源。
+- `PulsarApplication.activeAuthorization`（`@Volatile`，仅内存）：登录/恢复登录时写入完整 Authorization 头，退出登录/会话过期时清空。它是**播放流**和**封面图**共用的鉴权来源。
 - 播放流：`AuthHttpDataSourceFactory` 每次创建数据源时从 `activeAuthorization` 读取当前头，重新登录后无需重建播放器。
-- `SessionStore`（DataStore）持久化登录会话：只存 token，**不存密码**。
+- `SessionRepository`（接口）/ `SessionStore`（DataStore 实现）：持久化登录会话，只存 token，**不存密码**。`AuthorizationSink`（接口）：内存鉴权头的读写门面，`PulsarApplication` 实现它。
 - 安装 ID：`InstallationIdStore`（DataStore），作为 `DeviceId` 传给 Jellyfin。
+- **会话切换/过期约定**：`login()` 发起前、`expireSession()` 触发时，必须同时清空所有库缓存（albums/playlists/search 等）和播放队列，防止跨账号数据残留。`JellyfinViewModel` 用 `loginGeneration`/`albumsGeneration` 整数代次防止过期协程修改新会话状态。
 
 ### 播放 `playback/` + `PlaybackService.kt`
 
 - `PlaybackService`：Media3 `MediaSessionService`，用 `AuthHttpDataSourceFactory` 建 ExoPlayer。`onTaskRemoved` 时若无播放内容则停止服务。
 - `PlaybackMode.kt`：三种模式（顺序循环/单曲循环/随机）与 Media3 设置的映射。
 - `PlaybackLogic.kt`：`buildPlaybackOrder`（旋转队列使点击的曲目开头）、`formatPosition`（`m:ss`）。
-- **USB 音频输出（常开）**：`PlaybackService` 监听 USB 音频设备插拔（`AudioDeviceCallback`），插上小尾巴/DAC 时调 `setPreferredAudioDevice` 强制路由到 USB，拔掉回退系统默认。**没有用户开关**（系统通常已自动路由，显式路由保证任何设备行为一致）。采样率与设备状态写入 `PlaybackDiagnostics` 单例供 UI 展示。真·独占（bit-perfect）调研后暂缓：需引入第三方原生 USB 驱动 + 升级工具链，且未经验证设备多，收益低。
+- `SleepTimer.kt`：定时停止播放，倒计时到 0 时通过 `MediaController` 暂停。
+- `SilenceSkipDetector.kt` / `SilenceSkippingAudioSink.kt` / `SilenceLevelMonitor.kt`：静音跳过子系统。`SilenceSkippingAudioSink` 包装 Media3 `ForwardingAudioSink`，检测连续静音帧并跳过。阈值和开关存在 `SilenceSkipPreferences`（DataStore）。
+- `AudioLevelMeter.kt`：实时音量电平，供 UI 展示波形。
+- `PlayerRebuildState.kt`：跟踪播放器重建状态（USB 模式切换时需要销毁/重建 ExoPlayer）。
+- `PlaybackDiagnostics.kt`：诊断单例，采样率/设备状态等供 UI 展示。
+- `UsbAudioOutput.kt`：USB 音频设备插拔监听与路由（插 DAC 强制 `setPreferredAudioDevice`，拔掉回系统默认）。
 
-### UI `MainActivity.kt`（单文件 UI 层）
+#### USB 专属驱动子系统 `playback/usb/`
 
-一个文件容纳 ViewModel + 全部 Composable，约 700 行。改动 UI 前先读这个文件。
+这是项目最复杂的部分，约 15 个 Kotlin 文件 + NDK C++ 层，实现 libusb 等时（isochronous）USB 音频输出：
 
-- **`JellyfinViewModel`**（AndroidViewModel）：单一 `StateFlow<JellyfinUiState>`。私有 `session`/`dataSource` 只在登录/恢复登录后赋值。向 UI 暴露的是纯函数式的请求构造器：`streamUrl(track): String?`、`albumCover(album): JellyfinRequest?`（未登录/无封面返回 null，UI 据此显示占位）。错误文案集中在 `friendlyError()`。
-- **导航**：**不引入导航库**。`LibrarySection` sealed interface（`Tracks` / `Albums` / `AlbumDetail(album)`）作本地导航状态，`when` 分支切换内容。
-- **幂等加载模式**：`albumsJob` + `albumsGeneration` 防止重复请求、过期响应失效。`loadAlbums()` 已加载则不重发；`LaunchedEffect(section)` 进入分区时触发加载。
-- **`AlbumsContent`**：`LazyVerticalGrid(Fixed(2))` 专辑卡片，卡片顶部 `AlbumCover`（`aspectRatio(1f)`）；无封面时显示 `surfaceVariant` 占位色块。
+- **`UsbExclusiveController`**：状态机驱动入口，协调设备 claim、格式协商、流的启停和错误恢复。
+- **`UsbExclusiveStateMachine`**：USB 专属模式的显式状态机（Idle / Claiming / Streaming / Error 等）。
+- **`UsbFormatNegotiator`**：解析 UAC 描述符，按采样率/位深/声道匹配最优 alternate setting。
+- **`UsbIsoScheduler`** / **`UsbIsoPump`**：等时传输调度与 PCM 环形缓冲泵，`IsoPumpWatchdog` 监控泵是否卡死。
+- **`LibusbAudioSink`**：Media3 `ForwardingAudioSink` 子类，将 ExoPlayer PCM 送入 libusb 泵；USB 未就绪时透明回退到系统默认 sink。
+- **`UsbNativeDriver`**：JNI 门面，调用 NDK C++ 的 libusb 接口。暂停用"静音门"（不 stop 泵）避免重新 claim 接口造成 EBUSY。
+- **`UsbDescriptorParser`**：解析 USB 音频设备描述符。
+- **`UsbHardwareVolumeControl`** / **`UsbVolumeCurve`**：UAC Feature Unit 硬件音量控制。
+- **`PcmFloatConverter`**：float32 PCM ↔ int16/int24/int32 转换。
+- `UsbExclusivePreferences`（DataStore）：用户的独占模式开关与格式偏好设置。
+
+**USB 驱动约定**：libusb 等时泵跑在专用线程，不在 Main/IO dispatcher 上。格式协商失败时回退系统输出，不抛异常。暂停用静音门而非 stopStream，避免 EBUSY。
+
+### UI 层
+
+UI Composable 集中在 `MainActivity.kt` 一个文件（约 2500 行）；ViewModel/状态已拆成独立文件（`JellyfinViewModel.kt`、`JellyfinUiState.kt`、`JellyfinViewModelFactory.kt`、`QQDownloadViewModel.kt`、`QQDownloadScreen.kt`）。改动 UI 前先读相关文件。
+
+- **`JellyfinViewModel`**（AndroidViewModel）：单一 `StateFlow<JellyfinUiState>`，通过 `JellyfinViewModelFactory` 注入 `SessionRepository`、`JellyfinApiFactory`、`AuthorizationSink`。向 UI 暴露纯函数式的请求构造器：`streamUrl(track)`、`albumCover(album)`、`trackCover(track)`（未登录/无封面返回 null，UI 据此显示占位）。错误文案集中在 `friendlyError()`。
+- **导航**：**不引入导航库**。`LibrarySection` sealed interface（`Discover` / `Tracks` / `Albums` / `Playlists` / `Search` / `QQDownload` / `Settings` / `AlbumDetail(album)` / `PlaylistDetail`）作本地导航状态，`when` 分支切换内容。
+- **幂等加载模式**：`albumsJob` + `albumsGeneration` 防止重复请求、过期响应失效。`loadAlbums()` 已加载则不重发；库函数通过"字段非空"判断是否已加载，**因此切换账号时必须清空所有缓存字段**。
+- **搜索防抖**：`updateSearchQuery()` 内置 300ms debounce，空字符串立即清除结果不发请求。
 - **`AlbumCover`**：Coil `AsyncImage`，`ImageRequest.Builder` 手动 `addHeader("Authorization", ...)`（从 `JellyfinRequest.headers` 取），`ColorPainter` 做 placeholder/error。
 - **`PlayerControls`** / `rememberMediaController`：播放控制与控制器状态轮询（500ms）。
 
+### QQ 音乐下载集成 `server/` + `data/qqdownload/`
+
+「播放器里搜歌 → 电脑下载解密打标签 → 落曲库 → 刷新即听」的完整链路：
+
+- **PC 侧 `E:\nsmic\server\qqmusic_service.py`**（FastAPI，端口 8900，`start.bat` 手动启动）：包装 `E:\music` 的 `qmc2`/`qqmusic_downloader` 现成函数（**只调用不修改**）。单工作线程 + `queue.Queue` 串行下载，每首 sleep 1s 防风控；`process_song` 的 print 噪音用 `redirect_stdout` 捕获存 job，最终路径从 `-> ...` 行解析；连续 3 次「拿不到下载链接」→ `credential_expired`，等 App 端触发 `/api/credential/retry` 重提（需 QQ 音乐客户端运行中）。**落盘 `E:\file\Te_Music`**（Jellyfin 音乐库目录，实时监控开启，落盘即入库）。
+- **Android `data/qqdownload/`**：`QQDownloadApi`（接口）/ `QQDownloadDataSource`（Ktor 实现，错误映射 `QQDownloadError`：`ServiceUnreachable`/`CredentialExpired`/`Http`/`InvalidResponse`）；`QQDownloadSettings`（接口）/ `QQDownloadPreferences`（DataStore：服务地址 + 默认音质）。
+- **`QQDownloadViewModel`**：与 `JellyfinViewModel` 完全独立（服务地址单独持久化，不参与 Jellyfin 会话生命周期）。搜索 300ms 防抖；任务轮询（有活跃任务时 2s 间隔，出错即停）；`pollGeneration`/`searchGeneration` 防过期协程。
+- **UI `QQDownloadScreen.kt`**（独立文件）：导航 `LibrarySection.QQDownload`，顶部玻璃岛有「QQ 下载」chip。未连接显示服务地址设置卡；凭证过期显示横幅 + 重试按钮。
+- 凭证（QQ cookie）只在 PC 侧内存与 `E:\music\qqmusic_cred.json`，**App 不接触 cookie**，接口不回传。
+- **整专下载任务必须带歌名**：`qmc2.get_album_songs()` 只返回 mid 不带歌名（且 `E:\music` 不许改），所以服务里用自写的 `_album_song_details()`（同一底层接口、多取 `songInfo.name`）入队带 `title`，否则 App 任务列表回退显示内部 mid。
+
 ### 测试 `app/src/test/`
 
-JUnit4 + `kotlinx-coroutines-test`（`runTest`）+ Ktor `MockEngine`。测试命名用反引号描述行为。数据层测试覆盖 URL 格式、Authorization 头、**断言 URL 不含 token**、错误映射。播放逻辑与 DataStore 相关逻辑有独立测试类。
+JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTimeBy`）+ Ktor `MockEngine`。测试命名用反引号描述行为。
+
+- **手写 Fake 优先**（不用 Mockito/MockK）：`FakeJellyfinApi`、`FakeSessionRepository`、`FakeAuthorizationSink` 等在测试文件内定义。
+- 数据层测试覆盖 URL 格式、Authorization 头、**断言 URL 不含 token**、错误映射。
+- `JellyfinViewModelTest`：覆盖会话恢复、Unauthorized 清会话、网络错误保留会话、库请求过期、搜索防抖、会话过期后缓存全部清空等场景。
+- `QQDownloadViewModelTest` / `QQDownloadDataSourceTest`：QQ 下载的搜索防抖、音质降级、轮询启停、凭证过期恢复、503→CredentialExpired 映射等。**注意：测试任务一直 running 时轮询无限继续，必须用有界 `advanceTimeBy` 而非 `advanceUntilIdle`**（否则虚拟时间死循环卡死测试进程）。
+- USB/播放逻辑均有独立测试类（`playback/` 和 `playback/usb/` 目录下）。
 
 ## 关键约定与红线
 
@@ -82,3 +124,4 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`）+ Ktor `MockEngine`。测试命
 - **不删除用户数据**（DataStore 存储、配置、历史）。
 - **不擅自执行** git push、部署、发布、破坏性迁移。
 - 命令失败先看报错信息，不硬猜；工具反复报错时停止并询问用户。
+- 根目录的 `qq-music-api-v2/`、`node_modules/`、`qrcode*.png`、`qrresp*.json` 是历史实验产物，已 gitignore，**不是项目代码**，不要动它们。`server/_smoke.log`、根目录 `_smoke.log` 是服务运行日志，同理。

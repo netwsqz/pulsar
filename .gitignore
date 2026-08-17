@@ -30,3 +30,6 @@ node_modules/
 qq-music-api-v2/
 qrcode*.png
 qrresp*.json
+
+# Python service cache
+__pycache__/

@@ -9,6 +9,7 @@ internal sealed interface LibrarySection {
     data object Albums : LibrarySection
     data object Playlists : LibrarySection
     data object Search : LibrarySection
+    data object QQDownload : LibrarySection
     data object Settings : LibrarySection
     data class AlbumDetail(val album: Album) : LibrarySection
     data class PlaylistDetail(val playlist: Playlist) : LibrarySection

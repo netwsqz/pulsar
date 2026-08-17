@@ -4,6 +4,10 @@ import android.app.Application
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
 import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
+import com.example.pulsar.data.qqdownload.QQDownloadApi
+import com.example.pulsar.data.qqdownload.QQDownloadDataSource
+import com.example.pulsar.data.qqdownload.QQDownloadPreferences
+import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
@@ -30,6 +34,17 @@ class PulsarApplication : Application(), AuthorizationSink {
         }
     }
 
+    /** QQ 下载服务客户端：内网自建服务，超时给短一点（连不上快速失败）。 */
+    private val qqDownloadClient: HttpClient by lazy {
+        HttpClient(Android) {
+            install(HttpTimeout) {
+                requestTimeoutMillis = 15_000
+                connectTimeoutMillis = 5_000
+                socketTimeoutMillis = 15_000
+            }
+        }
+    }
+
     suspend fun jellyfinDataSource(serverUrl: String): JellyfinDataSource {
         return JellyfinDataSource(
             client = jellyfinClient,
@@ -42,5 +57,12 @@ class PulsarApplication : Application(), AuthorizationSink {
 
     fun jellyfinApiFactory(): JellyfinApiFactory = object : JellyfinApiFactory {
         override suspend fun create(serverUrl: String): JellyfinApi = jellyfinDataSource(serverUrl)
+    }
+
+    fun qqDownloadSettings(): QQDownloadSettings = QQDownloadPreferences(pulsarPreferencesDataStore)
+
+    fun qqDownloadApiFactory(): QQDownloadApiFactory = object : QQDownloadApiFactory {
+        override fun create(baseUrl: String): QQDownloadApi =
+            QQDownloadDataSource(client = qqDownloadClient, baseUrl = baseUrl)
     }
 }

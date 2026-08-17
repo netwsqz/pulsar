@@ -231,7 +231,22 @@ private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
     val application = LocalContext.current.applicationContext as PulsarApplication
     val viewModelFactory = remember(application) { JellyfinViewModelFactory(application) }
     val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
+    val qqViewModel: QQDownloadViewModel = viewModel(
+        factory = remember(application) {
+            object : androidx.lifecycle.ViewModelProvider.Factory {
+                @Suppress("UNCHECKED_CAST")
+                override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                    require(modelClass.isAssignableFrom(QQDownloadViewModel::class.java))
+                    return QQDownloadViewModel(
+                        preferences = application.qqDownloadSettings(),
+                        apiFactory = application.qqDownloadApiFactory()
+                    ) as T
+                }
+            }
+        }
+    )
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val qqState by qqViewModel.state.collectAsStateWithLifecycle()
     PulsarTheme(darkTheme = isSystemInDarkTheme()) {
         if (state.tracks == null) {
             LoginScreen(state, viewModel)
@@ -239,7 +254,9 @@ private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
             MusicLibraryScreen(
                 state = state,
                 viewModel = viewModel,
-                controllerFuture = controllerFuture
+                controllerFuture = controllerFuture,
+                qqState = qqState,
+                qqViewModel = qqViewModel
             )
         }
     }
@@ -300,14 +317,16 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
 }
 
 /** 顶部玻璃岛的固定占位高度：岛本身 56dp + 上下外边距各 8dp；状态栏高度由各列表的 statusBars inset 另算。 */
-private val GlassIslandTopSpacing = 72.dp
+internal val GlassIslandTopSpacing = 72.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MusicLibraryScreen(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
-    controllerFuture: ListenableFuture<MediaController>?
+    controllerFuture: ListenableFuture<MediaController>?,
+    qqState: QQDownloadUiState = QQDownloadUiState(),
+    qqViewModel: QQDownloadViewModel? = null
 ) {
     val controllerState = rememberMediaController(controllerFuture)
     // 播放模式：顺序循环 → 单曲循环 → 随机播放，点按钮循环切换。
@@ -338,6 +357,7 @@ private fun MusicLibraryScreen(
             LibrarySection.Albums -> viewModel.loadAlbums()
             LibrarySection.Playlists -> viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
+            LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
             LibrarySection.Settings -> Unit
             is LibrarySection.AlbumDetail -> viewModel.loadAlbumTracks(s.album)
             is LibrarySection.PlaylistDetail -> viewModel.loadPlaylistTracks(s.playlist)
@@ -495,6 +515,23 @@ private fun MusicLibraryScreen(
                         onOpenPlaylist = openPlaylist,
                         modifier = Modifier.fillMaxSize()
                     )
+                    LibrarySection.QQDownload -> {
+                        val qq = qqViewModel
+                        if (qq != null) {
+                            QQDownloadScreen(
+                                state = qqState,
+                                onServiceUrlInput = qq::updateServiceUrlInput,
+                                onConnectService = qq::connectService,
+                                onQualityChange = qq::updateQuality,
+                                onSearchQueryChange = qq::updateSearchQuery,
+                                onDownloadSong = qq::downloadSong,
+                                onDownloadAlbum = qq::downloadAlbum,
+                                onRetryCredential = qq::retryCredential,
+                                onRefreshJobs = qq::refreshJobs,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         state = state,
                         album = s.album,
@@ -539,6 +576,7 @@ private fun MusicLibraryScreen(
                 onShowAlbums = { section = LibrarySection.Albums },
                 onShowPlaylists = { section = LibrarySection.Playlists },
                 onShowSearch = { section = LibrarySection.Search },
+                onShowQQDownload = { section = LibrarySection.QQDownload },
                 onShowSettings = {
                     detailOrigin = section
                     section = LibrarySection.Settings
@@ -591,6 +629,7 @@ private fun GlassChipBar(
     onShowAlbums: () -> Unit,
     onShowPlaylists: () -> Unit,
     onShowSearch: () -> Unit,
+    onShowQQDownload: () -> Unit,
     onShowSettings: () -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -603,12 +642,14 @@ private fun GlassChipBar(
     val tracksRequester = remember { BringIntoViewRequester() }
     val albumsRequester = remember { BringIntoViewRequester() }
     val playlistsRequester = remember { BringIntoViewRequester() }
+    val qqDownloadRequester = remember { BringIntoViewRequester() }
     LaunchedEffect(section) {
         when (section) {
             LibrarySection.Discover -> discoverRequester.bringIntoView()
             LibrarySection.Tracks -> tracksRequester.bringIntoView()
             LibrarySection.Albums -> albumsRequester.bringIntoView()
             LibrarySection.Playlists -> playlistsRequester.bringIntoView()
+            LibrarySection.QQDownload -> qqDownloadRequester.bringIntoView()
             else -> Unit
         }
     }
@@ -669,6 +710,14 @@ private fun GlassChipBar(
                     colors = glassChipColors(selected = section == LibrarySection.Playlists),
                     border = glassChipBorder(),
                     modifier = Modifier.bringIntoViewRequester(playlistsRequester)
+                )
+                FilterChip(
+                    selected = section == LibrarySection.QQDownload,
+                    onClick = onShowQQDownload,
+                    label = { Text("QQ 下载", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    colors = glassChipColors(selected = section == LibrarySection.QQDownload),
+                    border = glassChipBorder(),
+                    modifier = Modifier.bringIntoViewRequester(qqDownloadRequester)
                 )
             }
             // 左侧渐变遮罩：还能往左滑时显示。

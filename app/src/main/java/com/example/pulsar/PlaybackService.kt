@@ -365,6 +365,11 @@ class PlaybackService : MediaSessionService() {
                     .build(),
                 true
             )
+            // 播放期间持有 PARTIAL_WAKE_LOCK。普通模式系统 AudioTrack 自带
+            // wakelock，但 USB 独占模式完全绕过 AudioTrack（delegate 永不初始化），
+            // 不加这句熄屏后 CPU 休眠 → libusb 事件线程停摆 → 在途 ~64ms 缓冲
+            // 耗尽补零（爆音），超 400ms 看门狗回退系统音频（中断）。
+            .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
             .also { observeOutputDiagnostics(it) }
     }

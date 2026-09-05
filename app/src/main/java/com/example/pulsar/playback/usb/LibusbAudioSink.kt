@@ -42,6 +42,12 @@ class LibusbAudioSink(
     // UI 仍按 500ms 轮询 getCurrentPositionUs，必须冻结返回这个值，否则进度条会突然
     // 回退到本次 bypass 段开始时的位置。C.TIME_UNSET 表示当前不在"用户暂停"状态。
     private var pausedPositionUs = C.TIME_UNSET
+    // 重锚瞬间 ring 中的积压帧数。漂移检测的"预期 PTS"必须包含它：重锚把坐标系
+    // 拨回"新 PTS − 积压时长"后，ring 里积压的旧内容仍要先播完，随后写入的连续
+    // buffer 的 PTS 只比"锚点 + 积压 + 已写帧"略超一步。漏掉积压项时，满缓冲场景
+    // 下每个 buffer 都偏差 ≈ 积压时长 → 无限重锚风暴（真机日志：105 秒重锚 1 万+次，
+    // 表现为进度抖动 + 杂音）。
+    private var backlogFramesAtAnchor = 0L
     private val watchdog = IsoPumpWatchdog(ISO_WARMUP_NS, ISO_STALL_NS)
 
     override fun getFormatSupport(format: Format): Int {
@@ -71,12 +77,26 @@ class LibusbAudioSink(
                 "(C_24BIT=${C.ENCODING_PCM_24BIT}, C_16BIT=${C.ENCODING_PCM_16BIT}) " +
                 "rate=${inputFormat.sampleRate} ch=${inputFormat.channelCount}",
         )
+        // 同格式切歌复用：Media3 每次切歌（新媒体源）都会重新 configure。若 bypass
+        // 已激活且采样率/位深/声道与当前流完全一致，重启泵（engage → startStream）
+        // 毫无必要——native start_stream() 会重置 ring 读写指针，把旧曲未播的
+        // 尾部（ring ≈1s + 120ms 在途）整段丢弃 = 听感"歌尾被切"。此时保留 bypass
+        // 与位置坐标系（新曲 PTS 到达时由 200ms 偏差检测做锚点平移，见 handleBuffer），
+        // 旧曲尾部播完新曲数据无缝续上。仅格式变化时才走完整重置 + engage。
+        val reuseBypass = bypassActive && driver.isStreaming &&
+            configuredFormat?.let {
+                it.sampleRate == inputFormat.sampleRate &&
+                    it.channelCount == inputFormat.channelCount &&
+                    it.pcmEncoding == inputFormat.pcmEncoding
+            } == true
         configuredFormat = inputFormat
         hasChannelMapping = outputChannels != null
-        bypassActive = false
+        bypassActive = reuseBypass
         eosRequested = false
-        framesWritten = 0L
-        startTimeUs = C.TIME_UNSET
+        if (!reuseBypass) {
+            framesWritten = 0L
+            startTimeUs = C.TIME_UNSET
+        }
         lastEngageFailHash = 0
         pausedByUser = false
         pausedPositionUs = C.TIME_UNSET
@@ -103,7 +123,9 @@ class LibusbAudioSink(
             // 当前转换器只输出 packed PCM；容器宽度不同的格式不能安全直送。
             pcmBytesPerFrame = 0
         }
-        if (pcmBytesPerFrame > 0 && inputBytesPerFrame > 0 && driver.isOpen && !hasChannelMapping) {
+        if (!reuseBypass && pcmBytesPerFrame > 0 && inputBytesPerFrame > 0 &&
+            driver.isOpen && !hasChannelMapping
+        ) {
             engage(inputFormat.sampleRate, inputFormat.channelCount, outputBitsPerSample)
         }
     }
@@ -121,13 +143,23 @@ class LibusbAudioSink(
         if (startTimeUs == C.TIME_UNSET) {
             anchorTo(presentationTimeUs)
         } else {
-            // 与 DefaultAudioSink 的 200ms 阈值一致：codec 复用的自然切歌不会触发
-            // flush/handleDiscontinuity，靠 PTS 与锚点+已写帧的偏差检测重锚定，
-            // 否则位置会沿用旧曲坐标系推进（进度条不归零）。
+            // 对齐 DefaultAudioSink 的 startMediaTimeUs 机制：自然切歌（同格式 codec
+            // 重建/新媒体源）不触发 flush，靠 PTS 与锚点+已写帧的偏差检测新曲坐标
+            // 系。检测到偏差 > 200ms 时做"补偿重锚"：新锚点 = 新曲 PTS − ring 中
+            // 未播尾部的时长（见 anchorTo）。ring 不清空，旧曲尾部继续播完，进度条
+            // 平滑跨过接缝，位置全程准确。
             val rate = positionSampleRate()
             if (rate > 0) {
-                val expectedUs = startTimeUs + framesWritten * 1_000_000L / rate
+                // 预期 PTS = 锚点 + 重锚时 ring 积压 + 此后已写帧。补偿式重锚把
+                // 坐标系拨到"新 PTS − 积压时长"，ring 里的积压旧内容要先播完，
+                // 因此连续 buffer 的 PTS 相对锚点天然领先积压量，不记就会每次都
+                // "偏差 ≈ 积压" → 无限重锚（满缓冲场景必现，真机已复现）。
+                val expectedUs = startTimeUs + (backlogFramesAtAnchor + framesWritten) * 1_000_000L / rate
                 if (Math.abs(presentationTimeUs - expectedUs) > POSITION_RESYNC_THRESHOLD_US) {
+                    // 播放中途 PTS 偏差超过 200ms = 上游（解码器/数据源）丢过内容，
+                    // 正常播放极少出现（真机验证：一轮 6 分钟仅零星几次），记 info
+                    // 留排查线索即可。
+                    Log.i(TAG, "PTS 重锚: 偏差=${(presentationTimeUs - expectedUs) / 1000}ms")
                     anchorTo(presentationTimeUs)
                 }
             }
@@ -171,25 +203,32 @@ class LibusbAudioSink(
         return computePositionUs()
     }
 
-    /** 以指定 PTS 为新坐标系原点重新锚定，丢弃 ring 中旧曲的尾巴数据。 */
+    /**
+     * 以指定 PTS 为新坐标系原点重锚定，ring 不清空。ring 中还有旧曲未播的尾部时，
+     * 这些帧会在新锚点生效后继续从 DAC 出声——锚点必须补偿这段时长：新锚点 =
+     * PTS − 未播尾部时长。效果：进度条从"接缝点"平滑推进——尾部播完时位置恰好
+     * 走到新曲 PTS，之后与新曲实际出声严格同步（位置始终等于扬声器正在放的内容）。
+     */
     private fun anchorTo(presentationTimeUs: Long) {
-        driver.flushRing()
+        val rate = positionSampleRate()
+        val pendingFrames = driver.pendingFrames()
+        val pendingUs = if (rate > 0 && pendingFrames > 0) pendingFrames * 1_000_000L / rate else 0L
         framesWritten = 0L
+        // 漂移检测的预期 PTS = 锚点 + 积压 + 已写帧。积压在重锚后才开始被消费，
+        // 按定义应计入"待播内容"，与已写帧同性质。
+        backlogFramesAtAnchor = pendingFrames
         playedFramesBase = driver.playedFrames()
-        startTimeUs = presentationTimeUs
+        startTimeUs = presentationTimeUs - pendingUs
     }
 
     override fun handleDiscontinuity() {
         super.handleDiscontinuity()
-        // 切歌（onProcessedStreamChange）通知：Media3 契约要求 sink 在下一个
-        // buffer 到达时重新锚定位置坐标系（对齐 DefaultAudioSink 的
-        // startMediaTimeUsNeedsSync），否则进度条沿用旧曲坐标继续推进。
-        if (bypassActive) {
-            driver.flushRing()
-            framesWritten = 0L
-            playedFramesBase = driver.playedFrames()
-            startTimeUs = C.TIME_UNSET
-        }
+        // 切歌（onProcessedStreamChange）通知。对齐 DefaultAudioSink：只标记"下个
+        // buffer 需要重锚定"，绝不 flushRing——旧曲 EOS 触发时刻 ring 里仍可能有
+        // ~1.5s + 120ms 在途 ≈ 2 秒旧曲尾部没播完，flush 会整段丢弃（听感"歌尾
+        // 被切"）。这里不需要动任何状态：若新曲 PTS 与锚点+已写帧偏差 > 200ms，
+        // handleBuffer 的偏差检测会用补偿式 anchorTo 重锚（见上）；若 PTS 连续
+        // （ExoPlayer 跨 period 的 stream offset 机制），什么都不做才是正确的。
     }
 
     /** 计算位置用的采样率：USB 协商出的实际速率优先（playedFrames 按它推进）。 */
@@ -259,6 +298,12 @@ class LibusbAudioSink(
             // PTS 重新建立，不得用 UNSET 把它覆盖掉。
             playedFramesBase = driver.playedFrames()
             if (pausedPositionUs != C.TIME_UNSET) startTimeUs = pausedPositionUs
+            // 重锚 epoch 同步：漂移检测的 expected = 锚点 PTS + 锚点时积压 + 此后已写帧。
+            // play() 把锚点改写成冻结的"位置"值（换了坐标系），必须把已写帧清零、积压
+            // 刷成 ring 当前实况，恢复后首个 buffer 的 expected 才贴合流时间线；否则会
+            // 偏差"暂停前已播放时长"（可远超 200ms），每次恢复都白重锚一次。
+            framesWritten = 0L
+            backlogFramesAtAnchor = driver.pendingFrames()
             pausedPositionUs = C.TIME_UNSET
             // 看门狗在暂停期间没被喂（见 handleBuffer 的 pausedByUser 判断），
             // lastAdvanceNs 是暂停前的旧值；不重置会在恢复后立即被判定为"卡死太久"。
@@ -269,8 +314,13 @@ class LibusbAudioSink(
     override fun flush() {
         super.flush()
         if (bypassActive) {
+            // 播放中途的 flush = ExoPlayer 强行清空 ring（seek/重定向/出错恢复），
+            // 属预期路径（seek 必经此路），记 info 留排查线索。
+            Log.i(TAG, "sink flush（bypass 激活中）")
             driver.flushRing()
             framesWritten = 0L
+            // ring 已清空：重锚 epoch 同步清零，expected 公式退化为"锚点 + 已写帧"。
+            backlogFramesAtAnchor = 0L
             playedFramesBase = driver.playedFrames()
             startTimeUs = C.TIME_UNSET
             // seek 会经 onPositionReset → flush：暂停中的拖动进度条也走这条路。
@@ -407,8 +457,16 @@ class LibusbAudioSink(
 
     companion object {
         private const val TAG = "LibusbAudioSink"
-        private const val ISO_WARMUP_NS = 400_000_000L
-        private const val ISO_STALL_NS = 400_000_000L
+        // 暖机：start_stream 后要经历 120ms 在途静音预卷 + 300ms ring 预缓冲，
+        // 真实数据到设备前 playedFrames 不推进，400ms 太紧会误判；800ms 留余量。
+        private const val ISO_WARMUP_NS = 800_000_000L
+
+        // 卡死判定阈值：真机日志证实前台重负载会把事件线程（即使 nice -16）
+        // 饿出 0.4~1s 的调度空隙。400ms 会把"暂时饿着"误判成"泵死了"，触发
+        // flushRing 丢弃 ring 里 ~1.5s 未播音频 + 重启流 = 听感"往后跳两秒"。
+        // 放宽到 1500ms：短暂饥饿自愈（在途队列 ~120ms 撑住设备端，恢复后续播
+        // ring 数据，不丢内容不跳秒）；泵真死也只晚 1.1s 回退，代价可接受。
+        private const val ISO_STALL_NS = 1_500_000_000L
         private const val PREFERRED_FLOAT_OUTPUT_BITS = 32
         private val FALLBACK_FLOAT_OUTPUT_BITS = intArrayOf(24, 16)
 

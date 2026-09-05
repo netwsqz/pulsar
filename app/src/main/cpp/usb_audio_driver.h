@@ -142,8 +142,17 @@ class UsbAudioDriver {
   bool is_thread_leaked() const { return thread_leaked_; }
 
  private:
-  static constexpr int kNumTransfers = 8;   // 在途传输数（缓冲深度）
-  static constexpr int kNumPackets = 8;     // 每个传输的等时包数
+  // 在途传输深度按目标时长动态计算（start_stream）：高速时序每个传输携带
+  // 1ms 音频（8 微帧 × 125µs），全速为 8ms（8 帧 × 1ms）。固定 16 个在高速
+  // 设备上只有 16ms 在途——事件线程被前台负载饿出 >16ms 的调度空隙，内核
+  // 等时队列即耗尽，设备端补零（爆音）；饿超看门狗阈值还会触发回退重启
+  // （听感=往后跳秒）。按时长取深度（~120ms）只加队列长度，不改每包时序，
+  // 包级节奏仍由内核等时调度保证。上限防极端内存/延迟（seek 后在途旧音频
+  // 尾巴的时长 = 在途时长），下限保底抗抖。
+  static constexpr int kNumPackets = 8;  // 每个传输的等时包数
+  static constexpr int kInFlightTargetMs = 120;  // 在途缓冲目标时长
+  static constexpr int kMinTransfers = 16;
+  static constexpr int kMaxTransfers = 128;
   static constexpr uint64_t kQ16Unit = 65536ULL;
   static constexpr int kMaxConsecutiveFailures = 3;  // 连续失败上限，触发即停泵
   static constexpr int kDiagMaxCallbacks = 16;  // 一次性诊断：仅打印前若干次回调
@@ -173,6 +182,9 @@ class UsbAudioDriver {
   int bytes_per_frame_ = 0;
   uint64_t frames_per_uframe_q16_ = 0;
   int max_packet_size_ = 0;
+  // 本流在途传输数（build_pump 按速度时序算出：目标 ~kInFlightTargetMs 的
+  // 音频深度，钳位 [kMinTransfers, kMaxTransfers]）。池/缓冲均按它分配。
+  int num_transfers_ = kMinTransfers;
 
   // 预缓冲：流启动/重启后先让 ring 累积到 prebuffer_target_bytes_ 再开始向 DAC
   // 送真实数据，避免 ring 从 0 开始、没填满就播导致的切歌/恢复失真。

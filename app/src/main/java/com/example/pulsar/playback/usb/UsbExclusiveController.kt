@@ -181,6 +181,18 @@ class UsbExclusiveController(context: Context) : UsbExclusiveDriver {
 
     override fun startStream(sampleRate: Int, bitsPerSample: Int, channels: Int): Int = synchronized(nativeLock) {
         if (handle == 0L) return@synchronized UsbNativeDriver.Error.INIT.code
+        // 同参数复用：切歌（新媒体源重新 configure → engage）时采样率/位深/声道若与
+        // 当前流完全一致，重启泵毫无必要——native start_stream() 会重置 ring 读写
+        // 指针，把旧曲未播的尾部（ring ≈1s + 120ms 在途）整段丢弃，听感即"歌尾被
+        // 切"。此处直接复用现有流：旧曲尾部播完，新曲数据无缝续上（与系统
+        // AudioTrack 跨媒体项保留缓冲的行为一致）。仅格式变化时才真正重启。
+        if (streaming && currentSampleRate == sampleRate &&
+            selectedFormat?.bitsPerSample == bitsPerSample &&
+            selectedFormat?.channels == channels
+        ) {
+            Log.i(TAG, "USB stream reuse: 同格式切歌复用现有流 rate=$sampleRate")
+            return@synchronized 0
+        }
         val format = negotiateFormat(sampleRate, bitsPerSample, channels)
         if (format == null) {
             Log.w(

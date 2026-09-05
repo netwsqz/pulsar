@@ -1,8 +1,11 @@
 #include "usb_audio_driver.h"
 
 #include <algorithm>
-#include <cmath>
+#include <cerrno>
 #include <cstring>
+
+#include <sys/prctl.h>
+#include <sys/resource.h>
 
 #include <android/log.h>
 
@@ -211,7 +214,7 @@ UsbAudioDriver::Error UsbAudioDriver::start_stream(
   // 提交初始传输（事件线程最后再启动，提交阶段没有回调竞争）。
   pumping_.store(true, std::memory_order_release);
   in_flight_.store(0, std::memory_order_release);
-  for (int i = 0; i < kNumTransfers; i++) {
+  for (int i = 0; i < num_transfers_; i++) {
     if (submit(i) != 0) {
       LOGE("submit initial transfer %d failed", i);
       pumping_.store(false, std::memory_order_release);
@@ -343,11 +346,23 @@ void UsbAudioDriver::cleanup() {
 }
 
 UsbAudioDriver::Error UsbAudioDriver::build_pump() {
+  // 在途深度按时长算：高速时序每传输 1ms 音频（8 微帧×125µs），全速 8ms。
+  // 固定 16 个在高速设备只有 16ms 余量，前台负载一饿事件线程即断流（见头文件
+  // 常量注释）。目标 ~120ms，钳位防极端。
+  const int ms_per_transfer = is_high_speed_ ? 1 : 8;
+  num_transfers_ = kInFlightTargetMs / ms_per_transfer;
+  if (num_transfers_ < kMinTransfers) num_transfers_ = kMinTransfers;
+  if (num_transfers_ > kMaxTransfers) num_transfers_ = kMaxTransfers;
+  LOGW("iso pump depth: %d transfers x %d packets (%dms in-flight, %s timing)",
+       num_transfers_, kNumPackets, num_transfers_ * ms_per_transfer,
+       is_high_speed_ ? "high" : "full");
+
   // ring buffer：bypass 到 USB 泵后，ExoPlayer 的 AudioTrack 缓冲被绕过，有效
-  // 音频缓冲就只剩这个 ring。按传输几何算出的下限（约 2 倍在途数据）只有 ~186ms，
-  // 扛不住 Jellyfin 网络流的解码/网络抖动，ring 反复见底补零 → 失真。改为按真实
-  // 字节率取约 1 秒的目标容量（对齐系统 sink 的抗抖动能力），并保证不小于在途下限。
-  const uint64_t in_flight_min = 2ull * kNumTransfers * kNumPackets * max_packet_size_;
+  // 音频缓冲就只剩这个 ring。按传输几何算出的下限（约 2 倍在途数据）只有
+  // ~250ms，扛不住 Jellyfin 网络流的解码/网络抖动，ring 反复见底补零 → 失真。
+  // 按真实字节率取约 1 秒的目标容量（对齐系统 sink 的抗抖动能力），并保证
+  // 不小于在途下限。
+  const uint64_t in_flight_min = 2ull * num_transfers_ * kNumPackets * max_packet_size_;
   const uint64_t one_second_bytes =
       static_cast<uint64_t>(sample_rate_) * static_cast<uint64_t>(bytes_per_frame_);
   const uint64_t ring_size_u64 = std::max(in_flight_min, one_second_bytes);
@@ -358,12 +373,12 @@ UsbAudioDriver::Error UsbAudioDriver::build_pump() {
 
   // 传输池：每个 transfer 一块固定缓冲（kNumPackets * maxPacketSize）
   const uint32_t transfer_capacity = kNumPackets * max_packet_size_;
-  transfer_buffers_.resize(kNumTransfers * transfer_capacity);
-  contexts_.resize(kNumTransfers);
-  transfers_.assign(kNumTransfers, nullptr);
-  transfer_frames_.assign(kNumTransfers, 0);
-  failure_counts_.assign(kNumTransfers, 0);
-  for (int i = 0; i < kNumTransfers; i++) {
+  transfer_buffers_.resize(num_transfers_ * transfer_capacity);
+  contexts_.resize(num_transfers_);
+  transfers_.assign(num_transfers_, nullptr);
+  transfer_frames_.assign(num_transfers_, 0);
+  failure_counts_.assign(num_transfers_, 0);
+  for (int i = 0; i < num_transfers_; i++) {
     libusb_transfer* t = libusb_alloc_transfer(kNumPackets);
     if (t == nullptr) {
       LOGE("libusb_alloc_transfer(%d) failed", kNumPackets);
@@ -381,6 +396,16 @@ UsbAudioDriver::Error UsbAudioDriver::build_pump() {
 }
 
 void UsbAudioDriver::event_loop() {
+  // 命名线程便于 /proc/<pid>/task/<tid>/comm 与 logcat 线程名排查调度问题。
+  prctl(PR_SET_NAME, "pulsar-usb-iso", 0, 0, 0);
+  // 音频优先级（nice -16，等价 Java 侧 Process.setThreadPriority(
+  // THREAD_PRIORITY_AUDIO)）：libusb 事件线程必须每几毫秒补投在途 URB，
+  // 后台 cgroup 限流下默认 nice 0 的裸线程会被饿出 >64ms 调度空隙，
+  // 恰好等于在途缓冲总量 → underrun 补零（爆音）。setpriority 对自己
+  // 进程的线程总是允许的，失败也无碍（仅日志）。
+  if (setpriority(PRIO_PROCESS, 0, -16) != 0) {
+    LOGW("setpriority(-16) failed: %s", strerror(errno));
+  }
   while (true) {
     struct timeval tv = {0, 100000};  // 100ms 超时，便于及时退出
     int rc = libusb_handle_events_timeout(ctx_, &tv);

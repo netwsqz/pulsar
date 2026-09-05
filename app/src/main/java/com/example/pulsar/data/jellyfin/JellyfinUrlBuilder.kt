@@ -101,7 +101,9 @@ class JellyfinUrlBuilder(baseUrl: String) {
         return values[0] == 10 ||
             values[0] == 127 ||
             (values[0] == 172 && values[1] in 16..31) ||
-            (values[0] == 192 && values[1] == 168)
+            (values[0] == 192 && values[1] == 168) ||
+            // CGNAT 保留段 100.64.0.0/10：Tailscale 等 VPN 虚拟局域网地址
+            (values[0] == 100 && values[1] in 64..127)
     }
 
     private fun isPrivateIpv6(host: String): Boolean {

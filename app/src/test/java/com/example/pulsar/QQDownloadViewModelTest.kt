@@ -164,6 +164,40 @@ class QQDownloadViewModelTest {
     }
 
     @Test
+    fun `manual credential refresh succeeds and shows feedback`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(health = QQHealthResponse(ok = true, ffmpegReady = true))
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.refreshCredential()
+        advanceUntilIdle()
+
+        assertEquals(1, api.retryCredentialCalls)
+        assertFalse(viewModel.state.value.credentialExpired)
+        assertTrue(viewModel.state.value.credentialMessage!!.contains("已刷新"))
+    }
+
+    @Test
+    fun `manual credential refresh failure does not flag expired`() = runTest {
+        // 提取不到新凭证 ≠ 当前凭证过期（常见：电脑上没开 QQ 音乐客户端），
+        // 手动刷新失败不该点亮过期横幅，只提示原因。
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            retryCredentialError = QQDownloadError.CredentialExpired("提取失败: QQ 音乐客户端未运行")
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.refreshCredential()
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.credentialExpired)
+        assertTrue(viewModel.state.value.errorMessage!!.contains("QQ 音乐客户端"))
+    }
+
+    @Test
     fun `unreachable service shows connect hint`() = runTest {
         val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
         val api = FakeQQApi(healthError = QQDownloadError.ServiceUnreachable(IllegalStateException()))
@@ -262,7 +296,8 @@ class QQDownloadViewModelTest {
         var albums: List<QQAlbumDto> = emptyList(),
         var albumCount: Int = 0,
         var jobs: List<QQJobDto> = emptyList(),
-        var searchError: Throwable? = null
+        var searchError: Throwable? = null,
+        var retryCredentialError: Throwable? = null
     ) : QQDownloadApi {
         var healthCalls = 0
         var searchQueries = mutableListOf<String>()
@@ -307,6 +342,7 @@ class QQDownloadViewModelTest {
         override suspend fun retryCredential(): Result<Unit> {
             retryCredentialCalls++
             searchError = null
+            retryCredentialError?.let { return Result.failure(it) }
             return Result.success(Unit)
         }
     }

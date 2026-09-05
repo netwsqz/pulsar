@@ -1,5 +1,6 @@
 package com.example.pulsar
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,9 +17,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -59,6 +62,7 @@ internal fun QQDownloadScreen(
     onDownloadSong: (QQSongDto) -> Unit,
     onDownloadAlbum: (QQAlbumDto) -> Unit,
     onRetryCredential: () -> Unit,
+    onRefreshCredential: () -> Unit,
     onRefreshJobs: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -122,7 +126,10 @@ internal fun QQDownloadScreen(
         // 默认下载音质：下载时优先用这档，音源没有则自动降级。
         item {
             Row(
-                Modifier.fillMaxWidth(),
+                // 标签 + 4 个 chip 在窄屏放不下，整行可横向滚动（同顶部玻璃岛 chip 行的做法）。
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -144,6 +151,10 @@ internal fun QQDownloadScreen(
                     )
                 }
             }
+        }
+        // 手动一键刷新凭证：只在已连接且未过期时显示（过期时顶部横幅已有重试按钮）。
+        if (state.serviceReachable && !state.credentialExpired) {
+            item { CredentialRefreshRow(state, onRefreshCredential) }
         }
         if (state.isSearching) {
             item {
@@ -255,6 +266,37 @@ private fun CredentialExpiredCard(
                 Spacer(Modifier.width(8.dp))
             }
             Text("重试提取凭证")
+        }
+    }
+}
+
+/** 手动刷新凭证行：连接成功后随时可点；成功反馈显示在按钮旁。 */
+@Composable
+private fun CredentialRefreshRow(
+    state: QQDownloadUiState,
+    onRefreshCredential: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        TextButton(onClick = onRefreshCredential, enabled = !state.isRetryingCredential) {
+            if (state.isRetryingCredential) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            } else {
+                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+            }
+            Text("刷新凭证")
+        }
+        if (state.credentialMessage != null) {
+            Text(
+                state.credentialMessage,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
     }
 }

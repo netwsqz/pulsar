@@ -188,6 +188,37 @@ class QQDownloadViewModel(
         }
     }
 
+    /** 手动一键刷新凭证：连接后随时可用（比如刚在电脑上重新登录了 QQ 音乐）。 */
+    fun refreshCredential() {
+        val currentApi = api ?: return
+        viewModelScope.launch(dispatcher) {
+            _state.value = _state.value.copy(isRetryingCredential = true, credentialMessage = null, errorMessage = null)
+            currentApi.retryCredential().fold(
+                onSuccess = {
+                    _state.value = _state.value.copy(
+                        isRetryingCredential = false,
+                        credentialExpired = false,
+                        credentialMessage = "凭证已刷新"
+                    )
+                },
+                onFailure = { error ->
+                    // 提取不到新凭证 ≠ 当前凭证过期（常见：电脑上没开 QQ 音乐客户端），
+                    // 所以这里不点亮过期横幅，只提示原因。
+                    _state.value = _state.value.copy(isRetryingCredential = false)
+                    _state.value = _state.value.copy(
+                        errorMessage = when (error) {
+                            is QQDownloadError.CredentialExpired ->
+                                "刷新凭证失败：请确认电脑上 QQ 音乐客户端正在运行并已登录"
+                            is QQDownloadError.ServiceUnreachable ->
+                                "连不上下载服务：确认电脑上已启动（start.bat），且手机和电脑在同一网络"
+                            else -> "刷新凭证失败，请稍后重试"
+                        }
+                    )
+                }
+            )
+        }
+    }
+
     fun refreshJobs() {
         val currentApi = api ?: return
         viewModelScope.launch(dispatcher) {
@@ -311,5 +342,7 @@ data class QQDownloadUiState(
     /** 正在入队的专辑 mid：只有对应专辑行显示转圈，避免多专辑同时点全转。 */
     val enqueuingAlbumMid: String? = null,
     val isRetryingCredential: Boolean = false,
+    /** 最近一次手动刷新凭证的反馈（如「凭证已刷新」），下一次刷新开始时清除。 */
+    val credentialMessage: String? = null,
     val errorMessage: String? = null
 )

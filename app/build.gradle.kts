@@ -99,6 +99,7 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json:3.0.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.palette:palette-ktx:1.0.0") // 封面主色提取（动态背景渐变）
     implementation("io.github.kyant0:backdrop:1.0.0")
     implementation("sh.calvin.reorderable:reorderable:3.1.0")
 

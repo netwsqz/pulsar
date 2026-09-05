@@ -1,7 +1,10 @@
 package com.example.pulsar
 
 import android.app.Application
+import android.view.HapticFeedbackConstants
+import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.PulsarTheme
+import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,12 +15,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
@@ -35,9 +41,13 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -50,7 +60,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
@@ -59,17 +68,18 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -79,18 +89,18 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
@@ -105,6 +115,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHost
@@ -119,6 +131,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -128,15 +141,17 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.ColorPainter
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -144,6 +159,7 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -154,6 +170,8 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.coerceAtMost
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -167,8 +185,6 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
-import sh.calvin.reorderable.ReorderableItem
-import sh.calvin.reorderable.rememberReorderableLazyListState
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
@@ -181,10 +197,10 @@ import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackMode
-import com.example.pulsar.playback.PlaybackOutputInfo
 import com.example.pulsar.playback.SilenceSkipMediaCommands
 import com.example.pulsar.playback.SleepTimer
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
+import java.time.LocalDate
 import com.example.pulsar.playback.buildPlaybackOrder
 import com.example.pulsar.playback.formatPosition
 import com.example.pulsar.playback.playbackModeConfig
@@ -206,6 +222,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.rememberReorderableLazyListState
 
 class MainActivity : ComponentActivity() {
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -271,8 +289,14 @@ private fun ErrorState(
     Column(
         modifier = modifier.padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        Icon(
+            imageVector = Icons.Filled.CloudOff,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        )
         Text(
             text = message,
             color = MaterialTheme.colorScheme.error,
@@ -289,12 +313,74 @@ private fun EmptyState(
     message: String,
     modifier: Modifier = Modifier
 ) {
-    Text(
-        text = message,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = modifier.padding(16.dp)
+    Column(
+        modifier = modifier.padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Filled.MusicNote,
+            contentDescription = null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        )
+        Text(
+            text = message,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+/** 骨架占位块的共享扫光进度（0f..1f 循环）：一处骨架屏取一次、传给它所有的占位块，
+ * 避免每个占位块各起一套 infinite transition；所有块同步扫光，视觉上是一整片微光扫过。 */
+@Composable
+private fun rememberSkeletonShimmer(): Float {
+    val transition = rememberInfiniteTransition(label = "skeletonShimmer")
+    val progress by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
+        label = "skeletonShimmerProgress"
+    )
+    return progress
+}
+
+/** 带微光扫过的骨架占位块：surfaceVariant 底色 + 一条左→右扫过的白色微光（峰值 alpha 0.15）。
+ * 所有骨架屏（网格卡片、详情页头部/曲目行）统一用它。shape 传 null 时保持直角。 */
+@Composable
+private fun SkeletonBox(
+    modifier: Modifier = Modifier,
+    progress: Float = rememberSkeletonShimmer(),
+    shape: Shape? = null
+) {
+    // 扫光位置从 -0.5 到 1.5：让光带完整进出占位块，两端不出现生硬截断。
+    val x = progress * 2f - 0.5f
+    Box(
+        modifier
+            .background(MaterialTheme.colorScheme.surfaceVariant, shape ?: RectangleShape)
+            .drawWithCache {
+                val bandWidth = size.width.coerceAtLeast(1f)
+                val start = Offset(x * size.width - bandWidth * 0.5f, 0f)
+                val end = Offset(start.x + bandWidth, size.height)
+                val scrim = Brush.linearGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0f),
+                        Color.White.copy(alpha = 0.15f),
+                        Color.White.copy(alpha = 0f)
+                    ),
+                    start = start,
+                    end = end
+                )
+                onDrawBehind { drawRect(scrim) }
+            }
     )
 }
+
+/** 专辑/播放列表卡片的 1dp 描边色：浅色主题用深色低透明细线（白描边在浅底上不可见），
+ * 深色主题用白色低透明细线——两个主题下都是「比表面深/浅一点」的层次。 */
+@Composable
+private fun cardBorderColor(): Color = if (isSystemInDarkTheme()) Color(0x1AFFFFFF) else Color(0x14888888)
+
+
 @Composable
 private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
     Column(
@@ -435,12 +521,34 @@ private fun MusicLibraryScreen(
             else -> section = LibrarySection.Discover
         }
     }
-    // 背景渐变：液态玻璃风格，顶部浅紫蓝渐变到底部白色，营造空气感和深度。
-    val backgroundBrush = Brush.verticalGradient(
-        0f to MaterialTheme.colorScheme.primaryContainer,
-        0.3f to MaterialTheme.colorScheme.surfaceVariant,
-        1f to MaterialTheme.colorScheme.background
+    // 全屏播放页开关：迷你播放条点击打开，收起按钮 / 返回键关闭。
+    var showNowPlaying by remember { mutableStateOf(false) }
+    // 迷你播放条小展开面板开关：展开时 Snackbar 上移让位。
+    var playerExpanded by remember { mutableStateOf(false) }
+    // 全屏播放页打开次数编号：作为 NowPlayingScreen 的 key，每次打开强制重建组合，
+    // 页内手势状态（dragOffset 等）从零开始，不会被上一次退出残留污染。
+    var nowPlayingSession by remember { mutableStateOf(0) }
+    // 全屏播放页打开时，返回键先收起全屏页（后组合的 BackHandler 优先响应）。
+    if (showNowPlaying) {
+        BackHandler { showNowPlaying = false }
+    }
+    // 背景渐变：跟随当前播放封面主色的柔和渐变（无封面/黑白封面回主题默认色），切歌约 0.8s 平滑过渡。
+    // 动画期间 Brush 逐帧更新，玻璃条的模糊层（rememberLayerBackdrop 按其捕获的 brush 失效）同步重录。
+    val coverGradient = rememberCoverGradient(
+        coverRequest = currentTrack?.let(viewModel::trackCover),
+        darkTheme = isSystemInDarkTheme()
     )
+    val gradientSpec = tween<Color>(800)
+    val coverTop by animateColorAsState(coverGradient.top, gradientSpec, label = "coverGradientTop")
+    val coverMiddle by animateColorAsState(coverGradient.middle, gradientSpec, label = "coverGradientMiddle")
+    val coverBottom by animateColorAsState(coverGradient.bottom, gradientSpec, label = "coverGradientBottom")
+    val backgroundBrush = Brush.verticalGradient(
+        0f to coverTop,
+        0.3f to coverMiddle,
+        1f to coverBottom
+    )
+    // 全屏播放页同款背景：传动画后的三色，切歌时全屏背景跟着 800ms 过渡。
+    val animatedCoverGradient = CoverGradient(top = coverTop, middle = coverMiddle, bottom = coverBottom)
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
     Box(Modifier.fillMaxSize().background(backgroundBrush)) {
         val backdrop = rememberLayerBackdrop {
@@ -472,8 +580,14 @@ private fun MusicLibraryScreen(
                 when (s) {
                     LibrarySection.Discover -> DiscoverContent(
                         state = state,
+                        tracks = tracks,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
+                        trackCoverFor = viewModel::trackCover,
+                        onPlayTrack = onPlayTrack,
+                        onAddToQueue = onAddToQueue,
+                        currentTrackId = currentTrack?.id,
+                        isPlaying = controllerState.isPlaying,
                         onRefresh = viewModel::refreshDiscoverAlbums,
                         onRetry = viewModel::loadDiscoverAlbums,
                         modifier = Modifier.fillMaxSize()
@@ -486,6 +600,7 @@ private fun MusicLibraryScreen(
                         onLocalAudio = { localAudioLauncher.launch(arrayOf("audio/*")) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
+                        currentTrackId = currentTrack?.id,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Albums -> AlbumsContent(
@@ -513,6 +628,8 @@ private fun MusicLibraryScreen(
                         onAddToQueue = onAddToQueue,
                         onOpenAlbum = openAlbum,
                         onOpenPlaylist = openPlaylist,
+                        currentTrackId = currentTrack?.id,
+                        isPlaying = controllerState.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.QQDownload -> {
@@ -527,6 +644,7 @@ private fun MusicLibraryScreen(
                                 onDownloadSong = qq::downloadSong,
                                 onDownloadAlbum = qq::downloadAlbum,
                                 onRetryCredential = qq::retryCredential,
+                                onRefreshCredential = qq::refreshCredential,
                                 onRefreshJobs = qq::refreshJobs,
                                 modifier = Modifier.fillMaxSize()
                             )
@@ -540,6 +658,8 @@ private fun MusicLibraryScreen(
                         onAddToQueue = onAddToQueue,
                         albumCoverFor = viewModel::albumCover,
                         onRetry = { viewModel.loadAlbumTracks(s.album) },
+                        currentTrackId = currentTrack?.id,
+                        isPlaying = controllerState.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
@@ -550,6 +670,8 @@ private fun MusicLibraryScreen(
                         onAddToQueue = onAddToQueue,
                         playlistCoverFor = viewModel::playlistCover,
                         onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
+                        currentTrackId = currentTrack?.id,
+                        isPlaying = controllerState.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -589,6 +711,7 @@ private fun MusicLibraryScreen(
             )
         }
         // 底部玻璃播放条（悬浮）：四角全圆角，完整液态玻璃（模糊 + 透镜 + 高光）。
+        // 点整条 / 面板内全屏按钮打开全屏播放页；右侧箭头切换小展开面板（与全屏页并存）。
         MiniPlayerBar(
             backdrop = backdrop,
             controllerState = controllerState,
@@ -599,19 +722,49 @@ private fun MusicLibraryScreen(
             },
             currentTrack = currentTrack,
             coverFor = viewModel::trackCover,
+            onOpenFullScreen = {
+                nowPlayingSession++
+                showNowPlaying = true
+            },
+            onExpandedChange = { playerExpanded = it },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp)
         )
-        // Snackbar 提示（悬浮在播放条上方，显示「已添加到播放队列」反馈）。
+        // Snackbar 提示（悬浮在播放条上方，显示「已添加到播放队列」反馈）；
+        // 小展开面板展开时上移让位（面板含进度/队列约 320dp 高）。
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 80.dp)
+                .padding(bottom = 80.dp + if (playerExpanded) 320.dp else 0.dp)
                 .padding(horizontal = 12.dp)
         )
+        // 全屏播放页：盖在所有内容最上层，从底部滑入 / 滑出。
+        // session 编号作为 key：下滑手势收起时 dragOffset 停在松手位置不归零（供 exit 从松手处
+        // 无缝续滑），exit 期间重开页面会复用同一组合实例——key 变化强制重建，
+        // dragOffset 从 0 开始，页面不会停在屏外不可见。
+        AnimatedVisibility(
+            visible = showNowPlaying,
+            enter = slideInVertically(spring(dampingRatio = 0.8f, stiffness = 400f), initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(spring(dampingRatio = 0.8f, stiffness = 400f), targetOffsetY = { it }) + fadeOut()
+        ) {
+            key(nowPlayingSession) {
+                NowPlayingScreen(
+                    controllerState = controllerState,
+                    currentTrack = currentTrack,
+                    coverRequest = currentTrack?.let(viewModel::trackCover),
+                    gradientColors = animatedCoverGradient,
+                    playbackMode = playbackMode,
+                    onPlaybackModeChange = { mode ->
+                        playbackMode = mode
+                        controllerState.controller?.applyPlaybackMode(mode)
+                    },
+                    onClose = { showNowPlaying = false }
+                )
+            }
+        }
     }
 }
 
@@ -814,6 +967,7 @@ private fun TracksContent(
     onLocalAudio: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
+    currentTrackId: String?,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(
@@ -834,6 +988,8 @@ private fun TracksContent(
                 onClick = { onPlayTrack(tracks, track.id) },
                 onAddToQueue = { onAddToQueue(track) },
                 showDivider = index != tracks.lastIndex,
+                isCurrent = currentTrackId == track.id,
+                isPlaying = controllerState.isPlaying,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -841,34 +997,45 @@ private fun TracksContent(
 }
 
 /** 单曲行：小封面 + 标题（大）+ 作者（灰色小字）+ 底部灰色分隔线。取消卡片形式，列表更紧凑。
- * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。 */
+ * 当前播放曲目：标题高亮为品牌色，封面上叠一层半透明遮罩 + 均衡器跳动条（暂停时静止）。
+ * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。
+ * 手势用 combinedClickable（Material 水波纹按压反馈），长按触觉由框架内置；触点坐标由旁挂的
+ * 轻量 pointerInput 只观察不消费地记录，菜单仍锚定真实触点。 */
 @Composable
 private fun TrackRow(
     track: Track,
     cover: JellyfinRequest?,
     onClick: () -> Unit,
     showDivider: Boolean,
+    isCurrent: Boolean = false,
+    isPlaying: Boolean = false,
     onAddToQueue: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val hapticFeedback = LocalHapticFeedback.current
     var showMenu by remember { mutableStateOf(false) }
     var rowWindowOffset by remember { mutableStateOf(Offset.Zero) }
+    var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = {
+                        // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
+                        val windowOffset = rowWindowOffset + lastDownOffset
+                        menuOffset = IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt())
+                        showMenu = true
+                    }
+                )
+                // 轻量触点观察：只记下最近一次按下的局部坐标，不消费事件，不干扰 combinedClickable 的手势判定。
                 .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { onClick() },
-                        onLongPress = { localOffset ->
-                            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                            val windowOffset = rowWindowOffset + localOffset
-                            menuOffset = IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt())
-                            showMenu = true
-                        }
-                    )
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        lastDownOffset = down.position
+                    }
                 }
                 .onGloballyPositioned { coordinates ->
                     rowWindowOffset = coordinates.positionInWindow()
@@ -876,12 +1043,20 @@ private fun TrackRow(
                 .padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AlbumCover(cover, track.title, Modifier.size(48.dp))
+            Box {
+                AlbumCover(cover, track.title, Modifier.size(48.dp))
+                // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
+                if (isCurrent) {
+                    PlayingIndicatorOverlay(isPlaying = isPlaying, modifier = Modifier.matchParentSize())
+                }
+            }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     track.title,
                     style = MaterialTheme.typography.bodyLarge,
+                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致。
+                    color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -910,6 +1085,59 @@ private fun TrackRow(
             onDismiss = { showMenu = false }
         )
     }
+}
+
+/** 正在播放的封面指示层：淡深色遮罩 + 居中三根均衡器条。
+ * 播放中：条高在 4~14dp 间循环跳动（三根相位错开，单周期 800ms）；
+ * 暂停中：三根静止为固定高度（4/9/6dp），颜色转为 onSurfaceVariant。 */
+@Composable
+private fun PlayingIndicatorOverlay(
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val barColor = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    val transition = rememberInfiniteTransition(label = "playingBars")
+    // 单周期 800ms：偏慢一点，避免在列表里显得躁。
+    // InfiniteTransition 没有 animateDp 扩展，用 animateFloat 驱动 0f..1f 再映射到 4~14dp 高度。
+    val barSpec = infiniteRepeatable<Float>(
+        animation = tween<Float>(800, easing = LinearEasing),
+        repeatMode = RepeatMode.Reverse
+    )
+    val bar1 by transition.animateFloat(0f, 1f, barSpec, label = "bar1")
+    val bar2 by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween<Float>(800, easing = LinearEasing), RepeatMode.Reverse, StartOffset(400)),
+        label = "bar2"
+    )
+    val bar3 by transition.animateFloat(
+        0f, 1f,
+        infiniteRepeatable(tween<Float>(800, easing = LinearEasing), RepeatMode.Reverse, StartOffset(200)),
+        label = "bar3"
+    )
+    // 进度 0f..1f 线性映射到 4~14dp 高度。
+    fun barHeight(progress: Float): Dp = (4 + progress * 10).dp
+    Box(
+        modifier
+            .background(Color.Black.copy(alpha = 0.35f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            PlayingBar(if (isPlaying) barHeight(bar1) else 4.dp, barColor)
+            PlayingBar(if (isPlaying) barHeight(bar2) else 9.dp, barColor)
+            PlayingBar(if (isPlaying) barHeight(bar3) else 6.dp, barColor)
+        }
+    }
+}
+
+/** 单根均衡器条：固定 3dp 宽，高度由外部指定。 */
+@Composable
+private fun PlayingBar(height: Dp, color: Color) {
+    Box(
+        Modifier
+            .width(3.dp)
+            .height(height)
+            .background(color, RoundedCornerShape(1.5.dp))
+    )
 }
 
 /** 长按弹出的"添加到播放队列"上下文菜单。
@@ -981,18 +1209,22 @@ private fun AddToQueueMenu(
                     tonalElevation = 2.dp,
                     border = BorderStroke(
                         0.5.dp,
-                        Color.White.copy(alpha = 0.6f) // 浅色主题下的高光描边，玻璃质感。
+                        // 高光描边：浅色主题 0.6 营造玻璃质感；深色主题降到 0.25，避免过亮刺眼。
+                        Color.White.copy(alpha = if (isSystemInDarkTheme()) 0.25f else 0.6f)
                     )
                 ) {
                     Column(Modifier.fillMaxWidth()) {
                         var menuItemVisible by remember { mutableStateOf(false) }
                         LaunchedEffect(Unit) { menuItemVisible = true }
+                        // 加队列成功的轻触觉反馈。
+                        val menuView = LocalView.current
                         StaggeredMenuItem(
                             visible = menuItemVisible,
                             delayMs = 0,
                             icon = { Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
                             text = "添加到播放队列",
                             onClick = {
+                                menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                                 scope.launch {
                                     menuScale.animateTo(0.85f, tween(120))
                                     menuAlpha.animateTo(0f, tween(120))
@@ -1042,14 +1274,22 @@ private fun StaggeredMenuItem(
 }
 
 /**
- * 发现页：随机专辑网格 + 顶部标题栏（含"换一批"按钮）。首次进入时懒加载；点击换一批强制刷新。
- * 换一批请求进行中按钮转圈禁用；专辑网格换批后按批次内容做交叉淡入淡出，不硬切。
+ * 发现页：参考音乐 App 首页结构——顶部「每日推荐」单曲行（按天稳定随机 4 首，点击即播），
+ * 下方「随机专辑」横滑封面墙（3 张可见，点击进详情）。整个页面一个 LazyColumn 滚动。
+ * 「查看更多」跳全部音乐页；「换一批」重拉随机专辑。
+ * 首次进入时懒加载随机专辑；换一批请求进行中按钮转圈禁用；专辑换批后按批次内容做交叉淡入淡出，不硬切。
  */
 @Composable
 private fun DiscoverContent(
     state: JellyfinUiState,
+    tracks: List<Track>,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
+    trackCoverFor: (Track) -> JellyfinRequest?,
+    onPlayTrack: (List<Track>, String) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    currentTrackId: String?,
+    isPlaying: Boolean,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
@@ -1062,119 +1302,125 @@ private fun DiscoverContent(
         animationSpec = infiniteRepeatable(tween(800, easing = LinearEasing)),
         label = "discoverRefreshRotationValue"
     )
-    Column(
-        modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    // 每日推荐：按当天日期稳定随机挑 4 首（同一天内跨重启不变）。
+    // 下拉刷新递增变体编号，立刻换一批（挑选是纯本地计算，不等网络）。
+    var picksVariant by rememberSaveable { mutableStateOf(0) }
+    val dailyPicks = remember(tracks, picksVariant) {
+        discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
+    }
+    // 下拉刷新：Material3 PullToRefreshBox 包住整页；刷新是本地计算所以 isRefreshing 恒为 false，
+    // 指示器拉过阈值即自动收回，列表内容同步换批。
+    val pullRefreshState = rememberPullToRefreshState()
+    PullToRefreshBox(
+        isRefreshing = false,
+        onRefresh = {
+            picksVariant++
+            onRefresh()
+        },
+        state = pullRefreshState,
+        modifier = modifier.fillMaxSize()
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("发现", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            IconButton(
-                onClick = onRefresh,
-                enabled = !state.isLoading,
-                modifier = Modifier.size(48.dp)
+    LazyColumn(
+        modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.statusBars),
+        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = GlassIslandTopSpacing, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        // ── 每日推荐 ─────────────────────────────────────────────
+        item(key = "dailyHeader") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = "换一批专辑",
-                    modifier = if (state.isLoading) Modifier.rotate(refreshRotation) else Modifier
+                Text(
+                    "每日推荐",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val albums = state.discoverAlbums
-            when {
-                albums == null && state.isLoading -> {
-                    // 骨架屏：2列网格，与专辑页同款占位样式。
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(6) {
+        if (dailyPicks.isEmpty() && tracks.isEmpty()) {
+            item(key = "dailyEmpty") {
+                Text(
+                    "登录后这里会推荐当天的歌曲",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 12.dp)
+                )
+            }
+        }
+        itemsIndexed(dailyPicks, key = { _, t -> "daily-${t.id}" }) { index, track ->
+            TrackRow(
+                track = track,
+                cover = trackCoverFor(track),
+                onClick = { onPlayTrack(dailyPicks, track.id) },
+                onAddToQueue = { onAddToQueue(track) },
+                showDivider = index != dailyPicks.lastIndex,
+                isCurrent = currentTrackId == track.id,
+                isPlaying = isPlaying,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        // ── 随机专辑（横滑封面墙）──────────────────────────────────
+        item(key = "albumHeader") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "随机专辑",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = onRefresh,
+                    enabled = !state.isLoading,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Refresh,
+                        contentDescription = "换一批专辑",
+                        modifier = if (state.isLoading) Modifier.rotate(refreshRotation) else Modifier
+                    )
+                }
+            }
+        }
+        val albums = state.discoverAlbums
+        when {
+            albums == null && state.isLoading -> {
+                // 骨架屏：横滑占位卡（与旧网格骨架同款样式，改为一排 3 张）。
+                item(key = "albumSkeleton") {
+                    val shimmer = rememberSkeletonShimmer()
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        repeat(3) {
                             Card(
                                 modifier = Modifier
-                                    .fillMaxWidth()
+                                    .weight(1f)
                                     .border(
                                         width = 1.dp,
-                                        color = Color(0x33FFFFFF),
+                                        color = cardBorderColor(),
                                         shape = RoundedCornerShape(12.dp)
                                     ),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
                                 Column {
-                                    Box(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(1f)
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    SkeletonBox(
+                                        Modifier.fillMaxWidth().aspectRatio(1f),
+                                        progress = shimmer
                                     )
                                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Box(
-                                            Modifier
-                                                .fillMaxWidth(0.7f)
-                                                .height(16.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant,
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                        SkeletonBox(
+                                            Modifier.fillMaxWidth(0.7f).height(16.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
-                                        Box(
-                                            Modifier
-                                                .fillMaxWidth(0.5f)
-                                                .height(14.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                        SkeletonBox(
+                                            Modifier.fillMaxWidth(0.5f).height(14.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
-                else -> {
-                    val albumList = albums.orEmpty()
-                    // 换一批后按新批次内容淡入淡出替换，避免硬切；用本批专辑 id 拼接作为批次 key。
-                    val batchKey = albumList.joinToString(",") { it.id }
-                    Crossfade(targetState = batchKey, label = "discoverAlbumsBatch") {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(2),
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 96.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            items(albumList, key = { it.id }) { album ->
-                                Card(
-                                    onClick = { onOpenAlbum(album) },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .border(
-                                            width = 1.dp,
-                                            color = Color(0x33FFFFFF),
-                                            shape = RoundedCornerShape(12.dp)
-                                        ),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Column {
-                                        AlbumCover(coverFor(album), album.name, Modifier.fillMaxWidth().aspectRatio(1f))
-                                        Column(Modifier.padding(12.dp)) {
-                                            Text(album.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                            Text(
-                                                album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
-                                                style = MaterialTheme.typography.bodyMedium
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -1182,7 +1428,63 @@ private fun DiscoverContent(
                     }
                 }
             }
+            albums == null && state.errorMessage != null -> {
+                item(key = "albumError") { ErrorState(state.errorMessage, onRetry = onRetry) }
+            }
+            albums.orEmpty().isEmpty() -> {
+                item(key = "albumEmpty") { EmptyState("暂无专辑") }
+            }
+            else -> {
+                val albumList = albums.orEmpty()
+                // 换一批后按新批次内容淡入淡出替换，避免硬切；用本批专辑 id 拼接作为批次 key。
+                val batchKey = albumList.joinToString(",") { it.id }
+                item(key = "albumWall") {
+                    Crossfade(targetState = batchKey, label = "discoverAlbumsBatch") {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            contentPadding = PaddingValues(horizontal = 2.dp)
+                        ) {
+                            items(albumList, key = { it.id }) { album ->
+                                Column(
+                                    modifier = Modifier
+                                        .width(140.dp)
+                                        // 整列可点：点封面或文字都进专辑详情。
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .clickable { onOpenAlbum(album) },
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    AlbumCover(
+                                        coverFor(album),
+                                        album.name,
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                    )
+                                    Text(
+                                        album.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(top = 6.dp)
+                                    )
+                                    Text(
+                                        album.artist,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
     }
 }
 
@@ -1195,22 +1497,29 @@ private fun AlbumsContent(
     modifier: Modifier = Modifier
 ) {
     Column(
-        // 顶部只让出状态栏；玻璃岛的留位交给 grid 的 contentPadding，
-        // 这样滚动时专辑卡能滚到玻璃岛底下透过去（和底部播放条同款行为）。
+        // 顶部只让出状态栏；标题行自己给玻璃岛让位（padding top），
+        // grid 滚动时专辑卡仍能滚到玻璃岛底下透过去（和底部播放条同款行为）。
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 标题行：与发现页同款层级；专辑页没有「换一批」语义，只放标题。
+        Text(
+            "专辑",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - 8.dp)
+        )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val albums = state.albums
             when {
                 albums == null && state.isLoading -> {
                     // 骨架屏：2列网格，每个卡片显示占位方块
+                    val shimmer = rememberSkeletonShimmer()
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = GlassIslandTopSpacing, bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = 96.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -1220,36 +1529,32 @@ private fun AlbumsContent(
                                     .fillMaxWidth()
                                     .border(
                                         width = 1.dp,
-                                        color = Color(0x33FFFFFF),
+                                        color = cardBorderColor(),
                                         shape = RoundedCornerShape(12.dp)
                                     ),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
                                 Column {
-                                    Box(
+                                    SkeletonBox(
                                         Modifier
                                             .fillMaxWidth()
-                                            .aspectRatio(1f)
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .aspectRatio(1f),
+                                        progress = shimmer
                                     )
                                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Box(
+                                        SkeletonBox(
                                             Modifier
                                                 .fillMaxWidth(0.7f)
-                                                .height(16.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant,
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                                .height(16.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
-                                        Box(
+                                        SkeletonBox(
                                             Modifier
                                                 .fillMaxWidth(0.5f)
-                                                .height(14.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                                .height(14.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
                                     }
                                 }
@@ -1264,7 +1569,7 @@ private fun AlbumsContent(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = GlassIslandTopSpacing, bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = 96.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -1275,7 +1580,7 @@ private fun AlbumsContent(
                                     .fillMaxWidth()
                                     .border(
                                         width = 1.dp,
-                                        color = Color(0x33FFFFFF),
+                                        color = cardBorderColor(),
                                         shape = RoundedCornerShape(12.dp)
                                     ),
                                 shape = RoundedCornerShape(12.dp)
@@ -1299,6 +1604,37 @@ private fun AlbumsContent(
     }
 }
 
+/** 专辑/播放列表详情页加载骨架：复刻真实头部结构（120dp 封面方块 + 右侧两根文字条），
+ * 下方 6 个与 TrackRow 同构的占位行（48dp 方块 + 两根文字条）。专辑与播放列表详情共用。 */
+@Composable
+private fun AlbumDetailSkeleton(modifier: Modifier = Modifier) {
+    val shimmer = rememberSkeletonShimmer()
+    Column(modifier.fillMaxSize()) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            SkeletonBox(Modifier.size(120.dp), progress = shimmer, shape = RoundedCornerShape(8.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SkeletonBox(Modifier.fillMaxWidth(0.7f).height(16.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
+                SkeletonBox(Modifier.fillMaxWidth(0.5f).height(14.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
+            }
+        }
+        Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(6) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SkeletonBox(Modifier.size(48.dp), progress = shimmer, shape = RoundedCornerShape(8.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        SkeletonBox(Modifier.fillMaxWidth(0.9f).height(16.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
+                        SkeletonBox(Modifier.fillMaxWidth(0.5f).height(12.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AlbumDetailContent(
     state: JellyfinUiState,
@@ -1308,6 +1644,8 @@ private fun AlbumDetailContent(
     onAddToQueue: (Track) -> Unit,
     albumCoverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
+    currentTrackId: String?,
+    isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -1328,7 +1666,7 @@ private fun AlbumDetailContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val albumTracks = state.albumTracks
             when {
-                albumTracks == null && state.isLoading -> CircularProgressIndicator()
+                albumTracks == null && state.isLoading -> AlbumDetailSkeleton(Modifier.fillMaxSize())
                 albumTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albumTracks.orEmpty().isEmpty() -> EmptyState("该专辑暂无歌曲")
                 else -> {
@@ -1345,6 +1683,8 @@ private fun AlbumDetailContent(
                                 onClick = { onPlayTrack(trackList, track.id) },
                                 onAddToQueue = { onAddToQueue(track) },
                                 showDivider = index != trackList.lastIndex,
+                                isCurrent = currentTrackId == track.id,
+                                isPlaying = isPlaying,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
@@ -1364,22 +1704,29 @@ private fun PlaylistsContent(
     modifier: Modifier = Modifier
 ) {
     Column(
-        // 顶部只让出状态栏；玻璃岛的留位交给 grid 的 contentPadding，
-        // 这样滚动时播放列表卡能滚到玻璃岛底下透过去（和底部播放条同款行为）。
+        // 顶部只让出状态栏；标题行自己给玻璃岛让位（padding top），
+        // grid 滚动时播放列表卡仍能滚到玻璃岛底下透过去（和底部播放条同款行为）。
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // 标题行：与发现页同款层级；播放列表页没有「换一批」语义，只放标题。
+        Text(
+            "播放列表",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - 8.dp)
+        )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val playlists = state.playlists
             when {
                 playlists == null && state.isLoading -> {
                     // 骨架屏：2列网格
+                    val shimmer = rememberSkeletonShimmer()
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = GlassIslandTopSpacing, bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = 96.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -1389,36 +1736,32 @@ private fun PlaylistsContent(
                                     .fillMaxWidth()
                                     .border(
                                         width = 1.dp,
-                                        color = Color(0x33FFFFFF),
+                                        color = cardBorderColor(),
                                         shape = RoundedCornerShape(12.dp)
                                     ),
                                 shape = RoundedCornerShape(12.dp)
                             ) {
                                 Column {
-                                    Box(
+                                    SkeletonBox(
                                         Modifier
                                             .fillMaxWidth()
-                                            .aspectRatio(1f)
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                            .aspectRatio(1f),
+                                        progress = shimmer
                                     )
                                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Box(
+                                        SkeletonBox(
                                             Modifier
                                                 .fillMaxWidth(0.7f)
-                                                .height(16.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant,
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                                .height(16.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
-                                        Box(
+                                        SkeletonBox(
                                             Modifier
                                                 .fillMaxWidth(0.5f)
-                                                .height(14.dp)
-                                                .background(
-                                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                                    RoundedCornerShape(4.dp)
-                                                )
+                                                .height(14.dp),
+                                            progress = shimmer,
+                                            shape = RoundedCornerShape(4.dp)
                                         )
                                     }
                                 }
@@ -1433,7 +1776,7 @@ private fun PlaylistsContent(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(top = GlassIslandTopSpacing, bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = 96.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
@@ -1444,7 +1787,7 @@ private fun PlaylistsContent(
                                     .fillMaxWidth()
                                     .border(
                                         width = 1.dp,
-                                        color = Color(0x33FFFFFF),
+                                        color = cardBorderColor(),
                                         shape = RoundedCornerShape(12.dp)
                                     ),
                                 shape = RoundedCornerShape(12.dp)
@@ -1481,6 +1824,8 @@ private fun SearchContent(
     onAddToQueue: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
+    currentTrackId: String?,
+    isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -1541,6 +1886,8 @@ private fun SearchContent(
                                     onClick = { onPlayTrack(searchResults.tracks, track.id) },
                                     onAddToQueue = { onAddToQueue(track) },
                                     showDivider = index != searchResults.tracks.lastIndex,
+                                    isCurrent = currentTrackId == track.id,
+                                    isPlaying = isPlaying,
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }
@@ -1643,6 +1990,8 @@ private fun PlaylistDetailContent(
     onAddToQueue: (Track) -> Unit,
     playlistCoverFor: (Playlist) -> JellyfinRequest?,
     onRetry: () -> Unit,
+    currentTrackId: String?,
+    isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -1663,7 +2012,7 @@ private fun PlaylistDetailContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val playlistTracks = state.playlistTracks
             when {
-                playlistTracks == null && state.isLoading -> CircularProgressIndicator()
+                playlistTracks == null && state.isLoading -> AlbumDetailSkeleton(Modifier.fillMaxSize())
                 playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 playlistTracks.orEmpty().isEmpty() -> EmptyState("该播放列表暂无歌曲")
                 else -> {
@@ -1680,6 +2029,8 @@ private fun PlaylistDetailContent(
                                 onClick = { onPlayTrack(trackList, track.id) },
                                 onAddToQueue = { onAddToQueue(track) },
                                 showDivider = index != trackList.lastIndex,
+                                isCurrent = currentTrackId == track.id,
+                                isPlaying = isPlaying,
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
@@ -1788,7 +2139,7 @@ private fun SettingsContent(
                 enabled = controller != null
             )
         }
-        // 定时关闭：拖动滑块设置分钟数，松手才真正启动/取消定时器。
+        // 定时关闭：拖动滑块设置分钟数，松手才真正启动/取消定时器。5 分钟一档（steps=11 表示 0-60 共 12 档）。
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -1808,6 +2159,7 @@ private fun SettingsContent(
                     isSleepDragging = false
                 },
                 valueRange = 0f..60f,
+                steps = 11,
                 modifier = Modifier.weight(1f)
             )
             Spacer(Modifier.width(12.dp))
@@ -1823,32 +2175,7 @@ private fun SettingsContent(
     }
 }
 
-/** 播放模式对应的图标：顺序循环 / 单曲循环 / 随机播放。 */
-private fun playbackModeIcon(mode: PlaybackMode): ImageVector = when (mode) {
-    PlaybackMode.SEQUENCE -> Icons.Filled.Repeat
-    PlaybackMode.REPEAT_ONE -> Icons.Filled.RepeatOne
-    PlaybackMode.SHUFFLE -> Icons.Filled.Shuffle
-}
-
-/** 输出信息一行文案：走 USB 小尾巴还是系统默认 + 采样率 + 位深；未播放时显示"未播放"。 */
-private fun outputLine(info: PlaybackOutputInfo): String {
-    val sample = info.sampleRateHz ?: return "输出：未播放"
-    val device = if (info.viaUsb) "USB 小尾巴" else "系统默认"
-    val rate = if (sample % 1000 == 0) "${sample / 1000} kHz" else String.format("%.1f kHz", sample / 1000.0)
-    val bit = info.encoding?.let { " · ${encodingLabel(it)}" }.orEmpty()
-    return "输出：$device · $rate$bit"
-}
-
-/** 音频管线实际编码的友好名（C.ENCODING_PCM_*）。 */
-private fun encodingLabel(encoding: Int): String = when (encoding) {
-    C.ENCODING_PCM_16BIT -> "16-bit"
-    C.ENCODING_PCM_24BIT -> "24-bit"
-    C.ENCODING_PCM_32BIT -> "32-bit"
-    C.ENCODING_PCM_FLOAT -> "float32"
-    else -> "编码$encoding"
-}
-
-/** 底部播放浮岛：折叠时显示封面 + 歌名 + 播放/暂停 + 下一首；点击展开完整控制面板。 */
+/** 底部播放浮岛：折叠时显示封面 + 歌名 + 播放/暂停 + 下一首；点整条打开全屏播放页，右侧箭头切换小展开面板。 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MiniPlayerBar(
@@ -1858,11 +2185,19 @@ private fun MiniPlayerBar(
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     currentTrack: Track?,
     coverFor: (Track) -> JellyfinRequest?,
+    onOpenFullScreen: () -> Unit = {},
+    onExpandedChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    // 小展开面板开关：右侧箭头按钮切换；展开/收起变化上报给外部（Snackbar 让位等）。
     var expanded by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded) { onExpandedChange(expanded) }
     val controller = controllerState.controller
     val hasMedia = controller != null && controllerState.durationMs > 0
+    // 进度状态：拖动中显示拖动值，松手才 seek，避免边拖边跳。
+    val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
+    var sliderPosition by remember { mutableStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
     // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器；默认折叠避免歌多时占满面板。
     val hapticFeedback = LocalHapticFeedback.current
     var queueExpanded by remember { mutableStateOf(false) }
@@ -1877,10 +2212,17 @@ private fun MiniPlayerBar(
     LaunchedEffect(controllerState.queue) {
         if (!isQueueDragging) queue = controllerState.queue
     }
-    // 输出信息（设备 + 采样率），由 PlaybackService 写入诊断单例。
+    // 输出信息（设备 + 采样率 + 位深），由 PlaybackService 写入诊断单例。
     val outputInfo by PlaybackDiagnostics.info.collectAsStateWithLifecycle()
+    // 播放控制按钮（上一首/播放暂停/下一首）共用的轻触觉反馈。
+    val controlView = LocalView.current
     // 可读性表面色：非组合的 onDrawSurface 里不能读 MaterialTheme，先取出来。
     val glassSurface = MaterialTheme.colorScheme.surface
+    // 底部细进度线的比例：直接按轮询到的位置/时长算（拖动同步由展开面板的进度条负责）；
+    // 时长未知（<=0）整条显示未播色。
+    val miniProgressFraction = if (controllerState.durationMs > 0) {
+        (controllerState.positionMs / controllerState.durationMs.toFloat()).coerceIn(0f, 1f)
+    } else 0f
 
     // 液态玻璃容器：模糊 + 透镜 + 高光（库自带 highlight/shadow），半透明表面保证可读性。
     Box(
@@ -1902,8 +2244,33 @@ private fun MiniPlayerBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 连接上播放服务即可展开，方便未播放时也能调整播放模式 / USB 输出开关。
-                    .clickable(enabled = controller != null) { expanded = !expanded }
+                    // 点击整条打开全屏播放页（连接上播放服务即可，方便未播放时也能进去操作）。
+                    .clickable(enabled = controller != null) { onOpenFullScreen() }
+                    // 左右滑动切歌：向左滑过阈值切下一首、向右滑切上一首，松手才触发，触发时带触觉反馈。
+                    // 已知取舍：歌名超宽时跑马灯（basicMarquee 支持手动滚动）会抢走文字区域上的横向拖动手势，
+                    // 此时封面和右侧按钮区域仍可滑动切歌；歌名不超宽时整条都能滑。
+                    // 纯点按不受影响：横向拖动超过触摸溢出距离后框架自动取消点击，tap 仍走上面的 clickable 打开全屏页。
+                    .pointerInput(controller) {
+                        val swipeThreshold = 48.dp.toPx()
+                        var accumulatedDrag = 0f
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { _, dragAmount -> accumulatedDrag += dragAmount },
+                            onDragEnd = {
+                                when {
+                                    accumulatedDrag < -swipeThreshold -> {
+                                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                        controller?.seekToNext()
+                                    }
+                                    accumulatedDrag > swipeThreshold -> {
+                                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                        controller?.seekToPrevious()
+                                    }
+                                }
+                                accumulatedDrag = 0f
+                            },
+                            onDragCancel = { accumulatedDrag = 0f }
+                        )
+                    }
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1924,7 +2291,13 @@ private fun MiniPlayerBar(
                         text = currentTrack?.title ?: "未选择歌曲",
                         style = MaterialTheme.typography.bodyMedium,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        // 长歌名跑马灯：停 2 秒后横向滚动，滚完再停 2 秒；文本不超宽时不滚动。
+                        modifier = Modifier.basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            initialDelayMillis = 2000,
+                            repeatDelayMillis = 2000
+                        )
                     )
                     Text(
                         text = controllerState.playbackError ?: currentTrack?.artist ?: controllerState.status,
@@ -1940,7 +2313,10 @@ private fun MiniPlayerBar(
                 }
                 // 上一首
                 IconButton(
-                    onClick = { controller?.seekToPrevious() },
+                    onClick = {
+                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        controller?.seekToPrevious()
+                    },
                     enabled = controller != null,
                     modifier = Modifier.size(48.dp)
                 ) {
@@ -1948,7 +2324,10 @@ private fun MiniPlayerBar(
                 }
                 // 播放/暂停
                 IconButton(
-                    onClick = { controller?.let { if (it.isPlaying) it.pause() else it.play() } },
+                    onClick = {
+                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        controller?.let { if (it.isPlaying) it.pause() else it.play() }
+                    },
                     enabled = controller != null,
                     modifier = Modifier.size(48.dp)
                 ) {
@@ -1959,13 +2338,16 @@ private fun MiniPlayerBar(
                 }
                 // 下一首
                 IconButton(
-                    onClick = { controller?.seekToNext() },
+                    onClick = {
+                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        controller?.seekToNext()
+                    },
                     enabled = controller != null,
                     modifier = Modifier.size(48.dp)
                 ) {
                     Icon(Icons.Filled.SkipNext, contentDescription = "播放下一首歌曲")
                 }
-                // 展开/收起（more = 展开更多内容，less = 收起更少内容）
+                // 展开/收起小面板（more = 展开更多内容，less = 收起更少内容）；进全屏页走点整条或面板里的全屏按钮
                 IconButton(
                     onClick = { expanded = !expanded },
                     enabled = controller != null,
@@ -1978,8 +2360,16 @@ private fun MiniPlayerBar(
                 }
             }
 
-            // 展开面板（完整控制）
-            AnimatedVisibility(visible = expanded) {
+            // 小展开面板：与 NowPlayingScreen 存在有意重复（进度/队列/输出信息两处各一份），各自独立演化。
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(
+                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f)
+                ) + fadeIn(),
+                exit = shrinkVertically(
+                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f)
+                ) + fadeOut()
+            ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1989,9 +2379,6 @@ private fun MiniPlayerBar(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     // 进度条 + 时间
-                    val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
-                    var sliderPosition by remember { mutableStateOf(0f) }
-                    var isDragging by remember { mutableStateOf(false) }
                     Slider(
                         value = if (isDragging) sliderPosition else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec),
                         onValueChange = { sliderPosition = it; isDragging = true },
@@ -2024,7 +2411,7 @@ private fun MiniPlayerBar(
                             )
                         }
                     }
-                    // 输出信息：走 USB 小尾巴还是系统默认 + 当前采样率。USB 独占 / 静音跳曲 / 定时关闭已移至设置页。
+                    // 输出信息：走 USB 小尾巴还是系统默认 + 当前采样率 + 位深。
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -2155,19 +2542,40 @@ private fun MiniPlayerBar(
                 }
             }
         }
+
+        // 底部细进度线（Spotify 风格）：紧贴玻璃条底边、横贯全宽；
+        // 已播部分用主色，未播部分用低透明度变体色。
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(2.dp)
+                // 玻璃条是 20dp 圆角，不裁剪的话进度线两端会悬出圆角外，这里用同款底圆角收边。
+                .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
+                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f))
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth(miniProgressFraction)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
     }
 }
 
 /** 专辑封面：无请求（未登录或无封面）或加载失败时显示灰色占位块，不影响列表。
- * 封面底部叠加一个微渐变层，增加视觉深度和质感。
+ * 封面底部叠加一个微渐变层，增加视觉深度和质感。（internal：全屏播放页 NowPlayingScreen 复用）
+ * [cornerRadius] 可选圆角：默认 8dp（列表调用零影响），全屏播放页传 20dp 匹配玻璃语言。
  */
 @Composable
-private fun AlbumCover(
+internal fun AlbumCover(
     request: JellyfinRequest?,
     contentDescription: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp = 8.dp
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = RoundedCornerShape(cornerRadius)
     val placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant)
     if (request == null) {
         Box(
@@ -2192,7 +2600,9 @@ private fun AlbumCover(
             error = placeholder,
             modifier = Modifier.fillMaxSize()
         )
-        // 底部微渐变：营造封面嵌入感，提升视觉层次
+        // 底部微渐变：营造封面嵌入感，提升视觉层次。
+        // 深色主题下背景更暗，同强度黑色几乎不可见，加强到约 20% 才有层次。
+        val scrimColor = if (isSystemInDarkTheme()) Color(0x33000000) else Color(0x08000000)
         Box(
             Modifier
                 .fillMaxWidth()
@@ -2201,7 +2611,7 @@ private fun AlbumCover(
                 .background(
                     Brush.verticalGradient(
                         0f to Color.Transparent,
-                        1f to Color(0x08000000)
+                        1f to scrimColor
                     )
                 )
         )
@@ -2252,8 +2662,8 @@ private fun playTracks(
     controller.play()
 }
 
-/** 播放器当前队列中的一首歌（从播放器真实队列快照而来），含是否为当前播放项。 */
-private data class QueueTrack(
+/** 播放器当前队列中的一首歌（从播放器真实队列快照而来），含是否为当前播放项。（internal：全屏播放页复用） */
+internal data class QueueTrack(
     val id: String,
     val title: String,
     val artist: String,
@@ -2262,7 +2672,7 @@ private data class QueueTrack(
     val isCurrent: Boolean
 )
 
-private data class ControllerState(
+internal data class ControllerState(
     val controller: MediaController?,
     val status: String,
     val playbackError: String? = null,
@@ -2540,7 +2950,7 @@ private fun MediaController.applyPlaybackMode(mode: PlaybackMode) {
  * 把队列拖拽后的目标顺序同步到播放器：从前往后逐个把每首移到目标位置。
  * MediaController 的 moveMediaItem 会即时更新本地队列镜像，循环内每次重新查当前位置即可正确收敛。
  */
-private fun MediaController.applyQueueOrder(ordered: List<QueueTrack>) {
+internal fun MediaController.applyQueueOrder(ordered: List<QueueTrack>) {
     val desired = ordered.map { it.id }
     for (targetIndex in desired.indices) {
         val id = desired[targetIndex]

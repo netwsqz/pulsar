@@ -459,4 +459,91 @@ class JellyfinDataSourceTest {
         assertTrue(result.isFailure)
         client.close()
     }
+
+    // ===== 歌词接口（GET /Audio/{itemId}/Lyrics，Jellyfin 10.9+） =====
+
+    @Test
+    fun `lyrics request sends MediaBrowser authorization with token`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(
+                content = "{\"Lyrics\":[{\"Text\":\"第一行\",\"Start\":0},{\"Text\":\"第二行\",\"Start\":43500000}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getLyrics("token-1", "track-9")
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Audio/track-9/Lyrics", request.url.encodedPath)
+        assertEquals(
+            "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", " +
+                "Version=\"0.1.0\", Token=\"token-1\"",
+            request.headers[HttpHeaders.Authorization]
+        )
+        // token 绝不进 URL（本项目红线）
+        assertFalse(request.url.toString().contains("token-1"))
+        val lyrics = result.getOrThrow()
+        assertTrue(lyrics.isSynced)
+        assertEquals(
+            listOf(LyricLine(0L, "第一行"), LyricLine(4_350_000L, "第二行")),
+            lyrics.lines
+        )
+        client.close()
+    }
+
+    @Test
+    fun `lyrics 404 maps to not found sentinel`() = runTest {
+        val client = HttpClient(MockEngine {
+            respond(content = "", status = HttpStatusCode.NotFound)
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getLyrics("token-1", "track-missing")
+
+        // 没歌词是常态不是错误：404 归一化为成功 + Lyrics.NONE，UI 显示空态而不弹错误。
+        assertTrue(result.isSuccess)
+        assertEquals(Lyrics.NONE, result.getOrThrow())
+        client.close()
+    }
+
+    @Test
+    fun `lyrics 401 maps to Unauthorized`() = runTest {
+        val client = HttpClient(MockEngine {
+            respond(content = "", status = HttpStatusCode.Unauthorized)
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getLyrics("expired-token", "track-9")
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is JellyfinError.Unauthorized)
+        client.close()
+    }
+
+    @Test
+    fun `lyrics with blank track id fails`() = runTest {
+        val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        ).getLyrics("token-1", "  ")
+
+        assertTrue(result.isFailure)
+        client.close()
+    }
 }

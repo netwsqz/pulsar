@@ -162,6 +162,30 @@ class JellyfinDataSource(
             )
         }
 
+    /**
+     * 拉取歌词（GET /Audio/{itemId}/Lyrics，Jellyfin 10.9+）。曲库没有歌词是常态：
+     * 404 归一化为成功 + [Lyrics.NONE]（UI 显示空态，不当错误弹窗）；
+     * 401/403 照常映射 Unauthorized 走会话过期流程。
+     */
+    override suspend fun getLyrics(accessToken: String, trackId: String): Result<Lyrics> =
+        execute {
+            require(accessToken.isNotBlank()) { "Access token must not be blank" }
+            require(trackId.isNotBlank()) { "Track ID must not be blank" }
+            val request = urlBuilder.lyricsRequest(trackId, accessToken, deviceId)
+            val response = client.get(request.url) {
+                header(HttpHeaders.Authorization, request.headers["Authorization"].orEmpty())
+                accept(ContentType.Application.Json)
+            }
+            if (response.status == HttpStatusCode.NotFound) {
+                return@execute Lyrics.NONE
+            }
+            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+                throw JellyfinError.Unauthorized()
+            }
+            ensureSuccess(response.status)
+            json.decodeFromString<LyricResponseDto>(response.body()).toLyrics()
+        }
+
     override fun streamUrl(mediaId: String, accessToken: String): String {
         require(accessToken.isNotBlank()) { "Access token must not be blank" }
         return urlBuilder.mediaStreamRequest(mediaId, accessToken, deviceId).url

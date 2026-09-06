@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -30,8 +31,11 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,8 +95,10 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import sh.calvin.reorderable.ReorderableItem
+import sh.calvin.reorderable.ReorderableLazyListState
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackMode
@@ -128,20 +134,21 @@ internal fun shouldDismissNowPlaying(draggedOffsetPx: Float, screenHeightPx: Flo
 }
 
 /**
- * 全屏播放页（hi-fi 深色沉浸改版）。从上到下：
- * 居中歌名歌手（左上角浮动收起按钮）→ 大封面（弹性区垂直居中，圆角 20dp）→
- * 播放模式 + 队列切换行 → 输出信息（居中白字）→ 进度条 → 三键控制行（上一首 / 白色圆播放键 / 下一首）→
- * 可拖拽排序的播放队列折叠区。
+ * 全屏播放页（hi-fi 深色沉浸改版，三页横滑）。主体为 [HorizontalPager]：
+ * 第 1 页歌词（同步逐行高亮滚动 / 纯文本静态 / 无歌词空态）→
+ * 第 2 页封面（居中大封面，圆角 20dp）→ 第 3 页播放队列（整页列表：拖拽排序、跳播、移除）。
+ * 页间指示器：三根小横条。页面上下的固定骨架（标题 / 模式行 / 输出信息 / 进度条 / 控制行）
+ * 不随横滑移动，只有中区三页切换。
  * 整页永远深色沉浸白字（与系统主题无关）；背景三层：封面三色渐变（兜底）→
  * 48px 超小封面位图拉伸铺满（位图放大到全屏自然就是模糊效果，兼容所有 API，不用 Modifier.blur）→
  * 深色垂直 scrim 保证白字对比度。封面加载失败 / 无封面时只有渐变 + scrim。
- * 进度 / 队列 / 输出信息的交互与数据源从原 MiniPlayerBar 展开面板原样迁移；
  * 页面打开 / 关闭动画（底部滑入滑出）与返回键拦截在 MainActivity 侧实现；
  * 页内下滑手势收起：dragOffset（px）驱动根 Box 的 translationY 跟手位移，
  * 松手用 [shouldDismissNowPlaying] 判定——超阈值直接调 onClose，让 MainActivity 侧
  * AnimatedVisibility 的 exit 滑出从松手位置无缝接管（dragOffset 停在松手处不归零，
  * 避免「弹回 0 再滑出」的双重动画）；未超阈值弹回原位。
- * 队列数据用 [ControllerState.queue]（QueueTrack 快照，isCurrent 标记当前行），与原面板同源。
+ * 横滑与下滑互不干扰：Pager 在中区消费横向拖动，根 Box 的下滑手势只从未被消费的区域起效。
+ * 队列数据用 [ControllerState.queue]（QueueTrack 快照，isCurrent 标记当前行）。
  */
 @Composable
 internal fun NowPlayingScreen(
@@ -151,6 +158,8 @@ internal fun NowPlayingScreen(
     gradientColors: CoverGradient,
     playbackMode: PlaybackMode,
     onPlaybackModeChange: (PlaybackMode) -> Unit,
+    lyrics: Lyrics,
+    onLineSeek: (Long) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -162,13 +171,12 @@ internal fun NowPlayingScreen(
     val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
     var sliderPosition by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
-    // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器；默认折叠避免歌多时占满屏幕。
+    // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器。队列页在第 3 页整页展示。
     val hapticFeedback = LocalHapticFeedback.current
-    var queueExpanded by remember { mutableStateOf(false) }
     var isQueueDragging by remember { mutableStateOf(false) }
     var queue by remember { mutableStateOf(controllerState.queue) }
-    val lazyListState = rememberLazyListState()
-    val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
+    val queueListState = rememberLazyListState()
+    val reorderableState = rememberReorderableLazyListState(queueListState) { from, to ->
         queue = queue.toMutableList().apply { add(to.index, removeAt(from.index)) }
         hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
     }
@@ -176,13 +184,10 @@ internal fun NowPlayingScreen(
     LaunchedEffect(controllerState.queue) {
         if (!isQueueDragging) queue = controllerState.queue
     }
+    // 三页横滑：歌词 / 封面 / 队列，默认落在封面页（第 2 页，index 1）。
+    val pagerState = rememberPagerState(initialPage = 1, pageCount = { NOW_PLAYING_PAGE_COUNT })
     // 输出信息（设备 + 采样率 + 位深），由 PlaybackService 写入诊断单例。
     val outputInfo by PlaybackDiagnostics.info.collectAsStateWithLifecycle()
-    // 队列折叠区箭头旋转动画：收起朝下、展开转 180° 朝上。
-    val queueChevronRotation by animateFloatAsState(
-        targetValue = if (queueExpanded) 180f else 0f,
-        label = "queueChevronRotation"
-    )
     // 下滑收起手势：Animatable 存 px 位移（手势期间 snapTo 跟手，松手 animateTo 收尾）。
     // 只允许向下拖（graphicsLayer 里 coerceAtLeast(0f)），收起按钮 / 返回键路径不经过它，保持 0。
     val dragOffset = remember { Animatable(0f) }
@@ -350,25 +355,79 @@ internal fun NowPlayingScreen(
                     }
                 }
             }
-            // ===== 2. 大封面：弹性区（weight）内垂直居中；队列展开时此区被压缩，封面自动缩小不溢出 =====
-            Box(
+            // ===== 2. 中区三页横滑：歌词 / 封面 / 队列（HorizontalPager，默认封面页）=====
+            HorizontalPager(
+                state = pagerState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
-            ) {
-                // 两侧 12dp 边距 + 正方形（aspectRatio）：封面边长 = min(屏宽-56, 剩余高度)，
-                // 约 86% 屏宽（82-88% 区间内）；无封面 / 未登录时 AlbumCover 内部显示占位块。
-                AlbumCover(
-                    coverRequest,
-                    currentTrack?.title ?: "未选择歌曲",
-                    Modifier
-                        .padding(horizontal = 12.dp)
-                        .aspectRatio(1f),
-                    cornerRadius = 20.dp
-                )
+                    .weight(1f)
+            ) { page ->
+                when (page) {
+                    // ---- 第 1 页：歌词 ----
+                    0 -> LyricsPage(
+                        lyrics = lyrics,
+                        positionUs = controllerState.positionMs * 1000L,
+                        onLineSeek = onLineSeek,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    // ---- 第 2 页：大封面 ----
+                    1 -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // 两侧 12dp 边距 + 正方形（aspectRatio）：封面边长 = min(屏宽-56, 剩余高度)，
+                        // 约 86% 屏宽（82-88% 区间内）；无封面 / 未登录时 AlbumCover 内部显示占位块。
+                        AlbumCover(
+                            coverRequest,
+                            currentTrack?.title ?: "未选择歌曲",
+                            Modifier
+                                .padding(horizontal = 12.dp)
+                                .aspectRatio(1f),
+                            cornerRadius = 20.dp
+                        )
+                    }
+                    // ---- 第 3 页：播放队列（整页列表）----
+                    else -> QueuePage(
+                        queue = queue,
+                        lazyListState = queueListState,
+                        reorderableState = reorderableState,
+                        enabled = controller != null,
+                        onDragStarted = { isQueueDragging = true },
+                        onDragStopped = {
+                            isQueueDragging = false
+                            controller?.applyQueueOrder(queue)
+                        },
+                        onSeekTo = { index ->
+                            controller?.seekToDefaultPosition(index)
+                            controller?.play()
+                        },
+                        onRemove = { index -> controller?.removeMediaItem(index) },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
-            // ===== 3. 封面下方行：左 = 播放模式，右 = 队列展开切换 =====
+            // 页间指示器：三根小横条，当前页亮白。
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                repeat(NOW_PLAYING_PAGE_COUNT) { page ->
+                    val selected = pagerState.currentPage == page
+                    Box(
+                        Modifier
+                            .padding(horizontal = 4.dp)
+                            .size(width = if (selected) 20.dp else 8.dp, height = 4.dp)
+                            .background(
+                                if (selected) NpTextPrimary else NpTextFaint,
+                                RoundedCornerShape(2.dp)
+                            )
+                    )
+                }
+            }
+            // ===== 3. 封面下方行：左 = 播放模式，右 = 页指示器对称空位 =====
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -386,17 +445,7 @@ internal fun NowPlayingScreen(
                         tint = if (controller != null) NpTextPrimary else NpTextFaint
                     )
                 }
-                // 队列展开 / 收起切换：展开纯白高亮，收起次级白。
-                IconButton(
-                    onClick = { queueExpanded = !queueExpanded },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.QueueMusic,
-                        contentDescription = if (queueExpanded) "收起播放队列" else "展开播放队列",
-                        tint = if (queueExpanded) NpTextPrimary else NpTextSecondary
-                    )
-                }
+                Spacer(Modifier.size(48.dp))
             }
             // ===== 4. 输出信息：走 USB 小尾巴还是系统默认 + 当前采样率 + 位深，白字居中显眼 =====
             Text(
@@ -507,125 +556,216 @@ internal fun NowPlayingScreen(
                     )
                 }
             }
-            // ===== 7. 播放队列折叠区（控制行下方）：标题行点按展开 / 收起 + 限高列表 + 拖拽排序 + 跳播 + 移除。
-            // 配色全部适配深色页白字体系。 =====
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp)
-                    .clickable { queueExpanded = !queueExpanded }
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+        }
+    }
+}
+
+/** 全屏页页数：歌词 / 封面 / 队列。 */
+internal const val NOW_PLAYING_PAGE_COUNT = 3
+
+/**
+ * 歌词页（横滑第 1 页）。三态：
+ * - 同步歌词（isSynced）：LazyColumn 逐行展示，按播放位置高亮当前行并自动滚动到可见区，
+ *   点任意行 seek 到该行时间（onLineSeek 传入微秒）。
+ * - 纯文本歌词（!isSynced 且 lines 非空）：静态展示，不滚动不高亮。
+ * - 无歌词（lines 为空/null）：居中引导空态，提示如何给曲库添加 .lrc。
+ */
+@Composable
+private fun LyricsPage(
+    lyrics: Lyrics,
+    positionUs: Long,
+    onLineSeek: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val lines = lyrics.lines
+    when {
+        lines == null || lines.isEmpty() -> {
+            // 无歌词空态：居中引导，说明往 Jellyfin 音乐目录放 .lrc 即可生效。
+            Column(
+                modifier = modifier.padding(horizontal = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
                 Text(
-                    text = "播放队列（${queue.size} 首）",
-                    style = MaterialTheme.typography.titleSmall,
+                    text = "这首歌还没有歌词",
+                    style = MaterialTheme.typography.titleMedium,
                     color = NpTextSecondary,
-                    modifier = Modifier.weight(1f)
+                    textAlign = TextAlign.Center
                 )
-                Icon(
-                    imageVector = Icons.Filled.ExpandMore,
-                    contentDescription = if (queueExpanded) "收起播放队列" else "展开播放队列",
-                    tint = NpTextFaint,
-                    modifier = Modifier.rotate(queueChevronRotation)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "给歌曲添加歌词即可显示：Jellyfin 10.10+ 直接读取音频文件内嵌歌词标签；旧版可放同名的 .lrc 文件到音乐目录，刷新媒体库生效",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NpTextFaint,
+                    textAlign = TextAlign.Center
                 )
             }
-            // 展开/收起动画：高度从 0 生长到内容高度 + 淡入淡出；队列长也只占固定高度，其余靠列表自己滚。
-            AnimatedVisibility(
-                visible = queueExpanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
+        }
+        !lyrics.isSynced -> {
+            // 纯文本歌词：静态可滚动展示。
+            LazyColumn(
+                modifier = modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                if (queue.isEmpty()) {
+                items(lines.size) { index ->
                     Text(
-                        text = "暂无队列：从「全部音乐 / 专辑 / 播放列表」里点一首歌开始",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = NpTextFaint
+                        text = lines[index].text,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NpTextSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(vertical = 8.dp, horizontal = 32.dp)
                     )
-                } else {
-                    // 限高 + 内部滚动：队列再长也只占固定高度，其余靠列表自己滚。
-                    LazyColumn(
-                        state = lazyListState,
+                }
+            }
+        }
+        else -> {
+            // 同步歌词：逐行高亮 + 自动滚动。高亮行字重更高、纯白，其余半透明。
+            val listState = rememberLazyListState()
+            val currentIndex = lyrics.currentIndexFor(positionUs)
+            val density = LocalDensity.current
+            // 当前行变化时平滑滚到可见区（偏移把行放在列表偏上位置，符合歌词页阅读习惯）。
+            LaunchedEffect(currentIndex) {
+                if (currentIndex >= 0) {
+                    listState.animateScrollToItem(
+                        index = currentIndex,
+                        scrollOffset = -with(density) { 120.dp.toPx().toInt() }
+                    )
+                }
+            }
+            LazyColumn(
+                state = listState,
+                modifier = modifier,
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                items(lines.size) { index ->
+                    val isCurrent = index == currentIndex
+                    Text(
+                        text = lines[index].text,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal
+                        ),
+                        color = if (isCurrent) NpTextPrimary else NpTextSecondary,
+                        textAlign = TextAlign.Center,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .wrapContentHeight()
-                    ) {
-                        items(queue, key = { it.id }) { item ->
-                            ReorderableItem(reorderableState, key = item.id) { dragging ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .background(
-                                            // 拖拽中：白色半透明高亮（深色页适配，替代原 secondaryContainer）。
-                                            if (dragging) Color.White.copy(alpha = 0.12f) else Color.Transparent,
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        // 长按整行拖动排序；松手后把新顺序同步给播放器。
-                                        .longPressDraggableHandle(
-                                            onDragStarted = { isQueueDragging = true },
-                                            onDragStopped = {
-                                                isQueueDragging = false
-                                                controller?.applyQueueOrder(queue)
-                                            }
-                                        )
-                                        .clickable(enabled = controller != null) {
-                                            val index = queue.indexOfFirst { it.id == item.id }
-                                            controller?.seekToDefaultPosition(index)
-                                            controller?.play()
-                                        }
-                                        .padding(vertical = 4.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    // 当前轮播行指示点：白色（深色页适配，替代原 primary）。
-                                    Box(
-                                        Modifier
-                                            .size(8.dp)
-                                            .background(
-                                                if (item.isCurrent) NpTextPrimary else Color.White.copy(alpha = 0.3f),
-                                                CircleShape
-                                            )
-                                    )
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            text = item.title,
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = if (item.isCurrent) NpTextPrimary else Color.White.copy(alpha = 0.85f),
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = item.artist,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = NpTextFaint,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            controller?.removeMediaItem(queue.indexOfFirst { it.id == item.id })
-                                        },
-                                        enabled = controller != null,
-                                        modifier = Modifier.size(40.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Filled.Close,
-                                            contentDescription = "从队列中移除此歌曲",
-                                            tint = NpTextSecondary,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-                            }
+                            .padding(vertical = 8.dp, horizontal = 32.dp)
+                            // 点行跳转到该行时间；无时间戳的行（startUs=0 仅首行常见）也可跳。
+                            .clickable(enabled = lyrics.isSynced) { onLineSeek(lines[index].startUs) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 队列页（横滑第 3 页）：原折叠区列表整页化——拖拽排序、点行跳播、逐行移除。
+ * 排序交互沿用 longPressDraggableHandle；列表内容超屏时列表自己滚动。
+ * 拖拽状态由调用方持有（排序期间暂停外部队列覆盖），经 [onDragStarted]/[onDragStopped] 回报。
+ */
+@Composable
+private fun QueuePage(
+    queue: List<QueueTrack>,
+    lazyListState: LazyListState,
+    reorderableState: ReorderableLazyListState,
+    enabled: Boolean,
+    onDragStarted: () -> Unit,
+    onDragStopped: () -> Unit,
+    onSeekTo: (Int) -> Unit,
+    onRemove: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (queue.isEmpty()) {
+        Column(
+            modifier = modifier.padding(horizontal = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "暂无队列",
+                style = MaterialTheme.typography.titleMedium,
+                color = NpTextSecondary
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "从「全部音乐 / 专辑 / 播放列表」里点一首歌开始",
+                style = MaterialTheme.typography.bodyMedium,
+                color = NpTextFaint,
+                textAlign = TextAlign.Center
+            )
+        }
+        return
+    }
+    LazyColumn(
+        state = lazyListState,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        items(queue, key = { it.id }) { item ->
+            ReorderableItem(reorderableState, key = item.id) { dragging ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            // 拖拽中：白色半透明高亮（深色页适配）。
+                            if (dragging) Color.White.copy(alpha = 0.12f) else Color.Transparent,
+                            RoundedCornerShape(8.dp)
+                        )
+                        // 长按整行拖动排序；松手后把新顺序同步给播放器。
+                        .longPressDraggableHandle(
+                            onDragStarted = { _ -> onDragStarted() },
+                            onDragStopped = onDragStopped
+                        )
+                        .clickable(enabled = enabled) {
+                            onSeekTo(queue.indexOfFirst { it.id == item.id })
                         }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 当前轮播行指示点：白色。
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(
+                                if (item.isCurrent) NpTextPrimary else Color.White.copy(alpha = 0.3f),
+                                CircleShape
+                            )
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = item.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = if (item.isCurrent) NpTextPrimary else Color.White.copy(alpha = 0.85f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = item.artist,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NpTextFaint,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    IconButton(
+                        onClick = { onRemove(queue.indexOfFirst { it.id == item.id }) },
+                        enabled = enabled,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "从队列中移除此歌曲",
+                            tint = NpTextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
                     }
                 }
             }
         }
     }
 }
+
 
 /** 播放模式对应的图标：顺序循环 / 单曲循环 / 随机播放。（自 MiniPlayerBar 展开面板迁入） */
 internal fun playbackModeIcon(mode: PlaybackMode): ImageVector = when (mode) {

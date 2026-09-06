@@ -38,6 +38,17 @@ class JellyfinUrlBuilder(baseUrl: String) {
         )
     }
 
+    /** 歌词请求（Jellyfin 10.9+）：GET /Audio/{itemId}/Lyrics。token 只进 header。 */
+    fun lyricsRequest(trackId: String, token: String, deviceId: String): JellyfinRequest {
+        require(trackId.isNotBlank()) { "Track ID must not be blank" }
+        require(token.isNotBlank()) { "Token must not be blank" }
+        require(deviceId.isNotBlank()) { "Device ID must not be blank" }
+        return JellyfinRequest(
+            url = appendPath("Audio", pathSegment(trackId), "Lyrics"),
+            headers = headersWithToken(deviceId, token)
+        )
+    }
+
     private fun headersWithToken(deviceId: String, token: String): Map<String, String> = mapOf(
         "Authorization" to
             "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", " +

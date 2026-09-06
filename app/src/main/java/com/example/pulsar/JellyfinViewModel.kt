@@ -7,6 +7,7 @@ import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -47,6 +48,13 @@ class JellyfinViewModel(
     private val _currentTrack = MutableStateFlow<Track?>(null)
     val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
 
+    // 歌词：随 currentTrack 变化自动拉取（会话就绪才有值），带代次防护防过期协程写入。
+    // 独立 StateFlow 而非塞进 JellyfinUiState：歌词高频换曲刷新，不牵动整个库 UI 状态。
+    private val _lyrics = MutableStateFlow(Lyrics.NONE)
+    val lyrics: StateFlow<Lyrics> = _lyrics.asStateFlow()
+    private var lyricsJob: Job? = null
+    private var lyricsGeneration = 0
+
     init { restoreSavedLogin() }
 
     fun updateServerUrl(value: String) { _state.value = _state.value.copy(serverUrl = value, errorMessage = null) }
@@ -68,6 +76,7 @@ class JellyfinViewModel(
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
+        clearLyrics()
         val generation = ++loginGeneration
         _state.value = current.copy(
             isLoading = true,
@@ -158,6 +167,7 @@ class JellyfinViewModel(
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
+        clearLyrics()
         _state.value = JellyfinUiState()
         viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }
@@ -195,6 +205,33 @@ class JellyfinViewModel(
         _currentTrack.value = mediaItem?.let { item ->
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
+    }
+
+    /**
+     * 拉取当前曲目的歌词。曲库没歌词是常态：404 已在数据层归一化为 Lyrics.NONE，
+     * 其余失败静默回 NONE（歌词页显示空态，不为辅助功能弹错误打断播放体验）。
+     * 代次防护与 albumsJob 同模式：切歌/登出/会话过期后旧协程的响应作废。
+     */
+    fun loadLyricsForCurrentTrack() {
+        val track = _currentTrack.value ?: return
+        val src = dataSource ?: return
+        val currentSession = session ?: return
+        val generation = ++lyricsGeneration
+        _lyrics.value = Lyrics.NONE
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch(dispatcher) {
+            val result = src.getLyrics(currentSession.accessToken, track.id)
+            if (generation == lyricsGeneration) {
+                _lyrics.value = result.getOrElse { Lyrics.NONE }
+            }
+        }
+    }
+
+    fun clearLyrics() {
+        lyricsJob?.cancel()
+        lyricsJob = null
+        lyricsGeneration++
+        _lyrics.value = Lyrics.NONE
     }
 
     private fun MediaItem.toRecoveredTrack(): Track = Track(
@@ -329,6 +366,7 @@ class JellyfinViewModel(
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
+        clearLyrics()
         _state.value = _state.value.copy(
             serverUrl = _state.value.serverUrl,
             username = _state.value.username,
@@ -366,6 +404,7 @@ class JellyfinViewModel(
         loginJob?.cancel()
         albumsJob?.cancel()
         searchJob?.cancel()
+        lyricsJob?.cancel()
         super.onCleared()
     }
 

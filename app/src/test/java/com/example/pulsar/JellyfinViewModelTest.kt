@@ -4,6 +4,7 @@ import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -18,6 +19,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class JellyfinViewModelTest {
@@ -154,6 +156,115 @@ class JellyfinViewModelTest {
         assertEquals(false, viewModel.state.value.isSearching)
     }
 
+    // ===== 歌词加载（loadLyricsForCurrentTrack / clearLyrics） =====
+
+    @Test
+    fun `loadLyricsForCurrentTrack 请求当前曲目并更新歌词状态`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val synced = Lyrics(
+            isSynced = true,
+            lines = listOf(com.example.pulsar.data.jellyfin.LyricLine(0L, "第一行"))
+        )
+        val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
+        val viewModel = createViewModel(sessions, api)
+
+        advanceUntilIdle()
+        viewModel.setPlaybackQueue(listOf(track), track.id)
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+
+        assertEquals(listOf("track-1"), api.lyricsTrackIds)
+        assertEquals(synced, viewModel.lyrics.value)
+    }
+
+    @Test
+    fun `切歌后再次加载歌词 最终状态只反映最后一次请求`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi()
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+
+        val trackA = Track("track-a", "A", "Artist", "", 1000L, null)
+        val trackB = Track("track-b", "B", "Artist", "", 1000L, null)
+        viewModel.setPlaybackQueue(listOf(trackA, trackB), trackA.id)
+        viewModel.loadLyricsForCurrentTrack()
+        // 第一首响应还没落地就切到 B：A 的请求被取消（不重复发），B 正常发起。
+        viewModel.setPlaybackQueue(listOf(trackA, trackB), trackB.id)
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+
+        // A 的请求在启动前就被取消，只有 B 真正发出。
+        assertEquals(listOf("track-b"), api.lyricsTrackIds)
+    }
+
+    @Test
+    fun `无会话时加载歌词不发起请求`() = runTest {
+        val api = FakeJellyfinApi()
+        val viewModel = createViewModel(FakeSessionRepository(null), api)
+        advanceUntilIdle()
+
+        viewModel.setPlaybackQueue(listOf(track), track.id)
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+
+        assertEquals(0, api.lyricsCalls)
+    }
+
+    @Test
+    fun `歌词请求失败静默回退到无歌词`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(lyricsResult = Result.failure(JellyfinError.Network(IOException())))
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+
+        viewModel.setPlaybackQueue(listOf(track), track.id)
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+
+        assertEquals(Lyrics.NONE, viewModel.lyrics.value)
+    }
+
+    @Test
+    fun `clearLyrics 清空状态且后续旧响应不写入`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val synced = Lyrics(isSynced = false, lines = emptyList())
+        val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+
+        viewModel.setPlaybackQueue(listOf(track), track.id)
+        viewModel.loadLyricsForCurrentTrack()
+        // clear 发生在响应落地前（模拟登出），响应必须作废。
+        viewModel.clearLyrics()
+        advanceUntilIdle()
+
+        assertEquals(Lyrics.NONE, viewModel.lyrics.value)
+    }
+
+    @Test
+    fun `会话过期清空歌词`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val synced = Lyrics(isSynced = false, lines = emptyList())
+        val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
+        val authorization = FakeAuthorizationSink("active-auth")
+        val viewModel = createViewModel(sessions, api, authorization)
+        advanceUntilIdle()
+
+        viewModel.setPlaybackQueue(listOf(track), track.id)
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+        assertEquals(synced, viewModel.lyrics.value)
+
+        // 曲库请求撞上 Unauthorized → 走真实会话过期路径，歌词必须随之清空。
+        api.albumsError = JellyfinError.Unauthorized()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        assertEquals(Lyrics.NONE, viewModel.lyrics.value)
+        assertNull(authorization.value)
+        assertTrue(sessions.cleared)
+    }
+
     private fun TestScope.createViewModel(
         sessions: FakeSessionRepository,
         api: FakeJellyfinApi,
@@ -184,11 +295,14 @@ class JellyfinViewModelTest {
         private val tracks: List<Track> = emptyList(),
         var musicItemsError: Throwable? = null,
         var albumsError: Throwable? = null,
-        private val searchResults: SearchResults = SearchResults()
+        private val searchResults: SearchResults = SearchResults(),
+        var lyricsResult: Result<Lyrics>? = null
     ) : JellyfinApi {
         var musicItemsCalls = 0
         var searchError: Throwable? = null
         val searchQueries = mutableListOf<String>()
+        var lyricsCalls = 0
+        val lyricsTrackIds = mutableListOf<String>()
         override suspend fun login(username: String, password: String) = Result.failure<com.example.pulsar.data.jellyfin.JellyfinSession>(IllegalStateException())
         override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> {
             musicItemsCalls++
@@ -203,6 +317,11 @@ class JellyfinViewModelTest {
         override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> {
             searchQueries += query
             return searchError?.let { Result.failure(it) } ?: Result.success(searchResults)
+        }
+        override suspend fun getLyrics(accessToken: String, trackId: String): Result<Lyrics> {
+            lyricsCalls++
+            lyricsTrackIds += trackId
+            return lyricsResult ?: Result.success(Lyrics.NONE)
         }
         override fun streamUrl(mediaId: String, accessToken: String) = "stream"
         override fun imageRequest(itemId: String, imageTag: String?, accessToken: String) = JellyfinRequest("image", emptyMap())

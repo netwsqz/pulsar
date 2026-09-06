@@ -452,6 +452,8 @@ private fun MusicLibraryScreen(
     val tracks = state.tracks.orEmpty()
     // 当前播放曲目：放 ViewModel，Activity 从后台回来被重建时信息不丢。
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
+    // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
+    val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     DisposableEffect(controllerState.controller) {
         val controller = controllerState.controller ?: return@DisposableEffect onDispose { }
         val listener = object : Player.Listener {
@@ -528,6 +530,10 @@ private fun MusicLibraryScreen(
     // 全屏播放页打开次数编号：作为 NowPlayingScreen 的 key，每次打开强制重建组合，
     // 页内手势状态（dragOffset 等）从零开始，不会被上一次退出残留污染。
     var nowPlayingSession by remember { mutableStateOf(0) }
+    // 全屏页打开期间跟随曲目拉歌词；切歌时因 key 变化重新触发，关闭时清掉常驻内存。
+    LaunchedEffect(showNowPlaying, currentTrack?.id) {
+        if (showNowPlaying && currentTrack != null) viewModel.loadLyricsForCurrentTrack()
+    }
     // 全屏播放页打开时，返回键先收起全屏页（后组合的 BackHandler 优先响应）。
     if (showNowPlaying) {
         BackHandler { showNowPlaying = false }
@@ -761,7 +767,13 @@ private fun MusicLibraryScreen(
                         playbackMode = mode
                         controllerState.controller?.applyPlaybackMode(mode)
                     },
-                    onClose = { showNowPlaying = false }
+                    lyrics = lyrics,
+                    // 点歌词行 seek 到该行时间（微秒 → 毫秒转 MediaController）。
+                    onLineSeek = { positionUs -> controllerState.controller?.seekTo(positionUs / 1000) },
+                    onClose = {
+                        showNowPlaying = false
+                        viewModel.clearLyrics()
+                    }
                 )
             }
         }

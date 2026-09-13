@@ -92,6 +92,21 @@ class UsbAudioDriver {
     return played_frames_.load(std::memory_order_relaxed);
   }
 
+  /**
+   * 事件线程心跳计数：事件循环每轮 +1，只增。
+   *
+   * 看门狗靠它把「播放帧不推进」拆成两种：心跳在涨 = 线程有被调度、泵真卡死
+   * （要回退）；心跳也停 = 线程被 CPU 饿住（等着自愈，别误判成卡死回退）。
+   */
+  uint64_t heartbeat() const {
+    return heartbeat_.load(std::memory_order_relaxed);
+  }
+
+  /** 事件循环是否已退出（出错停泵或正常收尾）。退出即泵确定没了，看门狗直接回退。 */
+  bool loop_exited() const {
+    return loop_exited_.load(std::memory_order_relaxed);
+  }
+
   /** 累计欠载次数（refill 时补零的传输），排查用。 */
   uint64_t underruns() const {
     return underruns_.load(std::memory_order_relaxed);
@@ -251,6 +266,22 @@ class UsbAudioDriver {
 
   std::atomic<uint64_t> played_frames_{0};
   std::atomic<uint64_t> underruns_{0};
+
+  // 事件线程心跳：event_loop 每轮 +1。看门狗靠它区分「泵卡死」（心跳在涨、播放帧
+  // 不涨）与「线程被 CPU 饿住」（心跳也停）——后者会自愈，误判成卡死会触发
+  // flushRing + 重启流，丢弃 ring 里约 1 秒未播音频 = 听感断音/跳秒。
+  std::atomic<uint64_t> heartbeat_{0};
+
+  // 事件循环已退出（出错停泵或正常收尾）。看门狗据此立即回退，不再等推进窗口。
+  // start_stream 建线程前清零（stop_pump_and_drain 已 join 掉旧线程，无竞争）。
+  std::atomic<bool> loop_exited_{false};
+
+  // ADPF（Android 12+ 性能提示）会话句柄。真实类型是 APerformanceHintSession*，
+  // 这里声明为 void* 以免依赖被 __INTRODUCED_IN(31) 挡住的 <android/performance_hint.h>
+  // （本模块 minSdk 26，编译期该头不可用）——符号在运行时从 libandroid.so 取。
+  // 只被事件线程读写（建/用/关都在 event_loop 里）；API<31 或符号缺失时恒为 nullptr，
+  // 所有 ADPF 调用降级为 no-op。
+  void* hint_session_ = nullptr;
 
   // 一次性诊断：记录前若干次传输完成回调的状态与每包实际长度，排查"无推进"用。
   // 仅事件线程写，start_stream 重置。达到上限后不再打印，避免刷屏。

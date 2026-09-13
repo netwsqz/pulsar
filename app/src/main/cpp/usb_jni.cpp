@@ -117,6 +117,20 @@ Java_com_example_pulsar_playback_usb_UsbNativeDriver_nativeGetPlayedFrames(
 }
 
 JNIEXPORT jlong JNICALL
+Java_com_example_pulsar_playback_usb_UsbNativeDriver_nativeGetHeartbeat(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+  auto* driver = from_handle(handle);
+  return (driver != nullptr) ? static_cast<jlong>(driver->heartbeat()) : 0;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_example_pulsar_playback_usb_UsbNativeDriver_nativeIsLoopExited(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
+  auto* driver = from_handle(handle);
+  return (driver != nullptr && driver->loop_exited()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jlong JNICALL
 Java_com_example_pulsar_playback_usb_UsbNativeDriver_nativeGetUnderruns(
     JNIEnv* /*env*/, jobject /*thiz*/, jlong handle) {
   auto* driver = from_handle(handle);

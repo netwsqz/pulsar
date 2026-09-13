@@ -6,8 +6,12 @@ import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.audio.AudioSink
+import com.example.pulsar.playback.PlaybackDiagnostics
+import com.example.pulsar.playback.PlaybackOutputInfo
 import java.nio.ByteBuffer
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -223,6 +227,63 @@ class LibusbAudioSinkTest {
         driver.advancePlayed(frames100Ms / 2L)
         assertEquals(1_100_000L, sink.getCurrentPositionUs(false))
     }
+
+    @Test
+    fun `ring 满到 write 完全不接收时不得误报 buffer 已消费`() {
+        // 必须走 float 路径：PcmFloatConverter.convert 会把输入 buffer 的 position
+        // 推到末尾（非 float 路径有显式还原）。真机 ExoPlayer 送的就是 float
+        //（日志 pcmEncoding=4=ENCODING_PCM_FLOAT），所以这条路径是常态。
+        val floatFormat = Format.Builder()
+            .setSampleRate(48_000)
+            .setChannelCount(2)
+            .setPcmEncoding(C.ENCODING_PCM_FLOAT)
+            .build()
+        val driver = FakeUsbExclusiveDriver()
+        val sink = LibusbAudioSink(FakeAudioSink(), driver).also {
+            it.configure(floatFormat, 0, null)
+        }
+        sink.play()
+
+        // 模拟 ring 满到连一帧都塞不进（native write 返回 0）。真机 ring 长期
+        // ~99.8% 满，这个分支会随机命中。
+        driver.rejectWrites = true
+        val buffer = ByteBuffer.allocate(frames100Ms * 8) // float32 立体声 = 8 字节/帧
+        val consumed = sink.handleBuffer(buffer, 1_000_000L, 1)
+
+        // 一个字节都没被接收，必须告诉 ExoPlayer「还没消化完」，并把读指针留在原位。
+        // 修复前：float 路径的 position 停在末尾 → hasRemaining()=false → 返回 true
+        // → ExoPlayer 认为整段已消费并丢弃 = 听感偶发「突然加快」（内容被跳过）。
+        assertFalse(consumed)
+        assertEquals(0, buffer.position())
+    }
+
+    @Test
+    fun `USB 独占按 32bit 线宽激活时不得覆写源位深`() {
+        // 真机常态：设备 alt 是 32bit 线宽（subframeSize=4），ExoPlayer 送 float。
+        val floatFormat = Format.Builder()
+            .setSampleRate(48_000)
+            .setChannelCount(2)
+            .setPcmEncoding(C.ENCODING_PCM_FLOAT)
+            .build()
+        val driver = FakeUsbExclusiveDriver(usbBits = 32)
+        // PlaybackService 已按解码器实际输出把源位深（这里 16bit）写进诊断单例。
+        PlaybackDiagnostics.info.value = PlaybackOutputInfo(encoding = C.ENCODING_PCM_16BIT)
+
+        LibusbAudioSink(FakeAudioSink(), driver).also { it.configure(floatFormat, 0, null) }
+
+        val info = PlaybackDiagnostics.info.value
+        // 修复前：engage 按 activeBits=32 写 ENCODING_PCM_32BIT → UI 显示「32-bit」，
+        // 而真机日志里这些 44.1k 曲子的 decoder output pcmEncoding=2（16bit）。
+        assertEquals(C.ENCODING_PCM_16BIT, info.encoding)
+        // 采样率仍要补：USB 独占时 delegate 的 AudioTrack 不初始化，
+        // onAudioTrackInitialized 不触发，不补的话 UI 一直显示「未播放」。
+        assertEquals(48_000, info.sampleRateHz)
+    }
+
+    @After
+    fun resetDiagnostics() {
+        PlaybackDiagnostics.info.value = PlaybackOutputInfo()
+    }
 }
 
 /** 手写 Fake：绕过（bypass）激活后 delegate 不应再被触碰，全部 no-op。 */
@@ -255,7 +316,7 @@ private class FakeAudioSink : AudioSink {
 }
 
 /** 手写 Fake：frameBytes 与测试格式（16bit/2ch = 4 字节每帧）耦合。 */
-private class FakeUsbExclusiveDriver : UsbExclusiveDriver {
+private class FakeUsbExclusiveDriver(private val usbBits: Int = 16) : UsbExclusiveDriver {
     override val isOpen = true
     override var isStreaming = false
         private set
@@ -268,9 +329,9 @@ private class FakeUsbExclusiveDriver : UsbExclusiveDriver {
         bInterval = 1,
         bSynchAddress = 0,
         channels = 2,
-        bitsPerSample = 16,
+        bitsPerSample = usbBits,
         sampleRates = listOf(48_000),
-        subframeSize = 2,
+        subframeSize = usbBits / 8,
     )
     override val isHighSpeed = true
     override var sampleRate: Int? = null
@@ -278,6 +339,8 @@ private class FakeUsbExclusiveDriver : UsbExclusiveDriver {
 
     private var played = 0L
     private var pending = 0L
+    /** 置 true 后 write 一律返回 0，模拟「ring 满到连一帧都塞不进」。 */
+    var rejectWrites = false
     /** 记录 flushRing 被调用的次数，用于断言切歌/重锚不应清空未播数据。 */
     var flushRingCalls = 0
         private set
@@ -291,6 +354,15 @@ private class FakeUsbExclusiveDriver : UsbExclusiveDriver {
         private set
 
     override fun playedFrames() = played
+
+    // 模拟「事件线程一直在被调度」：心跳每次查询都涨。这样看门狗走的是
+    // 「心跳在涨、播放帧不涨 = 泵卡死」分支，与本次改动前的行为一致。
+    private var heartbeatValue = 0L
+    override fun heartbeat(): Long = heartbeatValue++
+
+    /** 模拟事件循环未退出（泵在跑）。 */
+    override fun loopExited(): Boolean = false
+
     override fun underruns() = 0L
     override fun pendingFrames(): Long {
         pendingFramesCalls++
@@ -298,6 +370,8 @@ private class FakeUsbExclusiveDriver : UsbExclusiveDriver {
     }
 
     override fun write(bytes: ByteArray): Int {
+        // 模拟 ring 满到一帧都塞不进：native write 返回 0。
+        if (rejectWrites) return 0
         pending += bytes.size / 4L
         return bytes.size
     }

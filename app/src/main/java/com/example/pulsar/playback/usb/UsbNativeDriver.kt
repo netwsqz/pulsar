@@ -83,6 +83,17 @@ object UsbNativeDriver {
     /** 设备已实际消费的帧数（ExoPlayer 进度与看门狗）。 */
     external fun nativeGetPlayedFrames(handle: Long): Long
 
+    /**
+     * 事件线程心跳计数：事件循环每轮 +1，只增。
+     *
+     * 供 [IsoPumpWatchdog] 区分「泵卡死」（心跳在涨、播放帧不涨）与「CPU 饥饿」
+     * （心跳也不涨）——后者会自愈，误判成卡死会触发 flushRing + 重启流导致断音。
+     */
+    external fun nativeGetHeartbeat(handle: Long): Long
+
+    /** native 事件循环是否已退出（`event_loop` 因出错停泵或正常收尾）。 */
+    external fun nativeIsLoopExited(handle: Long): Boolean
+
     /** 累计欠载次数（refill 补零的传输），排查用。 */
     external fun nativeGetUnderruns(handle: Long): Long
 

@@ -40,6 +40,7 @@ import com.example.pulsar.playback.SilenceSkipState
 import com.example.pulsar.playback.SilenceSkippingAudioSink
 import com.example.pulsar.playback.SleepTimer
 import com.example.pulsar.playback.UsbAudioOutput
+import com.example.pulsar.playback.decoderEncodingForDiagnostics
 import com.example.pulsar.playback.normalizePlayerPosition
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
 import com.example.pulsar.playback.usb.LibusbAudioSink
@@ -476,13 +477,19 @@ class PlaybackService : MediaSessionService() {
                 format: Format,
                 decoderReuseEvaluation: DecoderReuseEvaluation?
             ) {
-                // 诊断：解码器实际输出的格式（pcmEncoding: 16bit=2, float=4, 24bit=8388608）。
+                // 诊断：解码器实际输出的格式（pcmEncoding: 16bit=2, float=4, 24bit=21）。
                 // 确认 24bit 源是被解码器降位深，还是被 ExoPlayer 管线降位深，决定修复位置。
                 Log.i(
                     TAG,
                     "decoder output: rate=${format.sampleRate} ch=${format.channelCount} " +
                         "pcmEncoding=${format.pcmEncoding}",
                 )
+                // UI 的位深展示取这里的值——它是**源的真实位深**。不用 AudioTrack 的
+                // 编码（系统默认输出会被统一成 float32），也不该用 USB 线宽（独占路径
+                // 按 32bit 子帧送，那是容器宽度）。压缩格式没有 pcmEncoding，挡掉。
+                decoderEncodingForDiagnostics(format.pcmEncoding)?.let { encoding ->
+                    PlaybackDiagnostics.info.update { it.copy(encoding = encoding) }
+                }
             }
 
             override fun onAudioTrackInitialized(
@@ -490,9 +497,8 @@ class PlaybackService : MediaSessionService() {
                 audioTrackConfig: AudioSink.AudioTrackConfig
             ) {
                 val sampleRate = audioTrackConfig.sampleRate.takeIf { it > 0 } ?: return
-                PlaybackDiagnostics.info.update {
-                    it.copy(sampleRateHz = sampleRate, encoding = audioTrackConfig.encoding)
-                }
+                // 采样率取 AudioTrack 的实际值；位深不取它——见 onAudioInputFormatChanged。
+                PlaybackDiagnostics.info.update { it.copy(sampleRateHz = sampleRate) }
             }
 
             override fun onPlaybackStateChanged(

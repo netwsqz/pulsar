@@ -183,8 +183,16 @@ class LibusbAudioSink(
 
         val acceptedBytes = driver.write(if (writtenBytes == output.size) output else output.copyOf(writtenBytes))
         val writtenFrames = if (acceptedBytes > 0) acceptedBytes / pcmBytesPerFrame else 0
+        // 读指针必须**无条件**拨回「真正被接收的帧数」处。float 路径的
+        // PcmFloatConverter.convert 已经把 buffer.position 推到末尾，若这里只在
+        // writtenFrames > 0 时拨回，ring 恰好满（write 返回 0，一帧都塞不进）时
+        // position 就停在 limit → hasRemaining()==false → 本函数误报「整个 buffer
+        // 已消费」，ExoPlayer 直接丢弃这段音频 = 听感偶发「突然加快」（内容被跳过）。
+        // 真机 ring 长期 ~99.8% 满，该分支随机命中；非 float 路径本身有显式还原，
+        // 所以只在 float（本项目 ExoPlayer 输出的常态）下暴露。
+        // writtenFrames=0 时等价于回到原位，ExoPlayer 会原样重投，一个字节不丢。
+        buffer.position(originalPosition + writtenFrames * frameBytes)
         if (writtenFrames > 0) {
-            buffer.position(originalPosition + writtenFrames * frameBytes)
             framesWritten += writtenFrames
             watchdog.onWrite(SystemClock.elapsedRealtimeNanos())
         }
@@ -229,6 +237,7 @@ class LibusbAudioSink(
         // 被切"）。这里不需要动任何状态：若新曲 PTS 与锚点+已写帧偏差 > 200ms，
         // handleBuffer 的偏差检测会用补偿式 anchorTo 重锚（见上）；若 PTS 连续
         // （ExoPlayer 跨 period 的 stream offset 机制），什么都不做才是正确的。
+        Log.i(TAG, "sink handleDiscontinuity（上游宣布流变了；本身不清 ring）")
     }
 
     /** 计算位置用的采样率：USB 协商出的实际速率优先（playedFrames 按它推进）。 */
@@ -393,7 +402,6 @@ class LibusbAudioSink(
             }
         }
         if (result == 0) {
-            val activeBits = outputBitsPerSample
             bypassActive = true
             lastEngageFailHash = 0
             framesWritten = 0L
@@ -403,19 +411,15 @@ class LibusbAudioSink(
             watchdog.reset(SystemClock.elapsedRealtimeNanos())
             // USB 独占时 delegate 的 AudioTrack 永不初始化（handleBuffer 全走泵、
             // 从不写 delegate），Media3 的 onAudioTrackInitialized 回调因此不触发，
-            // UI 会一直显示"未播放"。这里把 ExoPlayer 实际送出的采样率/位深
-            // 写进诊断单例。回退系统音频时走 delegate 正常路径，回调仍会覆盖。
-            PlaybackDiagnostics.info.update {
-                it.copy(
-                    sampleRateHz = sampleRate,
-                    encoding = when (activeBits) {
-                        16 -> C.ENCODING_PCM_16BIT
-                        24 -> C.ENCODING_PCM_24BIT
-                        32 -> C.ENCODING_PCM_32BIT
-                        else -> it.encoding
-                    }
-                )
-            }
+            // UI 会一直显示"未播放"。这里把采样率写进诊断单例补上。
+            //
+            // 只补采样率，**不碰位深**：这条路径上的位深是 USB 线宽（本项目
+            // PREFERRED_FLOAT_OUTPUT_BITS=32，设备 alt 也是 4 字节子帧），是"容器
+            // 多粗"，不是"内容多少"。UI 要展示的是源的真实位深，由 PlaybackService
+            // 按解码器实际输出（onAudioInputFormatChanged）写入——真机日志里
+            // 44.1k 曲子 decoder output pcmEncoding=2（16bit），若在这里按线宽写
+            // 就成了「32-bit」，误导用户以为源是 32bit。
+            PlaybackDiagnostics.info.update { it.copy(sampleRateHz = sampleRate) }
         } else {
             bypassActive = false
             lastEngageFailHash = formatHash
@@ -426,7 +430,10 @@ class LibusbAudioSink(
     private fun checkWatchdog() {
         if (!bypassActive) return
         val now = SystemClock.elapsedRealtimeNanos()
-        if (watchdog.check(now, driver.playedFrames())) {
+        // 心跳 / 退出标志让看门狗区分「泵卡死」与「CPU 饥饿」：前台重负载把事件线程
+        // 饿住时 playedFrames 也不涨，旧逻辑会误判成泵死并 flushRing + 重启流，
+        // 丢弃 ring 里约 1 秒未播音频 = 听感断音/跳秒（见 IsoPumpWatchdog 文档）。
+        if (watchdog.check(now, driver.playedFrames(), driver.heartbeat(), driver.loopExited())) {
             bypassActive = false
             driver.flushRing()
             if (driver.isStreaming) driver.stopStream()

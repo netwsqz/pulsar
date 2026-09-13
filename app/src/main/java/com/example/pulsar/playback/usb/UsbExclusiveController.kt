@@ -146,6 +146,16 @@ class UsbExclusiveController(context: Context) : UsbExclusiveDriver {
         } else 0L
     }
 
+    override fun heartbeat(): Long = synchronized(nativeLock) {
+        if (handle != 0L) UsbNativeDriver.nativeGetHeartbeat(handle) else 0L
+    }
+
+    override fun loopExited(): Boolean = synchronized(nativeLock) {
+        // 句柄为 0 = 设备已关闭，泵必然不再运行 → 报 true 让看门狗立即回退，
+        // 不必再等 6 秒饥饿硬上限（拔线后应尽快切回系统音频继续放）。
+        handle == 0L || UsbNativeDriver.nativeIsLoopExited(handle)
+    }
+
     override fun underruns(): Long = synchronized(nativeLock) {
         if (handle != 0L) UsbNativeDriver.nativeGetUnderruns(handle) else 0L
     }

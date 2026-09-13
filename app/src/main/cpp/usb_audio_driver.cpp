@@ -4,8 +4,11 @@
 #include <cerrno>
 #include <cstring>
 
+#include <dlfcn.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <android/log.h>
 
@@ -27,6 +30,115 @@ uint32_t next_power_of_two(uint32_t v) {
   v |= v >> 8;
   v |= v >> 16;
   return v + 1;
+}
+
+/**
+ * 把当前线程的调度优先级拉到 CFS 能给到的最高（nice -20）。
+ *
+ * 等时泵的事件线程必须每几毫秒补投一次 URB，是硬截止期任务；前台重负载下
+ * 会被饿出 0.4~1s 的调度空隙（真机日志），超过在途缓冲即 underrun 补零。
+ * Java 侧 `THREAD_PRIORITY_URGENT_AUDIO` 只到 -19，这里直接给 -20。
+ *
+ * 再往上的 SCHED_FIFO/RR 做不到：Android 给 App 进程的 `RLIMIT_RTPRIO` 是 0，
+ * `pthread_setschedparam` 必返回 EPERM（AOSP 的音频 RT 线程由 AudioFlinger
+ * 自己创建、带 CAP_SYS_NICE）。所以 -20 就是 App 能拿到的最强调度优先级。
+ *
+ * `setpriority` 对自己进程的线程总是允许的；Android 的 `RLIMIT_NICE` 可能把
+ * 下限卡在比 -20 高的位置，因此回读实际值打日志——真机上以日志为准。
+ */
+void apply_max_scheduling_priority() {
+  constexpr int kRequestedNice = -20;
+  if (setpriority(PRIO_PROCESS, 0, kRequestedNice) != 0) {
+    LOGW("setpriority(%d) failed: %s", kRequestedNice, strerror(errno));
+  }
+  // getpriority 出错与「刚好等于 -1」返回值撞车，必须先清 errno 再判。
+  errno = 0;
+  const int actual = getpriority(PRIO_PROCESS, 0);
+  if (actual == -1 && errno != 0) {
+    LOGW("getpriority failed: %s", strerror(errno));
+  } else {
+    LOGW("iso event thread nice=%d (requested %d)", actual, kRequestedNice);
+  }
+}
+
+/**
+ * ADPF（Android 12+ Performance Hint）动态绑定。
+ *
+ * NDK 27 带 `<android/performance_hint.h>`，但声明被 `__INTRODUCED_IN(31)` 挡住，
+ * 而本模块 minSdk 26 → 编译期取不到符号，只能运行时从 `libandroid.so` 取。API 31
+ * 以下 dlsym 返回空，整体降级为「不发提示」，绝不影响原有播放路径。
+ *
+ * 这是 Android 官方给「有硬截止期的周期性线程」准备的机制：会话声明目标工作时长，
+ * 系统据此调整该线程组的调度与性能（提频、避免被挪到小核），正是本项目等时泵
+ * 需要的「抢资源」手段。
+ */
+struct AdpfApi {
+  void* (*get_manager)() = nullptr;
+  void* (*create_session)(void*, const int32_t*, size_t, int64_t) = nullptr;
+  int (*report_actual)(void*, int64_t) = nullptr;
+  void (*close_session)(void*) = nullptr;
+
+  bool available() const {
+    return get_manager != nullptr && create_session != nullptr &&
+           report_actual != nullptr && close_session != nullptr;
+  }
+};
+
+const AdpfApi& adpf_api() {
+  // 进程内只解析一次；libandroid.so 故意不 dlclose（要活到进程结束）。
+  static const AdpfApi api = [] {
+    AdpfApi a;
+    void* lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    if (lib == nullptr) return a;
+    a.get_manager = reinterpret_cast<decltype(a.get_manager)>(
+        dlsym(lib, "APerformanceHint_getManager"));
+    a.create_session = reinterpret_cast<decltype(a.create_session)>(
+        dlsym(lib, "APerformanceHint_createSession"));
+    a.report_actual = reinterpret_cast<decltype(a.report_actual)>(
+        dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
+    a.close_session = reinterpret_cast<decltype(a.close_session)>(
+        dlsym(lib, "APerformanceHint_closeSession"));
+    return a;
+  }();
+  return api;
+}
+
+/**
+ * 为当前线程建 ADPF 会话。失败一律返回 nullptr（调用方降级）。
+ *
+ * @param target_ns 目标周期：每个等时传输承载的音频时长（高速 1ms / 全速 8ms）。
+ */
+void* adpf_open_session(int64_t target_ns) {
+  if (target_ns <= 0) return nullptr;
+  const AdpfApi& api = adpf_api();
+  if (!api.available()) return nullptr;
+  void* manager = api.get_manager();
+  if (manager == nullptr) return nullptr;
+  const int32_t tid = static_cast<int32_t>(gettid());
+  void* session = api.create_session(manager, &tid, 1, target_ns);
+  if (session == nullptr) {
+    LOGW("ADPF createSession failed (tid=%d)", tid);
+    return nullptr;
+  }
+  LOGW("ADPF hint session created: tid=%d target=%lldns", tid,
+       static_cast<long long>(target_ns));
+  return session;
+}
+
+void adpf_report(void* session, int64_t actual_ns) {
+  if (session == nullptr || actual_ns <= 0) return;
+  adpf_api().report_actual(session, actual_ns);
+}
+
+void adpf_close(void* session) {
+  if (session == nullptr) return;
+  adpf_api().close_session(session);
+}
+
+int64_t monotonic_ns() {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
 }
 
 }  // namespace
@@ -224,6 +336,11 @@ UsbAudioDriver::Error UsbAudioDriver::start_stream(
     in_flight_.fetch_add(1, std::memory_order_release);
   }
 
+  // 心跳/退出标志清零必须在建线程之前（stop_pump_and_drain 已 join 掉旧线程，
+  // 此处无竞争）。旧线程收尾时会把 loop_exited_ 置 true，不清零的话新线程
+  // 一起步就会被看门狗当成「已退出」直接回退。
+  heartbeat_.store(0, std::memory_order_release);
+  loop_exited_.store(false, std::memory_order_release);
   event_thread_ = std::thread(&UsbAudioDriver::event_loop, this);
   return Error::kOk;
 }
@@ -398,17 +515,39 @@ UsbAudioDriver::Error UsbAudioDriver::build_pump() {
 void UsbAudioDriver::event_loop() {
   // 命名线程便于 /proc/<pid>/task/<tid>/comm 与 logcat 线程名排查调度问题。
   prctl(PR_SET_NAME, "pulsar-usb-iso", 0, 0, 0);
-  // 音频优先级（nice -16，等价 Java 侧 Process.setThreadPriority(
-  // THREAD_PRIORITY_AUDIO)）：libusb 事件线程必须每几毫秒补投在途 URB，
-  // 后台 cgroup 限流下默认 nice 0 的裸线程会被饿出 >64ms 调度空隙，
-  // 恰好等于在途缓冲总量 → underrun 补零（爆音）。setpriority 对自己
-  // 进程的线程总是允许的，失败也无碍（仅日志）。
-  if (setpriority(PRIO_PROCESS, 0, -16) != 0) {
-    LOGW("setpriority(-16) failed: %s", strerror(errno));
-  }
+  // 把调度优先级拉到最高：libusb 事件线程必须每几毫秒补投在途 URB，前台重负载下
+  // 会被饿出 0.4~1s 的调度空隙，超过在途缓冲（~120ms）即 underrun 补零 = 爆音。
+  // nice -20 是 CFS 能给到的最高优先级；再往上的 SCHED_FIFO 需要 root
+  //（Android 给 App 进程的 RLIMIT_RTPRIO 是 0），拿不到。
+  apply_max_scheduling_priority();
+  // ADPF：把本线程的周期（= 每个等时传输承载的音频时长，高速 1ms / 全速 8ms）报给
+  // 系统，并为每轮事件循环上报实际耗时。稳态下两者相等；被 CPU 饿住时实际耗时
+  // 会拉长，系统据此给这条线程提频 / 保核心——这是 Android 官方给硬截止期线程
+  // 准备的「抢资源」通道。
+  //
+  // 口径说明：这里上报的是**整轮墙钟时长**（handle_events 阻塞等待 + 处理），
+  // 不是本线程消耗的 CPU 时间。故意的——CPU 时间口径下，线程被饿住时它压根没跑、
+  // 也就无从上报，系统什么都看不到；而墙钟口径能表达「我必须每 1ms 完成一轮，
+  // 现在做不到」，正是要传达的信号。
+  //
+  // 每 ~1ms 调一次 report 不会打爆 binder：AOSP 原生实现内部按 mPreferredRateNanos
+  // 节流，只在必要时机才真正发 IPC。
+  // API < 31 或符号缺失时 adpf_open_session 返回 nullptr，后续 report/close 全是 no-op。
+  const int64_t hint_target_ns = (is_high_speed_ ? 1 : 8) * 1'000'000LL;
+  hint_session_ = adpf_open_session(hint_target_ns);
   while (true) {
+    // 心跳：每轮事件循环 +1。看门狗靠它区分「泵卡死」（心跳在涨）与「线程被 CPU
+    // 饿住」（心跳也停）——后者会自愈，误判成卡死会触发断音式的破坏性恢复。
+    // 放在 handle_events 之前，continue 分支也会经过。
+    heartbeat_.fetch_add(1, std::memory_order_release);
+    const int64_t cycle_start_ns = monotonic_ns();
     struct timeval tv = {0, 100000};  // 100ms 超时，便于及时退出
     int rc = libusb_handle_events_timeout(ctx_, &tv);
+    if (rc != LIBUSB_ERROR_INTERRUPTED) {
+      // 只用正常轮次上报：INTERRUPTED 是立即返回的，报一个接近 0 的「实际耗时」
+      // 会给系统相反的信号。
+      adpf_report(hint_session_, monotonic_ns() - cycle_start_ns);
+    }
     if (rc == LIBUSB_ERROR_INTERRUPTED) {
       continue;
     }
@@ -423,6 +562,10 @@ void UsbAudioDriver::event_loop() {
       break;
     }
   }
+  // 循环退出即泵确定没了：看门狗据此立即回退，不必再等推进/饥饿窗口。
+  loop_exited_.store(true, std::memory_order_release);
+  adpf_close(hint_session_);
+  hint_session_ = nullptr;
 }
 
 void UsbAudioDriver::on_transfer_complete(libusb_transfer* transfer) {

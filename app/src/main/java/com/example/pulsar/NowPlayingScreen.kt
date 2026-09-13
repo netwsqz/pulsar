@@ -3,6 +3,8 @@ package com.example.pulsar
 import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -118,6 +120,19 @@ private val NpPlayButtonBottom = Color(0xFFE9E9EE)
 private val NpPlayButtonIcon = Color(0xFF15151A)
 
 /**
+ * 迷你条小封面 ↔ 全屏页大封面共享同一个 key：打开/收起全屏页时封面跨布局连续飞行。
+ * 两侧（MiniPlayerBar / NowPlayingScreen）必须都注册同一个 key 才会匹配上。
+ */
+internal const val NOW_PLAYING_COVER_KEY = "now-playing-cover"
+
+/**
+ * 全屏播放页进出场时长。整页只做淡入淡出、不做位移：唯一的运动交给封面从迷你条飞到大封面。
+ * 此前整页用 slideInVertically 从底部升起，与封面飞行是两套独立位移，到达时间对不齐，
+ * 观感上「封面和页面各飞各的」。时长取 260ms，与封面飞行的弹簧（约 300ms）大致对齐。
+ */
+internal const val NOW_PLAYING_FADE_MS = 260
+
+/**
  * 下滑收起全屏播放页的阈值：拖动位移超过屏高的 15% 即判定收起。
  */
 internal const val NOW_PLAYING_DISMISS_RATIO = 0.15f
@@ -139,6 +154,8 @@ internal fun shouldDismissNowPlaying(draggedOffsetPx: Float, screenHeightPx: Flo
  * 第 2 页封面（居中大封面，圆角 20dp）→ 第 3 页播放队列（整页列表：拖拽排序、跳播、移除）。
  * 页间指示器：三根小横条。页面上下的固定骨架（标题 / 模式行 / 输出信息 / 进度条 / 控制行）
  * 不随横滑移动，只有中区三页切换。
+ * 封面注册 sharedElement（key 与迷你条小封面一致）：打开/收起全屏页时小封面 morph 成
+ * 大封面（位置、尺寸、圆角连续插值），其余内容仍走底部滑入滑出。
  * 整页永远深色沉浸白字（与系统主题无关）；背景三层：封面三色渐变（兜底）→
  * 48px 超小封面位图拉伸铺满（位图放大到全屏自然就是模糊效果，兼容所有 API，不用 Modifier.blur）→
  * 深色垂直 scrim 保证白字对比度。封面加载失败 / 无封面时只有渐变 + scrim。
@@ -150,6 +167,7 @@ internal fun shouldDismissNowPlaying(draggedOffsetPx: Float, screenHeightPx: Flo
  * 横滑与下滑互不干扰：Pager 在中区消费横向拖动，根 Box 的下滑手势只从未被消费的区域起效。
  * 队列数据用 [ControllerState.queue]（QueueTrack 快照，isCurrent 标记当前行）。
  */
+@OptIn(androidx.compose.animation.ExperimentalSharedTransitionApi::class)
 @Composable
 internal fun NowPlayingScreen(
     controllerState: ControllerState,
@@ -160,6 +178,8 @@ internal fun NowPlayingScreen(
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     lyrics: Lyrics,
     onLineSeek: (Long) -> Unit,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -377,14 +397,25 @@ internal fun NowPlayingScreen(
                     ) {
                         // 两侧 12dp 边距 + 正方形（aspectRatio）：封面边长 = min(屏宽-56, 剩余高度)，
                         // 约 86% 屏宽（82-88% 区间内）；无封面 / 未登录时 AlbumCover 内部显示占位块。
-                        AlbumCover(
-                            coverRequest,
-                            currentTrack?.title ?: "未选择歌曲",
-                            Modifier
-                                .padding(horizontal = 12.dp)
-                                .aspectRatio(1f),
-                            cornerRadius = 20.dp
-                        )
+                        // 边距放在外层 Box：sharedBounds 必须紧贴封面本体量尺寸，否则会把 12dp
+                        // 内边距算进 bounds，比真实封面宽 24dp，飞行落位时尺寸对不上会「跳」一下。
+                        // sharedBounds 与迷你条小封面同 key：打开/收起时封面连续 morph
+                        // （sharedBounds 支持两侧 enter/exit 交接，sharedElement 不行）。
+                        Box(Modifier.padding(horizontal = 12.dp)) {
+                            with(sharedTransitionScope) {
+                                AlbumCover(
+                                    coverRequest,
+                                    currentTrack?.title ?: "未选择歌曲",
+                                    Modifier
+                                        .aspectRatio(1f)
+                                        .sharedBounds(
+                                            rememberSharedContentState(key = NOW_PLAYING_COVER_KEY),
+                                            animatedVisibilityScope = animatedVisibilityScope
+                                        ),
+                                    cornerRadius = 20.dp
+                                )
+                            }
+                        }
                     }
                     // ---- 第 3 页：播放队列（整页列表）----
                     else -> QueuePage(

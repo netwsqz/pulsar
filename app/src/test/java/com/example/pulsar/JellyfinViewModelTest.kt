@@ -51,6 +51,63 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `启动恢复期间标记恢复中，界面进主页面骨架而非空登录表单`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val viewModel = createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)))
+
+        // 还没推进调度器：恢复协程尚未跑完。此时 UI 必须知道"正在恢复"，才能
+        // 直接进主页面并用灰色波浪骨架占位，而不是先闪一屏空白登录表单。
+        assertTrue(viewModel.state.value.isRestoring)
+        assertNull(viewModel.state.value.tracks)
+    }
+
+    @Test
+    fun `恢复成功清除恢复中标记并落到曲库`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val viewModel = createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)))
+
+        advanceUntilIdle()
+
+        assertTrue(!viewModel.state.value.isRestoring)
+        assertEquals(listOf(track), viewModel.state.value.tracks)
+    }
+
+    @Test
+    fun `无保存会话时恢复中标记清除，落到登录表单`() = runTest {
+        val viewModel = createViewModel(FakeSessionRepository(null), FakeJellyfinApi())
+
+        advanceUntilIdle()
+
+        assertTrue(!viewModel.state.value.isRestoring)
+        assertNull(viewModel.state.value.tracks)
+    }
+
+    @Test
+    fun `恢复失败也要清除恢复中标记，不得停在骨架屏`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
+        val viewModel = createViewModel(sessions, api)
+
+        advanceUntilIdle()
+
+        assertTrue(!viewModel.state.value.isRestoring)
+        assertNull(viewModel.state.value.tracks)
+    }
+
+    @Test
+    fun `恢复失败时用已保存的地址与用户名预填登录表单`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
+        val viewModel = createViewModel(sessions, api)
+
+        advanceUntilIdle()
+
+        // 连不上服务器时回退到登录表单，但地址/用户名已填好，用户只需补密码重试。
+        assertEquals("https://server.test", viewModel.state.value.serverUrl)
+        assertEquals("user", viewModel.state.value.username)
+    }
+
+    @Test
     fun `unauthorized restore clears session and memory authorization`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Unauthorized())

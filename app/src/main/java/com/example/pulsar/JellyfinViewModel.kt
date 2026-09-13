@@ -55,7 +55,13 @@ class JellyfinViewModel(
     private var lyricsJob: Job? = null
     private var lyricsGeneration = 0
 
-    init { restoreSavedLogin() }
+    init {
+        // 启动即声明"正在恢复会话"：在读到本地会话、拉到曲库之前 UI 直接进主页面、
+        // 用灰色波浪骨架占位；不这样做的话这段等待期会落到 tracks == null 分支，
+        // 闪一屏空白登录表单。
+        _state.value = _state.value.copy(isRestoring = true)
+        restoreSavedLogin()
+    }
 
     fun updateServerUrl(value: String) { _state.value = _state.value.copy(serverUrl = value, errorMessage = null) }
     fun updateUsername(value: String) { _state.value = _state.value.copy(username = value, errorMessage = null) }
@@ -120,9 +126,21 @@ class JellyfinViewModel(
     private fun restoreSavedLogin() {
         loginJob = viewModelScope.launch(dispatcher) {
             try {
-                val saved = sessionStore.load() ?: return@launch
+                val saved = sessionStore.load()
+                if (saved == null) {
+                    // 本地没有可恢复的会话：结束恢复态，UI 落到登录表单。
+                    _state.value = _state.value.copy(isRestoring = false)
+                    return@launch
+                }
                 val generation = ++loginGeneration
-                _state.value = _state.value.copy(isLoading = true)
+                // 顺手预填地址/用户名：万一后面网络失败回退到登录表单，用户面对的
+                // 不是一张空白表单，只需补密码即可重试。
+                _state.value = _state.value.copy(
+                    isRestoring = true,
+                    isLoading = true,
+                    serverUrl = saved.serverUrl,
+                    username = saved.username
+                )
                 val source = apiFactory.create(saved.serverUrl)
                 val tracks = source.getMusicItems(saved.userId, saved.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
@@ -130,7 +148,7 @@ class JellyfinViewModel(
                     dataSource = source
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(saved.accessToken)
-                    _state.value = _state.value.copy(isLoading = false, tracks = tracks)
+                    _state.value = _state.value.copy(isLoading = false, isRestoring = false, tracks = tracks)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -142,7 +160,11 @@ class JellyfinViewModel(
                     authorizationSink.activeAuthorization = null
                 }
                 if (currentGeneration == loginGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
+                    _state.value = _state.value.copy(
+                        isLoading = false,
+                        isRestoring = false,
+                        errorMessage = friendlyError(error)
+                    )
                 }
             }
         }

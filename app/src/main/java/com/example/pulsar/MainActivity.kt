@@ -39,6 +39,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -130,6 +133,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -244,6 +248,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
     val application = LocalContext.current.applicationContext as PulsarApplication
@@ -266,7 +271,10 @@ private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val qqState by qqViewModel.state.collectAsStateWithLifecycle()
     PulsarTheme(darkTheme = isSystemInDarkTheme()) {
-        if (state.tracks == null) {
+        // 启动直接进主页面：恢复会话期间曲库页用灰色波浪骨架占位（页面框架、玻璃岛、
+        // 迷你播放条都立刻可用），不另起一屏加载页。只有"确实没有可用会话"——本地没存
+        // 过、或恢复失败——才落到登录表单。
+        if (!state.isRestoring && state.tracks == null) {
             LoginScreen(state, viewModel)
         } else {
             MusicLibraryScreen(
@@ -331,41 +339,53 @@ private fun EmptyState(
     }
 }
 /** 骨架占位块的共享扫光进度（0f..1f 循环）：一处骨架屏取一次、传给它所有的占位块，
- * 避免每个占位块各起一套 infinite transition；所有块同步扫光，视觉上是一整片微光扫过。 */
+ * 避免每个占位块各起一套 infinite transition；所有块同步扫光，视觉上是一整片微光扫过。
+ *
+ * 返回 [State] 而不是裸 Float——这是**必须**的：动画值只有在**使用处**读（[SkeletonBox]
+ * 的 draw 块里读 `progress.value`）才会让那一处订阅动画帧。若在这里 `by` 解包成裸 Float
+ * 返回，读取发生在本函数的 recompose 作用域内，调用方不会因动画帧而重组，拿到的永远是
+ * 首次组合时的值（0f）——实测表现就是"骨架有、扫光永远不动"。 */
 @Composable
-private fun rememberSkeletonShimmer(): Float {
+private fun rememberSkeletonShimmer(): State<Float> {
     val transition = rememberInfiniteTransition(label = "skeletonShimmer")
-    val progress by transition.animateFloat(
+    return transition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
         label = "skeletonShimmerProgress"
     )
-    return progress
 }
 
-/** 带微光扫过的骨架占位块：surfaceVariant 底色 + 一条左→右扫过的白色微光（峰值 alpha 0.15）。
- * 所有骨架屏（网格卡片、详情页头部/曲目行）统一用它。shape 传 null 时保持直角。 */
+/** 带微光扫过的骨架占位块：surfaceVariant 底色 + 一条左→右扫过的微光。
+ * 所有骨架屏（网格卡片、详情页头部/曲目行）统一用它。shape 传 null 时保持直角。
+ *
+ * 扫光色随主题反转：浅色主题底色 surfaceVariant(#F1F5F9) 已经接近纯白，白色光带叠上去
+ * 差值约 2/255 完全看不出来，必须换成更深的暗色光带；深色主题底色暗，才用白色微光。 */
 @Composable
 private fun SkeletonBox(
     modifier: Modifier = Modifier,
-    progress: Float = rememberSkeletonShimmer(),
+    progress: State<Float> = rememberSkeletonShimmer(),
     shape: Shape? = null
 ) {
-    // 扫光位置从 -0.5 到 1.5：让光带完整进出占位块，两端不出现生硬截断。
-    val x = progress * 2f - 0.5f
+    val darkTheme = isSystemInDarkTheme()
+    val shimmerColor = if (darkTheme) Color.White else Color(0xFF0F172A)
+    val shimmerPeakAlpha = if (darkTheme) 0.15f else 0.09f
     Box(
         modifier
             .background(MaterialTheme.colorScheme.surfaceVariant, shape ?: RectangleShape)
             .drawWithCache {
+                // 扫光位置从 -0.5 到 1.5：让光带完整进出占位块，两端不出现生硬截断。
+                // 在 draw 块里读 progress.value（而不是外面算好传进来）才能让这层 draw
+                // 订阅动画帧、逐帧重绘——放在外面读的话扫光会定住不动。
+                val x = progress.value * 2f - 0.5f
                 val bandWidth = size.width.coerceAtLeast(1f)
                 val start = Offset(x * size.width - bandWidth * 0.5f, 0f)
                 val end = Offset(start.x + bandWidth, size.height)
                 val scrim = Brush.linearGradient(
                     colors = listOf(
-                        Color.White.copy(alpha = 0f),
-                        Color.White.copy(alpha = 0.15f),
-                        Color.White.copy(alpha = 0f)
+                        shimmerColor.copy(alpha = 0f),
+                        shimmerColor.copy(alpha = shimmerPeakAlpha),
+                        shimmerColor.copy(alpha = 0f)
                     ),
                     start = start,
                     end = end
@@ -379,6 +399,47 @@ private fun SkeletonBox(
  * 深色主题用白色低透明细线——两个主题下都是「比表面深/浅一点」的层次。 */
 @Composable
 private fun cardBorderColor(): Color = if (isSystemInDarkTheme()) Color(0x1AFFFFFF) else Color(0x14888888)
+
+/** 曲目列表的灰色波浪骨架：与 [TrackRow] 同款排布（48dp 圆角封面 + 标题/作者两条灰条
+ * + 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
+ * "这个页面正在加载"，而不是一片空白或"暂无内容"的空态文案。 */
+@Composable
+private fun TrackListSkeleton(
+    count: Int = 6,
+    modifier: Modifier = Modifier
+) {
+    val shimmer = rememberSkeletonShimmer()
+    val coverShape = RoundedCornerShape(8.dp) // 与 AlbumCover 默认圆角一致
+    Column(modifier) {
+        repeat(count) { index ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SkeletonBox(Modifier.size(48.dp).clip(coverShape), progress = shimmer)
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SkeletonBox(
+                        Modifier.fillMaxWidth(0.55f).height(14.dp),
+                        progress = shimmer,
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                    SkeletonBox(
+                        Modifier.fillMaxWidth(0.35f).height(11.dp),
+                        progress = shimmer,
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                }
+            }
+            if (index != count - 1) {
+                HorizontalDivider(
+                    modifier = Modifier.padding(start = 60.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
+                )
+            }
+        }
+    }
+}
 
 
 @Composable
@@ -405,7 +466,7 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
 /** 顶部玻璃岛的固定占位高度：岛本身 56dp + 上下外边距各 8dp；状态栏高度由各列表的 statusBars inset 另算。 */
 internal val GlassIslandTopSpacing = 72.dp
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MusicLibraryScreen(
     state: JellyfinUiState,
@@ -436,17 +497,21 @@ private fun MusicLibraryScreen(
         section = LibrarySection.PlaylistDetail(playlist)
     }
     // 进入对应分区时懒加载数据；load 方法幂等，重复进入不会重复请求。
-    LaunchedEffect(section) {
+    // `sessionReady` 也作为 key：主页面现在在恢复会话期间就已经组合了，首次触发时
+    // 还没有 dataSource，loadLibrary 会直接 return（静默无操作）。必须等会话到位再补
+    // 跑一次，否则发现页/专辑页会永远停在骨架屏上。
+    val sessionReady = state.tracks != null
+    LaunchedEffect(section, sessionReady) {
         when (val s = section) {
-            LibrarySection.Discover -> viewModel.loadDiscoverAlbums()
+            LibrarySection.Discover -> if (sessionReady) viewModel.loadDiscoverAlbums()
             LibrarySection.Tracks -> Unit
-            LibrarySection.Albums -> viewModel.loadAlbums()
-            LibrarySection.Playlists -> viewModel.loadPlaylists()
+            LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
+            LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
             LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
             LibrarySection.Settings -> Unit
-            is LibrarySection.AlbumDetail -> viewModel.loadAlbumTracks(s.album)
-            is LibrarySection.PlaylistDetail -> viewModel.loadPlaylistTracks(s.playlist)
+            is LibrarySection.AlbumDetail -> if (sessionReady) viewModel.loadAlbumTracks(s.album)
+            is LibrarySection.PlaylistDetail -> if (sessionReady) viewModel.loadPlaylistTracks(s.playlist)
         }
     }
     val tracks = state.tracks.orEmpty()
@@ -556,7 +621,10 @@ private fun MusicLibraryScreen(
     // 全屏播放页同款背景：传动画后的三色，切歌时全屏背景跟着 800ms 过渡。
     val animatedCoverGradient = CoverGradient(top = coverTop, middle = coverMiddle, bottom = coverBottom)
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
-    Box(Modifier.fillMaxSize().background(backgroundBrush)) {
+    // SharedTransitionLayout 包住整个悬浮布局：迷你条小封面 ↔ 全屏页大封面共用
+    // 同一 key 做 morph（打开/收起全屏页时封面跨布局连续飞行动画）。
+    SharedTransitionLayout {
+        Box(Modifier.fillMaxSize().background(backgroundBrush)) {
         val backdrop = rememberLayerBackdrop {
             drawRect(brush = backgroundBrush)
             drawContent()
@@ -718,6 +786,9 @@ private fun MusicLibraryScreen(
         }
         // 底部玻璃播放条（悬浮）：四角全圆角，完整液态玻璃（模糊 + 透镜 + 高光）。
         // 点整条 / 面板内全屏按钮打开全屏播放页；右侧箭头切换小展开面板（与全屏页并存）。
+        // sharedTransitionScope 传下去：迷你条小封面与全屏页大封面注册同一个 key，
+        // 打开/收起全屏页时封面跨布局连续飞行。对齐仍走本层 BoxScope 的 align——
+        // 早前把 align 放进内容里丢过一次，迷你条跑到屏幕顶部（真机已复现）。
         MiniPlayerBar(
             backdrop = backdrop,
             controllerState = controllerState,
@@ -728,6 +799,10 @@ private fun MusicLibraryScreen(
             },
             currentTrack = currentTrack,
             coverFor = viewModel::trackCover,
+            sharedTransitionScope = this@SharedTransitionLayout,
+            // 全屏页展开时迷你封面取反隐藏：两侧都真正参与一次进出场，sharedBounds
+            // 才会把「原地绘制」让给 overlay 里的飞行副本，否则会出现两份封面。
+            fullScreenOpen = showNowPlaying,
             onOpenFullScreen = {
                 nowPlayingSession++
                 showNowPlaying = true
@@ -751,10 +826,13 @@ private fun MusicLibraryScreen(
         // session 编号作为 key：下滑手势收起时 dragOffset 停在松手位置不归零（供 exit 从松手处
         // 无缝续滑），exit 期间重开页面会复用同一组合实例——key 变化强制重建，
         // dragOffset 从 0 开始，页面不会停在屏外不可见。
+        // 只留一个运动：整页不再从底部滑入（那是第二套位移，与封面飞行打架、到达时间对不齐），
+        // 改成淡入淡出，让封面从迷你条飞到大封面成为唯一的位移来源。下滑手势收起时页面本就
+        // 跟着 dragOffset 位移、并随位移降 alpha，exit 淡出与松手位置衔接自然。
         AnimatedVisibility(
             visible = showNowPlaying,
-            enter = slideInVertically(spring(dampingRatio = 0.8f, stiffness = 400f), initialOffsetY = { it }) + fadeIn(),
-            exit = slideOutVertically(spring(dampingRatio = 0.8f, stiffness = 400f), targetOffsetY = { it }) + fadeOut()
+            enter = fadeIn(tween(NOW_PLAYING_FADE_MS)),
+            exit = fadeOut(tween(NOW_PLAYING_FADE_MS))
         ) {
             key(nowPlayingSession) {
                 NowPlayingScreen(
@@ -770,12 +848,16 @@ private fun MusicLibraryScreen(
                     lyrics = lyrics,
                     // 点歌词行 seek 到该行时间（微秒 → 毫秒转 MediaController）。
                     onLineSeek = { positionUs -> controllerState.controller?.seekTo(positionUs / 1000) },
+                    sharedTransitionScope = this@SharedTransitionLayout,
+                    // key(nowPlayingSession) 包着本内容，AnimatedVisibilityScope 就是本层。
+                    animatedVisibilityScope = this,
                     onClose = {
                         showNowPlaying = false
                         viewModel.clearLyrics()
                     }
                 )
             }
+        }
         }
     }
 }
@@ -992,7 +1074,8 @@ private fun TracksContent(
     ) {
         item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp)) }
         item { Button(onClick = onLocalAudio, Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), enabled = controllerState.controller != null) { Text("选择手机里的音频") } }
-        if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
+        // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
+        if (state.tracks == null) item { TrackListSkeleton(count = 7) } else if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             TrackRow(
                 track = track,
@@ -1352,7 +1435,13 @@ private fun DiscoverContent(
                 )
             }
         }
-        if (dailyPicks.isEmpty() && tracks.isEmpty()) {
+        if (state.tracks == null) {
+            // 会话还没恢复完：灰色波浪占位。不能走下面的"登录后这里会推荐…"空态文案——
+            // 那是"确实没有内容"，而这里是"还在连"，两者语义完全不同。
+            item(key = "dailySkeleton") {
+                TrackListSkeleton(count = 3, modifier = Modifier.padding(top = 4.dp))
+            }
+        } else if (dailyPicks.isEmpty() && tracks.isEmpty()) {
             item(key = "dailyEmpty") {
                 Text(
                     "登录后这里会推荐当天的歌曲",
@@ -2187,8 +2276,49 @@ private fun SettingsContent(
     }
 }
 
+/**
+ * 迷你条封面位（固定 40dp）。单独抽一个 composable，是为了躲开 MiniPlayerBar 里同时存在的
+ * Row / Column 作用域——在那里直接调 AnimatedVisibility 会同时命中 RowScope 与 ColumnScope
+ * 两个重载而无法解析（编译报 cannot be called in this context with an implicit receiver）。
+ *
+ * [visible] 由调用方传全屏页开关的取反：迷你封面必须自己也随全屏页做一次进出场，
+ * sharedBounds 才认得出这算同一次匹配、把「原地绘制」让给 overlay 里的飞行副本；
+ * 若 scope 不进过渡，就会出现「小封面留在原地 + 还有一个影子在飞」的两份封面（真机已复现）。
+ * 用 fade 而非默认的 expand/shrink，避免交接那一帧的尺寸跳变；固定 40dp 占位保证整行不跳。
+ */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+private fun MiniPlayerCover(
+    track: Track?,
+    coverFor: (Track) -> JellyfinRequest?,
+    sharedTransitionScope: SharedTransitionScope,
+    visible: Boolean
+) {
+    Box(Modifier.size(40.dp)) {
+        if (track == null) {
+            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
+        } else {
+            AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
+                val coverScope = this
+                with(sharedTransitionScope) {
+                    Box(
+                        Modifier
+                            .sharedBounds(
+                                rememberSharedContentState(key = NOW_PLAYING_COVER_KEY),
+                                animatedVisibilityScope = coverScope
+                            )
+                            .fillMaxSize()
+                    ) {
+                        AlbumCover(coverFor(track), track.title, Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** 底部播放浮岛：折叠时显示封面 + 歌名 + 播放/暂停 + 下一首；点整条打开全屏播放页，右侧箭头切换小展开面板。 */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MiniPlayerBar(
     backdrop: Backdrop,
@@ -2197,6 +2327,8 @@ private fun MiniPlayerBar(
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     currentTrack: Track?,
     coverFor: (Track) -> JellyfinRequest?,
+    sharedTransitionScope: SharedTransitionScope,
+    fullScreenOpen: Boolean,
     onOpenFullScreen: () -> Unit = {},
     onExpandedChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
@@ -2286,16 +2418,14 @@ private fun MiniPlayerBar(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 专辑封面
-                if (currentTrack != null) {
-                    AlbumCover(
-                        coverFor(currentTrack),
-                        currentTrack.title,
-                        Modifier.size(40.dp)
-                    )
-                } else {
-                    Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.surfaceVariant))
-                }
+                // 专辑封面：与全屏页大封面同 key 的 sharedBounds，打开/收起时跨布局飞行。
+                // 细节见 MiniPlayerCover（含为何要单独抽一个 composable）。
+                MiniPlayerCover(
+                    track = currentTrack,
+                    coverFor = coverFor,
+                    sharedTransitionScope = sharedTransitionScope,
+                    visible = !fullScreenOpen
+                )
                 Spacer(Modifier.width(12.dp))
                 // 歌名 · 歌手
                 Column(Modifier.weight(1f)) {

@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -30,8 +31,14 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionCommands
 import androidx.media3.session.SessionResult
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import com.example.pulsar.playback.DeviceVolumeSource
+import com.example.pulsar.playback.LoudnessGainAudioSink
+import com.example.pulsar.playback.LoudnessGainProvider
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlayerRebuildState
+import com.example.pulsar.playback.RemoteVolumePlayer
 import com.example.pulsar.playback.SilenceLevelMonitor
 import com.example.pulsar.playback.SilenceSkipConfig
 import com.example.pulsar.playback.SilenceSkipDetector
@@ -43,6 +50,9 @@ import com.example.pulsar.playback.UsbAudioOutput
 import com.example.pulsar.playback.decoderEncodingForDiagnostics
 import com.example.pulsar.playback.normalizePlayerPosition
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
+import com.example.pulsar.playback.UNITY_GAIN
+import com.example.pulsar.playback.loudnessGainDb
+import com.example.pulsar.playback.loudnessGainLinear
 import com.example.pulsar.playback.usb.LibusbAudioSink
 import com.example.pulsar.playback.usb.UsbExclusiveController
 import com.example.pulsar.playback.usb.UsbExclusiveState
@@ -56,9 +66,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class PlaybackService : MediaSessionService() {
     private companion object {
@@ -100,6 +112,11 @@ class PlaybackService : MediaSessionService() {
     // 静音跳曲开关：默认开启，与 SilenceSkipPreferences 默认值一致。
     private var silenceSkipEnabled = true
 
+    // 回放增益（ReplayGain）：换歌时把当前曲目的线性增益写进 provider，音频线程每帧读。
+    private val loudnessGainProvider = LoudnessGainProvider()
+    private val loudnessPreferences by lazy { LoudnessPreferences(pulsarPreferencesDataStore) }
+    private var loudnessGainEnabled = LoudnessPreferences.DEFAULT_ENABLED
+
     // 播放服务自身的协程作用域：监听 USB 音频设备插拔与采样率采集。
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -122,6 +139,7 @@ class PlaybackService : MediaSessionService() {
                 .add(SessionCommand(UsbExclusiveMediaCommands.SET_ENABLED, Bundle.EMPTY))
                 .add(SessionCommand(UsbExclusiveMediaCommands.GET_STATE, Bundle.EMPTY))
                 .add(SessionCommand(UsbExclusiveMediaCommands.SET_VOLUME, Bundle.EMPTY))
+                .add(SessionCommand(UsbExclusiveMediaCommands.ADJUST_VOLUME, Bundle.EMPTY))
                 .add(SessionCommand(SilenceSkipMediaCommands.SET_ENABLED, Bundle.EMPTY))
                 .add(SessionCommand(SilenceSkipMediaCommands.GET_STATE, Bundle.EMPTY))
                 .build()
@@ -174,19 +192,30 @@ class PlaybackService : MediaSessionService() {
                     } else {
                         val percent = args.getInt(
                             UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT, kDefaultVolumePercent
-                        ).coerceIn(0, 100)
-                        usbExclusiveController.setVolume(percent)
-                        usbVolumePercent = percent
-                        serviceScope.launch {
-                            runCatching { usbExclusivePreferences.setVolumePercent(percent) }
-                                .onFailure { error ->
-                                    if (error !is CancellationException) {
-                                        Log.w(TAG, "保存 USB 音量失败", error)
-                                    }
-                                }
-                        }
+                        )
+                        applyUsbVolume(percent)
                         com.google.common.util.concurrent.Futures.immediateFuture(
                             SessionResult(SessionResult.RESULT_SUCCESS)
+                        )
+                    }
+                }
+                UsbExclusiveMediaCommands.ADJUST_VOLUME -> {
+                    if (!args.containsKey(UsbExclusiveMediaCommands.KEY_VOLUME_STEP)) {
+                        com.google.common.util.concurrent.Futures.immediateFuture(
+                            UsbExclusiveMediaCommands.errorResult("缺少 volumeStep 参数")
+                        )
+                    } else {
+                        // 相对音量按服务里的实时值算：前台音量键那条路只有 500ms 轮询来的
+                        // 快照，自己算会把连按的第二下算成同一个目标值而丢档。
+                        val step = args.getInt(UsbExclusiveMediaCommands.KEY_VOLUME_STEP)
+                        applyUsbVolume(usbVolumePercent + step * RemoteVolumePlayer.STEP_PERCENT)
+                        // 算完的新音量随结果带回（applyUsbVolume 已夹紧并写回 usbVolumePercent）：
+                        // 界面要拿它立刻弹音量浮窗，不能等下一次 500ms 轮询。
+                        com.google.common.util.concurrent.Futures.immediateFuture(
+                            SessionResult(
+                                SessionResult.RESULT_SUCCESS,
+                                UsbExclusiveMediaCommands.volumeResultArgs(usbVolumePercent)
+                            )
                         )
                     }
                 }
@@ -229,6 +258,18 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        // usbExclusiveEnabled 决定用哪条音频链路、以及要不要把播放器包装成远程音量设备。
+        // 这两件事都在 onCreate 里同步发生，而异步 collector 还没跑，所以必须先同步读一次
+        // 持久化值——否则冷启动时它会停在初始值 false，独占路径和音量键接管都不会挂上。
+        // 音量初值一并同步读，保持两处初始化时序一致。
+        runBlocking {
+            usbExclusiveEnabled = usbExclusivePreferences.enabled.first()
+            usbVolumePercent = usbExclusivePreferences.volumePercent.first()
+        }
+        // 与 usbExclusiveEnabled 同步启用/停用独占控制器：这一步以前是搭在"首帧 collector
+        // 触发 rebuildPlayer"上的，现在初始值已就位、不会再触发重建，必须在这里显式做，
+        // 否则冷启动恢复独占时 USB 泵不会被打开。
+        if (usbExclusiveEnabled) usbExclusiveController.enable() else usbExclusiveController.disable()
         val exoPlayer = createPlayer(usbExclusiveEnabled)
         player = exoPlayer
 
@@ -238,7 +279,7 @@ class PlaybackService : MediaSessionService() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-        mediaSession = MediaSession.Builder(this, exoPlayer)
+        mediaSession = MediaSession.Builder(this, playerForSession(exoPlayer))
             .setSessionActivity(sessionActivity)
             .setCallback(usbSessionCallback)
             .build()
@@ -246,8 +287,7 @@ class PlaybackService : MediaSessionService() {
         observeUsbAudioOutput()
         serviceScope.launch {
             usbExclusivePreferences.volumePercent.collect { percent ->
-                usbVolumePercent = percent
-                usbExclusiveController.setVolume(percent)
+                applyUsbVolume(percent)
             }
         }
         serviceScope.launch {
@@ -262,6 +302,12 @@ class PlaybackService : MediaSessionService() {
             silenceSkipPreferences.enabled.collect { enabled ->
                 silenceSkipEnabled = enabled
                 silenceSkipState = SilenceSkipState()
+            }
+        }
+        serviceScope.launch {
+            loudnessPreferences.enabled.collect { enabled ->
+                loudnessGainEnabled = enabled
+                updateLoudnessGain()
             }
         }
         // 定时关闭到点动作：暂停播放。定时器本身在进程级单例 SleepTimer 里，服务销毁也不影响倒计时。
@@ -301,6 +347,71 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /**
+     * 音量键/系统音量条的落点。USB 独占下系统混音器音量对输出无效，音量真源是
+     * [UsbExclusivePreferences.volumePercent]，本服务内缓存在 [usbVolumePercent]。
+     */
+    private val remoteVolumeSource = object : DeviceVolumeSource {
+        override fun currentPercent(): Int = usbVolumePercent
+
+        override fun onVolumeChange(percent: Int) {
+            applyUsbVolume(percent)
+        }
+    }
+
+    /**
+     * 统一音量入口：SET_VOLUME 命令（App 内滑块）、DataStore 变更、远程音量回调
+     * 三条路都走这里，保证 [usbVolumePercent] 与控制器、持久化三者一致。
+     */
+    private fun applyUsbVolume(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        usbVolumePercent = clamped
+        usbExclusiveController.setVolume(clamped)
+        // 系统音量面板的数字取自注册时读过一次的 provider 当前值；音量从 App 内滑块等
+        // 非音量键路径变化后，这里同步一次把面板对齐，否则面板会一直停在旧数字。
+        (mediaSession?.player as? RemoteVolumePlayer)?.syncFromSource()
+        serviceScope.launch {
+            runCatching { usbExclusivePreferences.setVolumePercent(clamped) }
+                .onFailure { error ->
+                    if (error !is CancellationException) Log.w(TAG, "保存 USB 音量失败", error)
+                }
+        }
+    }
+
+    /**
+     * 交给 MediaSession 的播放器：USB 独占时包一层 [RemoteVolumePlayer]，让系统把
+     * 音量键与系统音量条交给 App（详见该类注释）；退出独占时交回裸播放器，音量键
+     * 立刻恢复系统行为。挂/摘就是这一次选择——Media3 每次换 player 都会重读
+     * DeviceInfo 并重挂远程音量 provider。
+     */
+    private fun playerForSession(exoPlayer: ExoPlayer): Player =
+        if (usbExclusiveEnabled) RemoteVolumePlayer(exoPlayer, remoteVolumeSource) else exoPlayer
+
+    /**
+     * 回放增益（ReplayGain）：把当前曲目的响度增益换算成线性系数写进
+     * [loudnessGainProvider]。换歌、切换开关、重建播放器后都要重算一次。
+     */
+    private fun updateLoudnessGain() {
+        updateLoudnessGain(player)
+    }
+
+    private fun updateLoudnessGain(exoPlayer: ExoPlayer?) {
+        val gainDb = exoPlayer?.currentMediaItem?.mediaMetadata?.extras?.loudnessGainDb()
+        val linear = if (loudnessGainEnabled) loudnessGainLinear(gainDb) else UNITY_GAIN
+        loudnessGainProvider.linearGain = linear
+        // 诊断：界面上看不出增益是否生效，留一条日志供真机排查（媒体信息没传到服务端时
+        // 会一直打 gainDb=null，一眼能认出来）。
+        Log.i(TAG, "loudness gain: gainDb=$gainDb enabled=$loudnessGainEnabled linear=$linear")
+    }
+
+    private fun observeLoudnessGain(exoPlayer: ExoPlayer) {
+        exoPlayer.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                updateLoudnessGain(exoPlayer)
+            }
+        })
+    }
+
     private fun createPlayer(isUsbExclusive: Boolean): ExoPlayer {
         // 静音跳曲检测只读电平不改数据，包在两条链路的最外层都安全（USB 独占路径的
         // 字节对齐逻辑在 LibusbAudioSink 内部完成，不受外层包裹影响）。
@@ -329,7 +440,12 @@ class PlaybackService : MediaSessionService() {
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                         .build()
                     return SilenceSkippingAudioSink(
-                        LibusbAudioSink(delegate, usbExclusiveController),
+                        // 回放增益夹在电平表与泵之间：电平表读到的是增益前的电平，
+                        // 静音跳曲的阈值判定不受影响。
+                        LoudnessGainAudioSink(
+                            LibusbAudioSink(delegate, usbExclusiveController),
+                            loudnessGainProvider
+                        ),
                         silenceLevelMonitor
                     )
                 }
@@ -345,20 +461,17 @@ class PlaybackService : MediaSessionService() {
                         .setEnableFloatOutput(enableFloatOutput)
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                         .build()
-                    return SilenceSkippingAudioSink(delegate, silenceLevelMonitor)
+                    return SilenceSkippingAudioSink(
+                        LoudnessGainAudioSink(delegate, loudnessGainProvider),
+                        silenceLevelMonitor
+                    )
                 }
             }.setEnableAudioFloatOutput(true)
         }
 
         return ExoPlayer.Builder(this)
             .setRenderersFactory(renderersFactory)
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(
-                    AuthHttpDataSourceFactory {
-                        (application as PulsarApplication).activeAuthorization
-                    }
-                )
-            )
+            .setMediaSourceFactory(DefaultMediaSourceFactory(cacheDataSourceFactory()))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -372,8 +485,28 @@ class PlaybackService : MediaSessionService() {
             // 耗尽补零（爆音），超 400ms 看门狗回退系统音频（中断）。
             .setWakeMode(C.WAKE_MODE_LOCAL)
             .build()
-            .also { observeOutputDiagnostics(it) }
+            .also {
+                observeOutputDiagnostics(it)
+                observeLoudnessGain(it)
+            }
     }
+
+    /**
+     * 播放数据源：手机本地副本（缓存）套在原始网络源外面——命中读本地、未命中边读边写，
+     * LRU 淘汰由 `SimpleCache` 自己管，不自己造轮子。
+     *
+     * [CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR] 是 spec 铁律 1 的落点：读缓存出错就
+     * 退回网络。缓存层的问题绝不能变成播不了歌。
+     *
+     * 缓存实例在 [PulsarApplication] 里（进程级单例，界面也在用它查完整副本），
+     * 这里只取用不释放——释放会让界面的查询全变成异常。
+     */
+    private fun cacheDataSourceFactory(): DataSource.Factory = CacheDataSource.Factory()
+        .setCache((application as PulsarApplication).mediaCacheStore)
+        .setUpstreamDataSourceFactory(
+            AuthHttpDataSourceFactory { (application as PulsarApplication).activeAuthorization }
+        )
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     private fun capturePlayerState(oldPlayer: ExoPlayer): PlayerRebuildState {
         val items = (0 until oldPlayer.mediaItemCount)
@@ -426,11 +559,14 @@ class PlaybackService : MediaSessionService() {
             oldPlayer.playWhenReady = false
             restorePlayerState(newPlayer, state)
             newPlayer.setPreferredAudioDevice(usbOutputDevice.value)
-            mediaSession?.setPlayer(newPlayer)
+            mediaSession?.setPlayer(playerForSession(newPlayer))
             if (isUsbExclusive) usbExclusiveController.enable()
             else usbExclusiveController.disable()
             player = newPlayer
             usbExclusiveEnabled = isUsbExclusive
+            // 新播放器的 currentMediaItem 已经就位，按它重算一次增益（换播放器时
+            // 队列是整份搬过去的，旧播放器的监听器不会再触发）。
+            updateLoudnessGain()
             oldPlayer.release()
             newPlayer.playWhenReady = state.playWhenReady
         } catch (error: Throwable) {

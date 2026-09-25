@@ -50,7 +50,7 @@ fun computeLevelDb(buffer: ByteBuffer, encoding: Int): Double {
 }
 
 /** 从小端 buffer 读 3 字节有符号 PCM24 样本并符号扩展到 Int。 */
-private fun readPcm24(buffer: ByteBuffer): Int {
+internal fun readPcm24(buffer: ByteBuffer): Int {
     val b0 = buffer.get().toInt() and 0xFF
     val b1 = buffer.get().toInt() and 0xFF
     val b2 = buffer.get().toInt() and 0xFF

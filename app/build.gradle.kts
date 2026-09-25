@@ -93,6 +93,10 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.5.1")
     implementation("androidx.media3:media3-session:1.5.1")
     implementation("androidx.media3:media3-ui:1.5.1")
+    // 本地音频缓存（离线能听）：SimpleCache 在 datasource，索引数据库在 database。
+    // 前者此前只是 exoplayer 的传递依赖，后者根本没进来——两个都要显式声明才稳。
+    implementation("androidx.media3:media3-datasource:1.5.1")
+    implementation("androidx.media3:media3-database:1.5.1")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("io.ktor:ktor-client-android:3.0.3")
     implementation("io.ktor:ktor-client-content-negotiation:3.0.3")

@@ -185,7 +185,7 @@ LazyVerticalGrid(columns = GridCells.Fixed(2)) {
 - `ui/theme/Color.kt` - 配色方案
 - `ui/theme/Type.kt` - 字体系统
 - `ui/theme/Theme.kt` - 主题配置
-- `ui/theme/Dimensions.kt` - 设计常量
+- `ui/components/LiquidGlass.kt` - 液态玻璃材质（模糊 / 透镜 / 圆角统一出处）
 
 ---
 

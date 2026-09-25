@@ -147,6 +147,64 @@ class CoverPaletteTest {
         val hue = g.top.toHsl().h
         assertTrue("hue=$hue", hue in 100f..160f)
     }
+
+    // ===== 强调色（进度条填充）=====
+
+    /** 品牌靛蓝的色相 / 亮度，用来区分「取到了封面主色」和「回退了品牌色」。 */
+    private val brandHue = BrandPrimary.toHsl().h
+
+    @Test
+    fun `无封面时强调色回退品牌靛蓝`() {
+        assertEquals(BrandPrimary, coverAccent(swatches = null))
+        assertEquals(BrandPrimary, coverAccent(swatches = emptyList()))
+    }
+
+    @Test
+    fun `全中性色板回退品牌靛蓝`() {
+        assertEquals(BrandPrimary, coverAccent(listOf(CoverSwatch(0xFFCCCCCC.toInt(), 100))))
+    }
+
+    @Test
+    fun `红色封面的强调色保留红相`() {
+        val accent = coverAccent(listOf(CoverSwatch(0xFFDC2626.toInt(), 100))).toHsl()
+        assertTrue("hue=${accent.h}", accent.h <= 15f || accent.h >= 345f)
+    }
+
+    @Test
+    fun `强调色亮度落在深浅两种底子上都读得出的区间`() {
+        // 深色沉浸页压在暗封面上要看得见（不能太暗），浅色玻璃条上要有对比（不能太亮）。
+        val accent = coverAccent(listOf(CoverSwatch(0xFFDC2626.toInt(), 100))).toHsl()
+        assertTrue("l=${accent.l}", accent.l in 0.52f..0.70f)
+    }
+
+    @Test
+    fun `过饱和的封面主色被压到上限`() {
+        val accent = coverAccent(listOf(CoverSwatch(0xFF00FF00.toInt(), 100))).toHsl()
+        assertTrue("s=${accent.s}", accent.s <= 0.85f)
+    }
+
+    @Test
+    fun `低饱和但过选色门槛的封面主色被提到可用饱和度且色相不变`() {
+        // 灰蓝（HSL 约 220°/0.16/0.50）：刚过 0.15 的选色门槛，直接用会像一团脏灰。
+        val accent = coverAccent(listOf(CoverSwatch(0xFF6B7994.toInt(), 100))).toHsl()
+        assertTrue("s=${accent.s}", accent.s >= 0.45f)
+        // 色相仍是那个灰蓝（≈220°），而不是回退色品牌靛蓝（≈239°）
+        assertTrue("hue=${accent.h}", accent.h in 205f..235f)
+        assertTrue("brandHue=$brandHue", kotlin.math.abs(accent.h - brandHue) > 10f)
+    }
+
+    @Test
+    fun `渐变结构里带上强调色`() {
+        val swatches = listOf(CoverSwatch(0xFFDC2626.toInt(), 100))
+        assertEquals(coverAccent(swatches), coverGradient(swatches, darkTheme = true).accent)
+        assertEquals(coverAccent(swatches), coverGradient(swatches, darkTheme = false).accent)
+    }
+
+    @Test
+    fun `无封面时渐变结构里的强调色也回退品牌靛蓝`() {
+        assertEquals(BrandPrimary, defaultCoverGradient(darkTheme = false).accent)
+        assertEquals(BrandPrimary, defaultCoverGradient(darkTheme = true).accent)
+    }
 }
 
 /** 测试辅助：Compose Color → HSL 三元组。 */

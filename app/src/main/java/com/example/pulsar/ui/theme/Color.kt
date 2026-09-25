@@ -29,10 +29,6 @@ val SuccessGreen = Color(0xFF10B981)
 val WarningAmber = Color(0xFFF59E0B)
 val ErrorRed = Color(0xFFEF4444)
 
-// ===== 玻璃效果专用色（半透明白色） =====
-val GlassWhite = Color(0xCCFFFFFF) // 80% 不透明度的白色，用于玻璃态卡片
-val GlassBorder = Color(0x33FFFFFF) // 20% 不透明度的白色，用于玻璃边框
-
 // ===== 深色模式（可选，保留备用） =====
 val DarkBackground = Color(0xFF0F172A)
 val DarkSurface = Color(0xFF1E293B)

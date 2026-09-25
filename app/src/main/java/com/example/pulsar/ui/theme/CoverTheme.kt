@@ -32,7 +32,8 @@ fun rememberCoverGradient(coverRequest: JellyfinRequest?, darkTheme: Boolean): C
     val fallback = CoverGradient(
         top = MaterialTheme.colorScheme.primaryContainer,
         middle = MaterialTheme.colorScheme.surfaceVariant,
-        bottom = MaterialTheme.colorScheme.background
+        bottom = MaterialTheme.colorScheme.background,
+        accent = BrandPrimary
     )
     // key 同时含 URL 与 Authorization：重新登录换 token 但曲目未变时（URL 不变）也能重新取色。
     LaunchedEffect(coverRequest?.url, coverRequest?.headers["Authorization"]) {

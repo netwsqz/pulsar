@@ -40,6 +40,16 @@ class JellyfinDtoTest {
     }
 
     @Test
+    fun `maps file path for library file operations`() {
+        // Path 是 Jellyfin 返回的绝对路径（仅管理员可见），删歌/改名要拿它定位文件；
+        // 没有这个字段时为 null，文件操作菜单对这首歌不可用。
+        val withPath = JellyfinItemDto("song-4", "Song", path = "E:\\file\\Te_Music\\a.flac").toTrack()
+        assertEquals("E:\\file\\Te_Music\\a.flac", withPath.filePath)
+
+        assertNull(JellyfinItemDto("song-5", "Song").toTrack().filePath)
+    }
+
+    @Test
     fun `maps album fields preferring album artist`() {
         val album = JellyfinItemDto(
             id = "album-1",

@@ -12,15 +12,41 @@
 
 | 接口 | 方法 | 说明 |
 |---|---|---|
-| `/api/health` | GET | 服务健康 + ffmpeg + 凭证状态 |
-| `/api/search?q=<关键词>&limit=20` | GET | 搜歌，每项含 `available_qualities` |
+| `/api/health` | GET | 服务健康 + ffmpeg + 凭证状态 + 曲库索引（`library.ready` / `library.count`） |
+| `/api/search?q=<关键词>&limit=20` | GET | 搜歌，每项含 `available_qualities`、`in_library`、`downloading` |
 | `/api/album/search?q=<关键词>` | GET | 搜专辑 |
-| `/api/album/{album_mid}/songs` | GET | 专辑全部 song_mid |
-| `/api/download` | POST | `{"song_mid": "...", "quality": "flac"}` → `{"job_id": "..."}` |
-| `/api/download/album` | POST | `{"album_mid": "...", "quality": "flac"}` → 整张逐首入队 |
+| `/api/album/{album_mid}/songs` | GET | 专辑曲目：`songs`（`song_mid` + 歌名 `name` + 歌手 `singer` + `in_library` / `downloading`）、`song_mids` |
+| `/api/download` | POST | `{"song_mid": "...", "quality": "flac", "title": "...", "artist": "..."}` → `{"job_id": "...", "skipped": false}` |
+| `/api/download/album` | POST | `{"album_mid": "...", "quality": "flac"}` → 整张逐首入队；带 `"song_mids": ["..."]` 则只入队选中的曲目（App 的「选曲下载」） |
 | `/api/jobs` | GET | 任务列表（最新 100 条） |
 | `/api/jobs/{job_id}` | GET | 单任务：`queued/running/done/failed` + `error` + `final_path` |
 | `/api/credential/retry` | POST | 凭证过期后重提（需 QQ 音乐客户端运行中） |
+| `/api/library/delete` | POST | 🔒 `{"paths": [...]}` → `{"deleted": [...], "failed": [{"path", "error"}]}`（挪进回收站） |
+| `/api/library/rename` | POST | 🔒 `{"path", "title"?, "artist"?, "album"?}` → `{"ok", "path"}`（改**内嵌标签**） |
+| `/api/library/recycle` | GET | 🔒 `{"files": [{"rel_path", "size", "deleted_at"}], "total_size"}` |
+| `/api/library/recycle/restore` | POST | 🔒 `{"paths": [...]}` → `{"restored": [...], "failed": [...]}` |
+| `/api/library/recycle/purge` | POST | 🔒 `{"purged": n}`（**唯一不可逆**） |
+
+🔒 = 需要文件操作密钥，请求头带 `X-Pulsar-Key`；缺密钥或对不上回 **401**。
+
+## 文件操作密钥
+
+服务监听 `0.0.0.0` 且没有账号体系，所以文件管理那五个接口单独配了一把锁（`library_files.py` 是**全服务唯一会动用户文件**的模块）。
+
+- 首次启动自动生成，存在 `server/.file_ops_key`（已 gitignore），**启动日志会打印密钥值**，App 设置页填一次。
+- **只锁上表里带 🔒 的五个**。搜索、下载、任务查询一律不挂——密钥对不上时听歌下歌照常。
+- 密钥文件读不出来（目录只读等）时退化成临时密钥，服务照常起，只是重启后要重填。
+- 删 / 改 / 恢复成功后会**立刻重扫曲库索引**，否则删完想重下会被去重挡下来（清空回收站不动曲库，不重扫）。
+
+## 曲库去重
+
+服务后台维护一份 `E:\file\Te_Music` 的曲库索引（`library_index.py`，**只读**，启动时扫一遍、之后每 3 分钟对比目录快照，有变化才重扫）。判定钥匙优先取音频标签（`TITLE`/`ARTIST`），标签缺失才回退解析文件名。
+
+- 搜索与专辑曲目接口给每首歌带 `in_library`（已在库）与 `downloading`（任务队列里 `queued`/`running`）。
+- 下载**默认跳过已在库的**：单曲回 `{"job_id": "", "skipped": true}`（字段形状与正常响应一致，老客户端不会解析失败）；整张下载回 `count`（入队数）+ `skipped_count`（跳过数）。
+- **要重下就带 `force: true`**（单曲与整张都支持）。整张下载时显式传了 `song_mids` 的，服务端按勾选原样入队、不自动跳过——勾选本身就是强制。
+- **判定不出来一律按「没有」处理**：索引未就绪（服务刚起的那十几秒，`/api/health` 的 `library.ready=false`）、歌名读不出、索引抛异常——一律照常下载、不报错。宁可漏判，不误判挡人。
+- 服务自己下载成功的歌会**立刻**并入索引，不等下一次周期扫描。
 
 ## 关键行为
 

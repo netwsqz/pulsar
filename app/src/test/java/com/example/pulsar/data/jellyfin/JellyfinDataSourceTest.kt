@@ -20,6 +20,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -89,6 +90,32 @@ class JellyfinDataSourceTest {
                 "DeviceId=\"$deviceId\", Version=\"0.1.0\", Token=\"token-1\"",
             request.headers[HttpHeaders.Authorization]
         )
+        client.close()
+    }
+
+    @Test
+    fun `music list maps replay gain and leaves tracks without loudness data untouched`() = runTest {
+        // NormalizationGain 是 Jellyfin 10.9+ 按 -18 LUFS 基准现算的回放增益（dB）。
+        // JSON 里字段名写错的话会被 ignoreUnknownKeys 静默吞掉——正是这条用例要挡的。
+        val client = HttpClient(MockEngine {
+            respond(
+                content = "{\"Items\":[" +
+                    "{\"Id\":\"track-1\",\"Name\":\"Loud\",\"Type\":\"Audio\",\"NormalizationGain\":-7.14}," +
+                    "{\"Id\":\"track-2\",\"Name\":\"NoLoudnessData\",\"Type\":\"Audio\"}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        ).getMusicItems("user-1", "token-1")
+
+        assertTrue(result.isSuccess)
+        val tracks = result.getOrThrow()
+        assertEquals(-7.14f, tracks[0].normalizationGainDb!!, 0.001f)
+        assertNull("没有响度数据的曲目必须保持 null，播放时按原样走", tracks[1].normalizationGainDb)
         client.close()
     }
 
@@ -381,6 +408,35 @@ class JellyfinDataSourceTest {
             "https://media.example.com/Items/album-1/Images/Primary",
             request.url
         )
+        client.close()
+    }
+
+    @Test
+    fun `track list requests ask for the file path`() = runTest {
+        // 删歌/改名要用每首歌的 Path 字段（ADR-0001：文件操作走伴生服务，App 负责传路径）。
+        // 歌曲列表、专辑/播放列表子曲目、搜索三类都得带上；专辑/播放列表本身不用。
+        val fields = mutableListOf<String?>()
+        val client = HttpClient(MockEngine { request ->
+            fields += request.url.parameters["Fields"]
+            respond(
+                content = "{\"Items\":[{\"Id\":\"track-1\",\"Name\":\"Track One\",\"Type\":\"Audio\"}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val dataSource = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        )
+
+        dataSource.getMusicItems("user-1", "token-1")
+        dataSource.getAlbumTracks("user-1", "token-1", "album-1")
+        dataSource.search("user-1", "token-1", "Beatles")
+
+        assertEquals("PrimaryImageAspectRatio,Genres,Path", fields[0])
+        assertEquals("PrimaryImageAspectRatio,Genres,Path", fields[1])
+        assertEquals("PrimaryImageAspectRatio,Genres,ChildCount,Path", fields[2])
         client.close()
     }
 

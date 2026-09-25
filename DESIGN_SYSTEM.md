@@ -22,11 +22,9 @@
 - 保留 darkColorScheme 备用
 - `PulsarTheme` 组合函数
 
-**`ui/theme/Dimensions.kt`**
-- 玻璃效果参数（模糊半径 15dp、不透明度 80%）
-- 圆角系统（8/12/16/24dp）
-- 间距系统（4/8/16/24/32dp）
-- 触摸目标最小尺寸 48dp
+**`ui/components/LiquidGlass.kt`**
+- 液态玻璃材质的唯一出处：模糊半径 16dp、透镜 14/28dp、面板圆角 20dp
+- （早先的 `ui/theme/Dimensions.kt` 令牌全仓库零引用，已删除）
 
 #### 2. MainActivity.kt 逻辑优化
 

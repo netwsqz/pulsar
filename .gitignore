@@ -24,6 +24,8 @@ Thumbs.db
 *.keystore
 *.jks
 *.log
+# 文件操作密钥：服务启动时自动生成，每台机器一把，别提交
+server/.file_ops_key
 
 # Project-local experiments and downloaded assets
 node_modules/

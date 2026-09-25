@@ -58,7 +58,8 @@ class JellyfinDataSource(
                 mapOf(
                     "IncludeItemTypes" to "Audio",
                     "Recursive" to "true",
-                    "Fields" to "PrimaryImageAspectRatio,Genres"
+                    // Path 是删歌/改名的定位依据（ADR-0001），歌曲列表必带
+                    "Fields" to "PrimaryImageAspectRatio,Genres,Path"
                 )
             ).map(JellyfinItemDto::toTrack)
         }
@@ -149,7 +150,7 @@ class JellyfinDataSource(
                     "IncludeItemTypes" to "Audio,MusicAlbum,Playlist",
                     "Recursive" to "true",
                     "Limit" to "50",
-                    "Fields" to "PrimaryImageAspectRatio,Genres,ChildCount"
+                    "Fields" to "PrimaryImageAspectRatio,Genres,ChildCount,Path"
                 )
             )
             SearchResults(
@@ -215,7 +216,8 @@ class JellyfinDataSource(
             "ParentId" to parentId,
             "IncludeItemTypes" to "Audio",
             "Recursive" to "true",
-            "Fields" to "PrimaryImageAspectRatio,Genres"
+            // 与歌曲列表同理：专辑/播放列表里的歌也要能删能改名
+            "Fields" to "PrimaryImageAspectRatio,Genres,Path"
         )
     ).map(JellyfinItemDto::toTrack)
 

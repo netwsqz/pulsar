@@ -1,7 +1,15 @@
 package com.example.pulsar
 
 import android.app.Application
+import android.util.Log
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import com.example.pulsar.ui.components.LiquidGlassSlider
+import com.example.pulsar.ui.components.VolumeFeedback
+import com.example.pulsar.ui.components.VolumeFeedbackOverlay
+import com.example.pulsar.ui.components.glassBarSliderColors
+import com.example.pulsar.ui.components.liquidGlass
+import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.PulsarTheme
 import com.example.pulsar.ui.theme.rememberCoverGradient
@@ -91,8 +99,11 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -108,6 +119,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -126,17 +138,20 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -199,22 +214,22 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.playback.ForegroundVolumeKeys
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackMode
+import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.SilenceSkipMediaCommands
+import com.example.pulsar.playback.putLoudnessGain
 import com.example.pulsar.playback.SleepTimer
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
 import java.time.LocalDate
 import com.example.pulsar.playback.buildPlaybackOrder
 import com.example.pulsar.playback.formatPosition
 import com.example.pulsar.playback.playbackModeConfig
+import com.example.pulsar.playback.positionReachedSeekTarget
 import com.google.common.util.concurrent.ListenableFuture
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
 import com.kyant.backdrop.backdrops.layerBackdrop
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -232,14 +247,30 @@ import sh.calvin.reorderable.rememberReorderableLazyListState
 class MainActivity : ComponentActivity() {
     private var controllerFuture: ListenableFuture<MediaController>? = null
 
+    /**
+     * 前台音量键接管。MIUI 不把音量键派发给远程音量会话（见 [ForegroundVolumeKeys] 与
+     * docs/usb-volume-key-interception.md §10），只有 Activity 在前台时自己截下来这一条路，
+     * 所以拦截点必须在 Activity 上，而不是 Compose 里（Compose 的按键回调要先拿到焦点，
+     * 更晚、也更不可靠）。
+     */
+    private val volumeKeys = ForegroundVolumeKeys()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
-        setContent { PulsarApp(controllerFuture = controllerFuture) }
+        setContent { PulsarApp(controllerFuture = controllerFuture, volumeKeys = volumeKeys) }
+    }
+
+    /** 独占开启时吃掉音量键交给 App，其余情况一律放行（[ForegroundVolumeKeys.handle]）。 */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (volumeKeys.handle(event.keyCode, event.action)) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {
+        volumeKeys.snapshot = null
+        volumeKeys.sink = null
         controllerFuture?.let { future ->
             if (future.isDone) runCatching { future.get().release() } else future.cancel(false)
         }
@@ -250,7 +281,10 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
+private fun PulsarApp(
+    controllerFuture: ListenableFuture<MediaController>?,
+    volumeKeys: ForegroundVolumeKeys
+) {
     val application = LocalContext.current.applicationContext as PulsarApplication
     val viewModelFactory = remember(application) { JellyfinViewModelFactory(application) }
     val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
@@ -281,6 +315,7 @@ private fun PulsarApp(controllerFuture: ListenableFuture<MediaController>?) {
                 state = state,
                 viewModel = viewModel,
                 controllerFuture = controllerFuture,
+                volumeKeys = volumeKeys,
                 qqState = qqState,
                 qqViewModel = qqViewModel
             )
@@ -472,10 +507,11 @@ private fun MusicLibraryScreen(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
     controllerFuture: ListenableFuture<MediaController>?,
+    volumeKeys: ForegroundVolumeKeys,
     qqState: QQDownloadUiState = QQDownloadUiState(),
     qqViewModel: QQDownloadViewModel? = null
 ) {
-    val controllerState = rememberMediaController(controllerFuture)
+    val controllerState = rememberMediaController(controllerFuture, volumeKeys)
     // 播放模式：顺序循环 → 单曲循环 → 随机播放，点按钮循环切换。
     var playbackMode by remember { mutableStateOf(PlaybackMode.SEQUENCE) }
     val localAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -519,6 +555,8 @@ private fun MusicLibraryScreen(
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
+    // 音量浮窗的显示窗口：独占模式下音量键被 App 截获、系统音量条不会弹，靠它给唯一的视觉反馈。
+    val volumeFeedback by VolumeFeedback.state.collectAsStateWithLifecycle()
     DisposableEffect(controllerState.controller) {
         val controller = controllerState.controller ?: return@DisposableEffect onDispose { }
         val listener = object : Player.Listener {
@@ -532,45 +570,93 @@ private fun MusicLibraryScreen(
         onDispose { controller.removeListener(listener) }
     }
     // 统一播放入口：记录当前曲目后交给 playTracks。未连接播放服务时直接忽略。
+    // 离线时 playTracks 内部会跳过没缓存的歌（队列里混着能放/不能放时按工单 03 口径处理）。
+    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
         val controller = controllerState.controller
         if (controller != null) {
             viewModel.setPlaybackQueue(trackList, trackId)
-            playTracks(trackList, trackId, controller, playbackMode, viewModel::streamUrl)
+            playTracks(
+                trackList, trackId, controller, playbackMode, viewModel::streamUrl,
+                playableFilter = { viewModel.isPlayable(it) },
+                onBlocked = { snackbarScope.launch { snackbarHostState.showSnackbar("这首歌没有缓存，联网后才能播放") } }
+            )
         }
     }
-    // 添加到播放队列：复用 playTracks 的 MediaItem 构建逻辑，把单曲插到当前曲目之后。
-    // 队列为空时直接设为唯一曲目并自动播放；否则插在 currentIndex + 1 处，不打断当前播放。
-    val snackbarHostState = remember { SnackbarHostState() }
-    val snackbarScope = rememberCoroutineScope()
+    // 离线态（工单 03/04）：列表行据此标灰，点击没缓存的歌给明确提示。
+    val offlineState = remember(state.isOffline, state.cachedTrackIds) {
+        OfflineState(
+            active = state.isOffline,
+            cachedTrackIds = state.cachedTrackIds,
+            onUnplayable = { track ->
+                snackbarScope.launch {
+                    snackbarHostState.showSnackbar(viewModel.unplayableReason(track) ?: "这首歌没有缓存")
+                }
+            }
+        )
+    }
     val onAddToQueue: (Track) -> Unit = { track ->
         val ctrl = controllerState.controller
         if (ctrl != null) {
-            val url = viewModel.streamUrl(track)
-            if (url != null) {
-                val mediaItem = MediaItem.Builder()
-                    .setUri(url)
-                    .setMediaId(track.id)
-                    .setTag(track.imageTag)
-                    .setMediaMetadata(
-                        MediaMetadata.Builder()
-                            .setTitle(track.title)
-                            .setArtist(track.artist)
-                            .setAlbumTitle(track.album)
-                            .build()
-                    )
-                    .build()
-                if (ctrl.mediaItemCount == 0) {
-                    ctrl.setMediaItem(mediaItem)
-                    ctrl.prepare()
-                    ctrl.play()
-                } else {
-                    val insertIndex = (ctrl.currentMediaItemIndex + 1).coerceAtMost(ctrl.mediaItemCount)
-                    ctrl.addMediaItem(insertIndex, mediaItem)
+            // 离线没缓存的歌进不了队列——插进去等到它播也是断，不如当场说清。
+            if (!viewModel.isPlayable(track)) {
+                snackbarScope.launch { snackbarHostState.showSnackbar("这首歌没有缓存，联网后才能播放") }
+            } else {
+                val url = viewModel.streamUrl(track)
+                if (url != null) {
+                    val mediaItem = MediaItem.Builder()
+                        .setUri(url)
+                        .setMediaId(track.id)
+                        .setTag(track.imageTag)
+                        .setMediaMetadata(track.toPlaybackMetadata())
+                        .build()
+                    if (ctrl.mediaItemCount == 0) {
+                        ctrl.setMediaItem(mediaItem)
+                        ctrl.prepare()
+                        ctrl.play()
+                    } else {
+                        val insertIndex = (ctrl.currentMediaItemIndex + 1).coerceAtMost(ctrl.mediaItemCount)
+                        ctrl.addMediaItem(insertIndex, mediaItem)
+                    }
+                    snackbarScope.launch { snackbarHostState.showSnackbar("已添加到播放队列") }
                 }
-                snackbarScope.launch { snackbarHostState.showSnackbar("已添加到播放队列") }
             }
         }
+    }
+    // ── 曲库文件操作（长按菜单 → 删除 / 改名，走 PC 伴生服务）──────────────
+    // 回调经 CompositionLocal 发给所有 TrackRow（五个列表页共用，不逐页传参）；
+    // 对话框收在本层函数末尾——只有这里同时拿得到 ViewModel 和播放器控制器。
+    var renameTarget by remember { mutableStateOf<Track?>(null) }
+    var deleteTarget by remember { mutableStateOf<List<Track>>(emptyList()) }
+    val trackFileOps = remember {
+        TrackFileOps(
+            onRename = {
+                viewModel.clearFileOpsMessage()
+                renameTarget = it
+            },
+            onDelete = {
+                viewModel.clearFileOpsMessage()
+                deleteTarget = listOf(it)
+            }
+        )
+    }
+    // 多选模式：状态在 VM（跨页面结构），UI 只做转发。active = 非空集合。
+    val multiSelect = MultiSelectState(
+        active = state.multiSelectIds.isNotEmpty(),
+        selected = state.multiSelectIds,
+        onToggle = viewModel::toggleMultiSelect,
+        onEnter = viewModel::enterMultiSelect
+    )
+    // 多选模式下的「删除」按钮目标：勾选的全部曲目，进同一个确认框。
+    var batchDeleteTargets by remember { mutableStateOf<List<Track>>(emptyList()) }
+    // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
+    val currentListTracks: List<Track> = when (val s = section) {
+        LibrarySection.Tracks, LibrarySection.Discover -> tracks
+        is LibrarySection.AlbumDetail -> state.albumTracks.orEmpty()
+        is LibrarySection.PlaylistDetail -> state.playlistTracks.orEmpty()
+        LibrarySection.Search -> state.searchResults?.tracks.orEmpty()
+        else -> emptyList()
     }
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（全部音乐/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
@@ -587,6 +673,14 @@ private fun MusicLibraryScreen(
             LibrarySection.Settings -> section = detailOrigin
             else -> section = LibrarySection.Discover
         }
+    }
+    // 多选模式下返回键先退出多选，而不是退出页面（后声明的 BackHandler 优先响应）。
+    if (state.multiSelectIds.isNotEmpty()) {
+        BackHandler { viewModel.clearMultiSelect() }
+    }
+    // 切到别的页面自动退出多选，别让它跨页面残留。
+    LaunchedEffect(section) {
+        if (state.multiSelectIds.isNotEmpty()) viewModel.clearMultiSelect()
     }
     // 全屏播放页开关：迷你播放条点击打开，收起按钮 / 返回键关闭。
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -613,16 +707,29 @@ private fun MusicLibraryScreen(
     val coverTop by animateColorAsState(coverGradient.top, gradientSpec, label = "coverGradientTop")
     val coverMiddle by animateColorAsState(coverGradient.middle, gradientSpec, label = "coverGradientMiddle")
     val coverBottom by animateColorAsState(coverGradient.bottom, gradientSpec, label = "coverGradientBottom")
+    // 强调色（进度条填充）跟着一起过渡，切歌时不会「背景渐变过去了、进度条还是旧色」。
+    val coverAccentAnimated by animateColorAsState(coverGradient.accent, gradientSpec, label = "coverGradientAccent")
     val backgroundBrush = Brush.verticalGradient(
         0f to coverTop,
         0.3f to coverMiddle,
         1f to coverBottom
     )
-    // 全屏播放页同款背景：传动画后的三色，切歌时全屏背景跟着 800ms 过渡。
-    val animatedCoverGradient = CoverGradient(top = coverTop, middle = coverMiddle, bottom = coverBottom)
+    // 全屏播放页同款背景：传动画后的三色 + 强调色，切歌时全屏背景与进度条一起 800ms 过渡。
+    val animatedCoverGradient = CoverGradient(
+        top = coverTop,
+        middle = coverMiddle,
+        bottom = coverBottom,
+        accent = coverAccentAnimated
+    )
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
     // SharedTransitionLayout 包住整个悬浮布局：迷你条小封面 ↔ 全屏页大封面共用
     // 同一 key 做 morph（打开/收起全屏页时封面跨布局连续飞行动画）。
+    CompositionLocalProvider(
+        LocalTrackFileOps provides trackFileOps,
+        LocalMultiSelect provides multiSelect,
+        LocalCoverAccent provides coverAccentAnimated,
+        LocalOfflineState provides offlineState
+    ) {
     SharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(backgroundBrush)) {
         val backdrop = rememberLayerBackdrop {
@@ -715,11 +822,23 @@ private fun MusicLibraryScreen(
                                 onConnectService = qq::connectService,
                                 onQualityChange = qq::updateQuality,
                                 onSearchQueryChange = qq::updateSearchQuery,
-                                onDownloadSong = qq::downloadSong,
+                                onDownloadSong = { qq.downloadSong(it) },
+                                onRequestRedownload = qq::requestRedownload,
+                                onConfirmRedownload = qq::confirmRedownload,
+                                onDismissRedownload = qq::dismissRedownload,
                                 onDownloadAlbum = qq::downloadAlbum,
+                                onSelectAlbumTracks = qq::openAlbumPicker,
+                                onToggleAlbumTrack = qq::toggleAlbumTrack,
+                                onSelectAllAlbumTracks = qq::selectAllAlbumTracks,
+                                onClearAlbumSelection = qq::clearAlbumSelection,
+                                onConfirmAlbumDownload = qq::confirmAlbumDownload,
+                                onRetryAlbumTracks = qq::retryAlbumTracks,
+                                onDismissAlbumPicker = qq::dismissAlbumPicker,
                                 onRetryCredential = qq::retryCredential,
                                 onRefreshCredential = qq::refreshCredential,
                                 onRefreshJobs = qq::refreshJobs,
+                                onFileOpsKeyInput = qq::updateFileOpsKeyInput,
+                                onSaveFileOpsKey = qq::saveFileOpsKey,
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
@@ -749,6 +868,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
+                        state = state,
+                        viewModel = viewModel,
                         controllerState = controllerState,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -798,6 +919,7 @@ private fun MusicLibraryScreen(
                 controllerState.controller?.applyPlaybackMode(mode)
             },
             currentTrack = currentTrack,
+            accentColor = coverAccentAnimated,
             coverFor = viewModel::trackCover,
             sharedTransitionScope = this@SharedTransitionLayout,
             // 全屏页展开时迷你封面取反隐藏：两侧都真正参与一次进出场，sharedBounds
@@ -858,8 +980,106 @@ private fun MusicLibraryScreen(
                 )
             }
         }
+        // 音量浮窗：按音量键时从顶部玻璃岛正下方冒出来的液态玻璃胶囊。
+        // 声明在全屏播放页**之后** = 压在全屏页之上（全屏页背景不透明，先声明就被它盖住了）；
+        // 用 backdrop 采样它下面的内容，所以又必须在记进 backdrop 的那层之外——本层正是。
+        // 独占关闭时不会弹：那时音量键根本不进 App（ForegroundVolumeKeys 一律放行给系统）。
+        VolumeFeedbackOverlay(
+            state = volumeFeedback,
+            backdrop = backdrop,
+            accent = coverAccentAnimated,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(top = GlassIslandTopSpacing + 8.dp)
+        )
+        // 多选操作条（工单 05）：玻璃岛正下方悬浮，「全选」只选当前页面的列表。
+        if (state.multiSelectIds.isNotEmpty()) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = GlassIslandTopSpacing + 8.dp, start = 16.dp, end = 16.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                tonalElevation = 2.dp,
+                shadowElevation = 8.dp
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "已选 ${state.multiSelectIds.size} 首",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = { viewModel.selectAllTracks(currentListTracks.map { it.id }) },
+                        enabled = currentListTracks.isNotEmpty()
+                    ) { Text("全选") }
+                    TextButton(onClick = viewModel::clearMultiSelect) { Text("取消") }
+                    TextButton(
+                        onClick = {
+                            // 同一个确认框：目标换成勾选的全部曲目
+                            deleteTarget = currentListTracks.filter { it.id in state.multiSelectIds }
+                        },
+                        enabled = state.multiSelectIds.isNotEmpty() && !state.isFileOpsBusy
+                    ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        }
         }
     }
+    }
+
+    // 文件操作对话框（删除确认 / 改名输入），压在所有内容之上。
+    // 单曲与批量删除走同一个确认框：deleteTarget 装的是一批 Track。
+    fun removeFromQueue(ids: Set<String>) {
+        val ctrl = controllerState.controller ?: return
+        // 倒序摘：removeMediaItem 会让后面的索引前移；正在播的索引跳过（VM 守卫已挡单曲，这里兜底）
+        for (i in ctrl.mediaItemCount - 1 downTo 0) {
+            if (i != ctrl.currentMediaItemIndex && ctrl.getMediaItemAt(i).mediaId in ids) {
+                ctrl.removeMediaItem(i)
+            }
+        }
+    }
+    TrackFileOpsDialogs(
+        renameTarget = renameTarget,
+        deleteTarget = deleteTarget,
+        state = state,
+        onRename = { target, title, artist, album ->
+            snackbarScope.launch {
+                if (viewModel.renameTrack(target, title, artist, album)) {
+                    renameTarget = null
+                    snackbarHostState.showSnackbar("已保存")
+                }
+            }
+        },
+        onDelete = { targets ->
+            snackbarScope.launch {
+                if (targets.size == 1) {
+                    val target = targets.first()
+                    if (viewModel.deleteTrack(target)) {
+                        removeFromQueue(setOf(target.id))
+                        deleteTarget = emptyList()
+                        snackbarHostState.showSnackbar("已删除，可在设置页的回收站恢复")
+                    }
+                } else {
+                    val deletedCount = viewModel.deleteTracks(targets)
+                    if (deletedCount > 0) {
+                        removeFromQueue(targets.map { it.id }.toSet())
+                        deleteTarget = emptyList()
+                        // 部分失败时 VM 已写 fileOpsMessage，一并带进提示
+                        val extra = viewModel.state.value.fileOpsMessage?.let { "；$it" }.orEmpty()
+                        snackbarHostState.showSnackbar("已删除 $deletedCount 首$extra")
+                    }
+                }
+            }
+        },
+        onDismissRename = { renameTarget = null },
+        onDismissDelete = { deleteTarget = emptyList() }
+    )
 }
 
 /**
@@ -902,15 +1122,10 @@ private fun GlassChipBar(
     }
     Row(
         modifier = modifier
-            .drawBackdrop(
+            .liquidGlass(
                 backdrop = backdrop,
-                shape = { RoundedCornerShape(20.dp) },
-                effects = {
-                    vibrancy()
-                    blur(16f.dp.toPx())
-                    lens(14f.dp.toPx(), 28f.dp.toPx())
-                },
-                onDrawSurface = { drawRect(glassSurface.copy(alpha = 0.8f)) } // 提高不透明度到 80%
+                // 表面色比播放条更实：岛下压着滚动的曲库，太透会看不清 chip 文字。
+                surface = glassSurface.copy(alpha = 0.8f)
             )
             .height(56.dp)
             .padding(horizontal = 8.dp),
@@ -1091,11 +1306,49 @@ private fun TracksContent(
     }
 }
 
+/** 长按菜单的文件操作入口（删除 / 改名，走 PC 伴生服务）：由 [MusicLibraryScreen] 提供——
+ * 只有它同时拿得到 ViewModel（发请求）和播放器控制器（删完清队列）——TrackRow 消费。
+ * 五个列表页共用同一组回调，专辑详情 / 播放列表详情 / 搜索 / 发现页的长按菜单一并生效。
+ * null = 菜单里不显示这两项。 */
+private class TrackFileOps(
+    val onRename: (Track) -> Unit,
+    val onDelete: (Track) -> Unit
+)
+
+private val LocalTrackFileOps = compositionLocalOf<TrackFileOps?> { null }
+
+/** 多选模式（工单 05）的行级入口：由 [MusicLibraryScreen] 提供，TrackRow 消费。
+ * active = 是否处于多选模式（选中行为从「播放」切到「勾选」，行首出现勾选框）。 */
+private class MultiSelectState(
+    val active: Boolean,
+    val selected: Set<String>,
+    val onToggle: (String) -> Unit,
+    val onEnter: (String) -> Unit
+)
+
+private val LocalMultiSelect = compositionLocalOf<MultiSelectState?> { null }
+
+/** 当前封面的取色强调色（[rememberCoverGradient] 的 accent，无封面回退品牌靛蓝）。由 [MusicLibraryScreen]
+ * 提供——只有它拿得到当前播放曲目——正在播放的均衡器条读它，和迷你条进度、全屏进度条同色。 */
+private val LocalCoverAccent = compositionLocalOf { BrandPrimary }
+
+/** 离线态与「哪些歌有完整副本」：由 [MusicLibraryScreen] 提供，所有 TrackRow 消费。
+ * cachedTrackIds 为 null = 在线（或还没算出来），不标灰。 */
+private class OfflineState(
+    val active: Boolean,
+    val cachedTrackIds: Set<String>?,
+    /** 点击没缓存的歌：弹「这首歌没有缓存」提示。 */
+    val onUnplayable: (Track) -> Unit
+)
+
+private val LocalOfflineState = compositionLocalOf<OfflineState?> { null }
+
 /** 单曲行：小封面 + 标题（大）+ 作者（灰色小字）+ 底部灰色分隔线。取消卡片形式，列表更紧凑。
  * 当前播放曲目：标题高亮为品牌色，封面上叠一层半透明遮罩 + 均衡器跳动条（暂停时静止）。
  * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。
  * 手势用 combinedClickable（Material 水波纹按压反馈），长按触觉由框架内置；触点坐标由旁挂的
- * 轻量 pointerInput 只观察不消费地记录，菜单仍锚定真实触点。 */
+ * 轻量 pointerInput 只观察不消费地记录，菜单仍锚定真实触点。
+ * 离线时没缓存的歌整行变灰（[dimmed]）：能看到、但现在放不了——跟「没有这首歌」是两回事。 */
 @Composable
 private fun TrackRow(
     track: Track,
@@ -1105,19 +1358,32 @@ private fun TrackRow(
     isCurrent: Boolean = false,
     isPlaying: Boolean = false,
     onAddToQueue: (() -> Unit)? = null,
+    dimmed: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var rowWindowOffset by remember { mutableStateOf(Offset.Zero) }
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
+    val multiSelect = LocalMultiSelect.current
+    // 离线且这首歌没有完整副本 → 整行标灰；点击改为弹「没缓存」提示，不发起播放。
+    val offline = LocalOfflineState.current
+    val dimmed = offline?.active == true && offline.cachedTrackIds?.contains(track.id) != true
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
                 .combinedClickable(
-                    onClick = onClick,
+                    // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）；
+                    // 离线没缓存的歌点击 = 弹「没缓存」提示，同样不发起播放（工单 03）。
+                    onClick = {
+                        when {
+                            multiSelect?.active == true -> multiSelect.onToggle(track.id)
+                            dimmed -> offline?.onUnplayable?.invoke(track)
+                            else -> onClick()
+                        }
+                    },
                     onLongClick = {
                         // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
                         val windowOffset = rowWindowOffset + lastDownOffset
@@ -1138,11 +1404,25 @@ private fun TrackRow(
                 .padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // 多选模式：行首勾选框只做指示，勾选动作在整行点击上。
+            if (multiSelect?.active == true) {
+                Checkbox(
+                    checked = track.id in multiSelect.selected,
+                    onCheckedChange = null
+                )
+                Spacer(Modifier.width(4.dp))
+            }
             Box {
                 AlbumCover(cover, track.title, Modifier.size(48.dp))
                 // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
+                // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
                 if (isCurrent) {
-                    PlayingIndicatorOverlay(isPlaying = isPlaying, modifier = Modifier.matchParentSize())
+                    PlayingIndicatorOverlay(
+                        isPlaying = isPlaying,
+                        modifier = Modifier
+                            .matchParentSize()
+                            .clip(RoundedCornerShape(8.dp)) // 与 AlbumCover 默认圆角一致
+                    )
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -1150,15 +1430,24 @@ private fun TrackRow(
                 Text(
                     track.title,
                     style = MaterialTheme.typography.bodyLarge,
-                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致。
-                    color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致；
+                    // 离线没缓存的歌整行降透明度（标灰）。
+                    color = when {
+                        isCurrent -> MaterialTheme.colorScheme.primary
+                        dimmed -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        else -> Color.Unspecified
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     track.artist,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (dimmed) {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1174,9 +1463,15 @@ private fun TrackRow(
     }
     // 长按弹出菜单：Popup 作为独立窗口渲染，动画在菜单内容上的 graphicsLayer 进行。
     if (showMenu) {
+        val fileOps = LocalTrackFileOps.current
         AddToQueueMenu(
             touchPoint = menuOffset,
             onAddToQueue = { onAddToQueue?.invoke() },
+            onRename = fileOps?.let { ops -> { ops.onRename(track) } },
+            onDelete = fileOps?.let { ops -> { ops.onDelete(track) } },
+            // 正在播的那首删除置灰：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
+            deleteEnabled = !isCurrent,
+            onMultiSelect = multiSelect?.let { ms -> { ms.onEnter(track.id) } },
             onDismiss = { showMenu = false }
         )
     }
@@ -1190,7 +1485,8 @@ private fun PlayingIndicatorOverlay(
     isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val barColor = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+    // 播放中取封面主题色（与迷你条进度、全屏进度条同源）；暂停时保持中性灰，一眼看得出没在放。
+    val barColor = if (isPlaying) LocalCoverAccent.current else MaterialTheme.colorScheme.onSurfaceVariant
     val transition = rememberInfiniteTransition(label = "playingBars")
     // 单周期 800ms：偏慢一点，避免在列表里显得躁。
     // InfiniteTransition 没有 animateDp 扩展，用 animateFloat 驱动 0f..1f 再映射到 4~14dp 高度。
@@ -1235,27 +1531,31 @@ private fun PlayingBar(height: Dp, color: Color) {
     )
 }
 
-/** 长按弹出的"添加到播放队列"上下文菜单。
+/** 长按弹出的上下文菜单：「添加到播放队列」+ 文件操作（改名 / 删除，可选项）。
  * 菜单以长按行作为锚点，尽量贴近触摸位置；外围保留阴影安全区，避免动画缩放时裁切阴影。 */
 @Composable
 private fun AddToQueueMenu(
     touchPoint: IntOffset,
     onAddToQueue: () -> Unit,
+    onRename: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    deleteEnabled: Boolean = true,
+    onMultiSelect: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
-    val scope = rememberCoroutineScope()
-    // 整体进入动画：弹性缩放 + 淡入。
+    // 整体进入动画只有弹性缩放，**没有整体淡入**：菜单带阴影，在同一个 layer 上跑 alpha 会让
+    // Android 走离屏合成，阴影在动画里闪（真机反馈）。菜单项自己本来就是逐条淡入的，整体再淡一遍看不出来。
     val menuScale = remember { Animatable(0.85f) }
-    val menuAlpha = remember { Animatable(0f) }
+    // 选中菜单项后：动作立刻执行 + 立刻关菜单，没有退场动画。
+    // 之前等两段 120ms 动画播完才动作，手感发黏（真机反馈）。
+    fun closeAnd(action: () -> Unit) {
+        action()
+        onDismiss()
+    }
     val shadowPaddingPx = with(LocalDensity.current) { 16.dp.toPx().toInt() }
-    // 菜单项逐条错峰弹出的透明度/位移开关。
-    var itemVisible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         menuScale.snapTo(0.85f)
-        menuAlpha.snapTo(0f)
-        menuScale.animateTo(1f, spring(dampingRatio = 0.6f, stiffness = 320f))
-        menuAlpha.animateTo(1f, spring(dampingRatio = 0.6f, stiffness = 320f))
-        itemVisible = true
+        menuScale.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 650f))
     }
     Popup(
         popupPositionProvider = object : PopupPositionProvider {
@@ -1276,13 +1576,7 @@ private fun AddToQueueMenu(
                 return IntOffset(x, y)
             }
         },
-        onDismissRequest = {
-            scope.launch {
-                menuScale.animateTo(0.85f, tween(120))
-                menuAlpha.animateTo(0f, tween(120))
-                onDismiss()
-            }
-        },
+        onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true)
     ) {
         Box(
@@ -1293,7 +1587,6 @@ private fun AddToQueueMenu(
                     .graphicsLayer {
                         scaleX = menuScale.value
                         scaleY = menuScale.value
-                        alpha = menuAlpha.value
                     }
             ) {
                 Surface(
@@ -1313,21 +1606,56 @@ private fun AddToQueueMenu(
                         LaunchedEffect(Unit) { menuItemVisible = true }
                         // 加队列成功的轻触觉反馈。
                         val menuView = LocalView.current
+                        fun tapFeedback() = menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         StaggeredMenuItem(
                             visible = menuItemVisible,
                             delayMs = 0,
                             icon = { Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
                             text = "添加到播放队列",
                             onClick = {
-                                menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                scope.launch {
-                                    menuScale.animateTo(0.85f, tween(120))
-                                    menuAlpha.animateTo(0f, tween(120))
-                                    onAddToQueue()
-                                    onDismiss()
-                                }
+                                tapFeedback()
+                                closeAnd(onAddToQueue)
                             }
                         )
+                        if (onRename != null) {
+                            StaggeredMenuItem(
+                                visible = menuItemVisible,
+                                delayMs = 40,
+                                icon = { Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                                text = "改名",
+                                onClick = {
+                                    tapFeedback()
+                                    closeAnd(onRename)
+                                }
+                            )
+                        }
+                        if (onDelete != null) {
+                            StaggeredMenuItem(
+                                visible = menuItemVisible,
+                                delayMs = 80,
+                                icon = { Icon(Icons.Filled.Delete, null, Modifier.size(20.dp), tint = if (deleteEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) },
+                                text = "删除",
+                                enabled = deleteEnabled,
+                                onClick = {
+                                    if (deleteEnabled) {
+                                        tapFeedback()
+                                        closeAnd(onDelete)
+                                    }
+                                }
+                            )
+                        }
+                        if (onMultiSelect != null) {
+                            StaggeredMenuItem(
+                                visible = menuItemVisible,
+                                delayMs = 120,
+                                icon = { Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                                text = "多选",
+                                onClick = {
+                                    tapFeedback()
+                                    closeAnd(onMultiSelect)
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -1335,14 +1663,102 @@ private fun AddToQueueMenu(
     }
 }
 
-/** 单个错峰弹出的菜单项：从下方冒出 + 淡入，图标轻微旋转汇聚。 */
+/** 单曲行的文件操作对话框：改名（三个预填输入框）+ 删除二次确认。
+ * 提交中禁用按钮且不许关闭（照 QQ 下载弹窗的防误关写法）；失败原因——含「密钥不对」
+ * 的专门提示——就显示在弹窗里，关掉弹窗才算放弃。 */
+@Composable
+private fun TrackFileOpsDialogs(
+    renameTarget: Track?,
+    deleteTarget: List<Track>,
+    state: JellyfinUiState,
+    onRename: (Track, String?, String?, String?) -> Unit,
+    onDelete: (List<Track>) -> Unit,
+    onDismissRename: () -> Unit,
+    onDismissDelete: () -> Unit
+) {
+    renameTarget?.let { target ->
+        // 预填当前值；按曲目 id 记状态，换目标自动重置
+        var title by remember(target.id) { mutableStateOf(target.title) }
+        var artist by remember(target.id) { mutableStateOf(target.artist) }
+        var album by remember(target.id) { mutableStateOf(target.album) }
+        AlertDialog(
+            onDismissRequest = { if (!state.isFileOpsBusy) onDismissRename() },
+            title = { Text("修改歌曲信息") },
+            text = {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(title, { title = it }, label = { Text("歌名") }, singleLine = true, enabled = !state.isFileOpsBusy)
+                    OutlinedTextField(artist, { artist = it }, label = { Text("歌手") }, singleLine = true, enabled = !state.isFileOpsBusy)
+                    OutlinedTextField(album, { album = it }, label = { Text("专辑") }, singleLine = true, enabled = !state.isFileOpsBusy)
+                    state.fileOpsMessage?.let { message ->
+                        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Text(
+                        "写入文件的内置标签，文件本身不动",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    // 至少一个字段非空才允许提交；提交中禁用
+                    enabled = !state.isFileOpsBusy &&
+                        (title.isNotBlank() || artist.isNotBlank() || album.isNotBlank()),
+                    onClick = {
+                        // 只发改过的字段：没动的传 null，服务端不碰那个标签
+                        onRename(
+                            target,
+                            title.trim().takeIf { it != target.title },
+                            artist.trim().takeIf { it != target.artist },
+                            album.trim().takeIf { it != target.album }
+                        )
+                    }
+                ) { Text(if (state.isFileOpsBusy) "保存中…" else "保存") }
+            },
+            dismissButton = {
+                TextButton(enabled = !state.isFileOpsBusy, onClick = onDismissRename) { Text("取消") }
+            }
+        )
+    }
+    if (deleteTarget.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { if (!state.isFileOpsBusy) onDismissDelete() },
+            title = { Text(if (deleteTarget.size == 1) "删除这首歌？" else "删除这 ${deleteTarget.size} 首歌？") },
+            text = {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        if (deleteTarget.size == 1) {
+                            "《${deleteTarget.first().title}》将从电脑曲库移除，挪进回收站——可在设置页恢复。"
+                        } else {
+                            "选中的 ${deleteTarget.size} 首将从电脑曲库移除，挪进回收站——可在设置页恢复。"
+                        }
+                    )
+                    state.fileOpsMessage?.let { message ->
+                        Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !state.isFileOpsBusy, onClick = { onDelete(deleteTarget) }) {
+                    Text(if (state.isFileOpsBusy) "删除中…" else "删除")
+                }
+            },
+            dismissButton = {
+                TextButton(enabled = !state.isFileOpsBusy, onClick = onDismissDelete) { Text("取消") }
+            }
+        )
+    }
+}
+
+/** 单个错峰弹出的菜单项：从下方冒出 + 淡入，图标轻微旋转汇聚。置灰时整体半透明且不可点。 */
 @Composable
 private fun StaggeredMenuItem(
     visible: Boolean,
     delayMs: Int,
     icon: @Composable () -> Unit,
     text: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     val transition = updateTransition(visible, label = "menuItem")
     val offsetY by transition.animateDp(
@@ -1351,14 +1767,16 @@ private fun StaggeredMenuItem(
         label = "offsetY"
     )
     val alpha by transition.animateFloat(
-        transitionSpec = { tween(220, delayMillis = delayMs) },
+        transitionSpec = { tween(150, delayMillis = delayMs) },
         label = "alpha"
     ) { if (it) 1f else 0f }
     Row(
         modifier = Modifier
-            .graphicsLayer { this.alpha = alpha }
+            // fillMaxWidth 必须在 clickable 外侧：不然行宽只有文字那点，菜单右半边点了没反应（真机反馈）。
+            .fillMaxWidth()
+            .graphicsLayer { this.alpha = if (enabled) alpha else alpha * 0.38f }
             .offset(y = offsetY)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1821,6 +2239,8 @@ private fun PlaylistsContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val playlists = state.playlists
             when {
+                // 播放列表不进快照（规格「明确不做」）：断网时明说需要联网，不转圈、不显示空白。
+                state.isOffline -> EmptyState("播放列表需要联网才能查看")
                 playlists == null && state.isLoading -> {
                     // 骨架屏：2列网格
                     val shimmer = rememberSkeletonShimmer()
@@ -1958,6 +2378,15 @@ private fun SearchContent(
             },
             singleLine = true
         )
+        // 离线搜索标识（工单 04）：让用户知道这轮结果来自手机上的快照，
+        // 范围比在线搜索小——不是歌丢了。
+        if (state.isOfflineSearch) {
+            Text(
+                "离线搜索 · 只搜手机上的曲库快照",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val results = state.searchResults
             val isEmptyResult = results != null &&
@@ -1968,6 +2397,7 @@ private fun SearchContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 state.isSearching -> CircularProgressIndicator()
+                state.isOfflineSearch && isEmptyResult -> EmptyState("快照里没找到「${state.searchQuery}」\n联网后能搜全曲库")
                 state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 isEmptyResult -> EmptyState("未找到相关内容")
                 results == null -> EmptyState("未找到相关内容")
@@ -2145,6 +2575,8 @@ private fun PlaylistDetailContent(
 /** 设置页：USB 独占输出、静音跳曲、定时关闭。控件状态与回调都来自 [ControllerState]，与播放条共用同一份数据源。 */
 @Composable
 private fun SettingsContent(
+    state: JellyfinUiState,
+    viewModel: JellyfinViewModel,
     controllerState: ControllerState,
     modifier: Modifier = Modifier
 ) {
@@ -2240,6 +2672,42 @@ private fun SettingsContent(
                 enabled = controller != null
             )
         }
+        // 回放增益：按每首歌的响度数据统一音量。直接读写 DataStore——播放服务订阅的是
+        // 同一个 DataStore，不需要为它再走一套 MediaSession 自定义命令。
+        val loudnessContext = LocalContext.current
+        val loudnessPreferences = remember {
+            LoudnessPreferences(loudnessContext.pulsarPreferencesDataStore)
+        }
+        val loudnessEnabled by loudnessPreferences.enabled
+            .collectAsStateWithLifecycle(initialValue = LoudnessPreferences.DEFAULT_ENABLED)
+        val loudnessScope = rememberCoroutineScope()
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("回放增益", style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (loudnessEnabled) "已开启（响的歌会被压低，整体安静一些）" else "已关闭",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Switch(
+                checked = loudnessEnabled,
+                onCheckedChange = { enabled ->
+                    // 写失败（磁盘满/DataStore 损坏）不能让协程带着异常冲出去：
+                    // checked 读的是 DataStore，写失败时开关会自己弹回，日志留个痕迹。
+                    loudnessScope.launch {
+                        runCatching { loudnessPreferences.setEnabled(enabled) }
+                            .onFailure { error ->
+                                if (error is CancellationException) throw error
+                                Log.w("MainActivity", "保存回放增益开关失败", error)
+                            }
+                    }
+                }
+            )
+        }
         // 定时关闭：拖动滑块设置分钟数，松手才真正启动/取消定时器。5 分钟一档（steps=11 表示 0-60 共 12 档）。
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
@@ -2273,7 +2741,180 @@ private fun SettingsContent(
                 style = MaterialTheme.typography.labelMedium
             )
         }
+        // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
+        RecycleBinSection(state = state, viewModel = viewModel)
+        // 手机缓存：听过的歌在手机上留的副本，离线能听。占了空间就得看得见（ADR-0003）。
+        MediaCacheSection(state = state, viewModel = viewModel)
     }
+}
+
+/** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。 */
+@Composable
+private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewModel) {
+    // 每次进设置页重拉一次：删除/恢复随时会改变回收站内容，不缓存。
+    LaunchedEffect(Unit) { viewModel.loadRecycle() }
+    var showPurgeConfirm by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("回收站", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (state.recycleFiles.isEmpty()) "删除的歌曲在这里，可恢复"
+                    else "${state.recycleFiles.size} 个文件 · ${formatBytes(state.recycleFiles.sumOf { it.size })}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(
+                onClick = { showPurgeConfirm = true },
+                enabled = state.recycleFiles.isNotEmpty() && !state.isFileOpsBusy
+            ) { Text("清空", color = MaterialTheme.colorScheme.error) }
+        }
+        when {
+            state.isRecycleLoading -> Text(
+                "加载中…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            // 加载失败/清空/恢复的反馈都在这格；列表为空且没消息才是真空态
+            state.recycleFiles.isEmpty() && state.recycleMessage == null -> Text(
+                "回收站是空的",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            else -> {
+                state.recycleMessage?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                state.recycleFiles.forEach { file ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                file.relPath,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                formatBytes(file.size),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        TextButton(
+                            onClick = { viewModel.restoreRecycle(file.relPath) },
+                            enabled = !state.isFileOpsBusy
+                        ) { Text("恢复") }
+                    }
+                }
+            }
+        }
+    }
+    if (showPurgeConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!state.isFileOpsBusy) showPurgeConfirm = false },
+            title = { Text("清空回收站？") },
+            text = {
+                Text(
+                    "将永久删除回收站里的 ${state.recycleFiles.size} 个文件，此操作不可恢复。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.isFileOpsBusy,
+                    onClick = {
+                        showPurgeConfirm = false
+                        viewModel.purgeRecycle()
+                    }
+                ) { Text("清空（不可恢复）", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(enabled = !state.isFileOpsBusy, onClick = { showPurgeConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/** 设置页的手机缓存区块（工单 05）：占用 + 首数 + 一键清空。
+ * 清空的只是手机上的副本，歌还在电脑上——确认框里必须说清这一点（ADR-0003）。 */
+@Composable
+private fun MediaCacheSection(state: JellyfinUiState, viewModel: JellyfinViewModel) {
+    // 每次进设置页重拉：播放随时在攒副本，数字不能停在旧值。
+    LaunchedEffect(Unit) { viewModel.loadCacheStats() }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("手机缓存", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (state.cacheTrackCount == 0) "听过的歌自动存在手机上，没网也能听"
+                    else "${state.cacheTrackCount} 首 · ${formatBytes(state.cacheBytes)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            TextButton(
+                onClick = { showClearConfirm = true },
+                enabled = state.cacheTrackCount > 0 && !state.isCacheBusy
+            ) { Text("清空") }
+        }
+        if (state.isCacheBusy) {
+            Text(
+                "正在清空…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        state.cacheMessage?.let { message ->
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!state.isCacheBusy) showClearConfirm = false },
+            title = { Text("清空手机缓存？") },
+            text = {
+                Text(
+                    "将删掉手机上的 ${state.cacheTrackCount} 首缓存副本（${formatBytes(state.cacheBytes)}）。\n" +
+                        "歌还在电脑上一首没动，清掉的只是手机里的副本；下次联网听过会自动再攒。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.isCacheBusy,
+                    onClick = {
+                        showClearConfirm = false
+                        viewModel.clearCache()
+                    }
+                ) { Text("清空") }
+            },
+            dismissButton = {
+                TextButton(enabled = !state.isCacheBusy, onClick = { showClearConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/** 文件大小的短表示：回收站列表用。 */
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1_000_000_000.0)
+    bytes >= 1_000_000 -> "%.0f MB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "%.0f KB".format(bytes / 1_000.0)
+    else -> "$bytes B"
 }
 
 /**
@@ -2326,6 +2967,8 @@ private fun MiniPlayerBar(
     playbackMode: PlaybackMode,
     onPlaybackModeChange: (PlaybackMode) -> Unit,
     currentTrack: Track?,
+    /** 当前专辑主色（进度条填充 / 底部细线用）；无封面时为品牌靛蓝。 */
+    accentColor: Color,
     coverFor: (Track) -> JellyfinRequest?,
     sharedTransitionScope: SharedTransitionScope,
     fullScreenOpen: Boolean,
@@ -2342,6 +2985,24 @@ private fun MiniPlayerBar(
     val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
     var sliderPosition by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
+    // 松手 seek 后播放器上报的位置要等下一次轮询（500ms）才追上。追上之前继续显示拖动值，
+    // 否则进度条会先弹回**拖动前**的旧位置、再跳到新位置 —— 真机可见的「闪一下」。
+    // 非 null 即锁定中，值是松手时锁定的拖动位置。
+    var seekHoldSec by remember { mutableStateOf<Float?>(null) }
+    // 位置追上目标 → 放开锁定，显示值交还给播放器。
+    LaunchedEffect(seekHoldSec, controllerState.positionMs) {
+        val target = seekHoldSec ?: return@LaunchedEffect
+        if (positionReachedSeekTarget(controllerState.positionMs / 1000f, target)) seekHoldSec = null
+    }
+    // 超时兜底：seek 被忽略（无媒体 / 播放器已销毁）时位置永远追不上，别把显示值锁死。
+    LaunchedEffect(seekHoldSec) {
+        if (seekHoldSec == null) return@LaunchedEffect
+        delay(SEEK_SETTLE_TIMEOUT_MS)
+        seekHoldSec = null
+    }
+    // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
+    val currentQueueId = controllerState.queue.firstOrNull { it.isCurrent }?.id
+    LaunchedEffect(currentQueueId) { seekHoldSec = null }
     // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器；默认折叠避免歌多时占满面板。
     val hapticFeedback = LocalHapticFeedback.current
     var queueExpanded by remember { mutableStateOf(false) }
@@ -2368,20 +3029,12 @@ private fun MiniPlayerBar(
         (controllerState.positionMs / controllerState.durationMs.toFloat()).coerceIn(0f, 1f)
     } else 0f
 
-    // 液态玻璃容器：模糊 + 透镜 + 高光（库自带 highlight/shadow），半透明表面保证可读性。
+    // 液态玻璃容器。这里是**全 App 玻璃材质的基准**（模糊 / 透镜 / 圆角的默认值都取自此处），
+    // 其余玻璃面统一走 liquidGlass，别再各写各的数字。
     Box(
         modifier
             .fillMaxWidth()
-            .drawBackdrop(
-                backdrop = backdrop,
-                shape = { RoundedCornerShape(20.dp) },
-                effects = {
-                    vibrancy()
-                    blur(16f.dp.toPx())
-                    lens(14f.dp.toPx(), 28f.dp.toPx())
-                },
-                onDrawSurface = { drawRect(glassSurface.copy(alpha = 0.55f)) }
-            )
+            .liquidGlass(backdrop = backdrop, surface = glassSurface.copy(alpha = 0.55f))
     ) {
         Column {
             // 迷你条（始终可见）
@@ -2520,20 +3173,31 @@ private fun MiniPlayerBar(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    // 进度条 + 时间
-                    Slider(
-                        value = if (isDragging) sliderPosition else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec),
+                    // 进度条 + 时间：与全屏播放页同款液态玻璃胶囊（采样同一个 backdrop，
+                    // 玻璃条后面就是曲库内容），配色走「浅色玻璃条」预设。
+                    // 展示用位置：拖动中 / 松手后等播放器追上期间用拖动值，其余时间跟随播放器。
+                    val displayedPositionSec =
+                        if (isDragging || seekHoldSec != null) sliderPosition
+                        else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec)
+                    LiquidGlassSlider(
+                        value = displayedPositionSec,
                         onValueChange = { sliderPosition = it; isDragging = true },
                         onValueChangeFinished = {
                             controller?.seekTo((sliderPosition * 1000).toLong())
                             isDragging = false
+                            // 锁定显示值，等播放器位置追上来再放开（见上面的 seekHoldSec）。
+                            seekHoldSec = sliderPosition
                         },
+                        // 拖动途中切歌导致 valueRange 变化时手势会被取消：只清拖动状态，不 seek。
+                        onValueChangeCancelled = { isDragging = false },
                         valueRange = 0f..durationSec,
+                        backdrop = backdrop,
                         enabled = hasMedia,
+                        colors = glassBarSliderColors(accentColor),
                         modifier = Modifier.fillMaxWidth()
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(formatPosition(controllerState.positionMs), style = MaterialTheme.typography.labelSmall)
+                        Text(formatPosition((displayedPositionSec * 1000).toLong()), style = MaterialTheme.typography.labelSmall)
                         Text(formatPosition(controllerState.durationMs), style = MaterialTheme.typography.labelSmall)
                     }
                     // 播放模式：图标切换（顺序循环 / 单曲循环 / 随机播放）
@@ -2685,23 +3349,34 @@ private fun MiniPlayerBar(
             }
         }
 
-        // 底部细进度线（Spotify 风格）：紧贴玻璃条底边、横贯全宽；
-        // 已播部分用主色，未播部分用低透明度变体色。
+        // 底部细进度线：紧贴玻璃条底边、横贯全宽。2dp 做不了真正的玻璃胶囊（太薄，模糊 / 透镜
+        // 都看不出来），于是走同一套视觉语言的「玻璃细线」：半透明轨道 + 专辑主色渐变填充 + 圆头。
+        // 不加前端柔光：迷你条上两处进度显示的光都按真机反馈关掉了（玻璃条上再发光会糊）。
+        val miniTrackColor = MaterialTheme.colorScheme.onSurfaceVariant
+        val miniFillColor = accentColor
         Box(
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .height(2.dp)
+                .height(3.dp)
                 // 玻璃条是 20dp 圆角，不裁剪的话进度线两端会悬出圆角外，这里用同款底圆角收边。
                 .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
-                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.25f))
+                .background(miniTrackColor.copy(alpha = 0.22f))
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth(miniProgressFraction)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.primary)
-            )
+            if (miniProgressFraction > 0f) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(miniProgressFraction)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(percent = 50))
+                        .background(
+                            Brush.horizontalGradient(
+                                0f to miniFillColor.copy(alpha = 0.75f),
+                                1f to miniFillColor
+                            )
+                        )
+                )
+            }
         }
     }
 }
@@ -2760,15 +3435,49 @@ internal fun AlbumCover(
     }
 }
 
-/** 把 [tracks] 以 [startTrackId] 为开头旋转成播放队列后交给 [controller]；任一歌曲无流地址则放弃播放。 */
+/**
+ * 播放条目元数据。响度增益挂 extras 而不是 MediaItem 的本地 tag——队列要经
+ * MediaController 交给播放服务，本地 tag 只存在于控制端，到不了服务端；extras 会
+ * 随 MediaMetadata 一起传过去，播放服务据此在换歌时算出回放增益。
+ */
+private fun Track.toPlaybackMetadata(): MediaMetadata = MediaMetadata.Builder()
+    .setTitle(title)
+    .setArtist(artist)
+    .setAlbumTitle(album)
+    .setExtras(
+        Bundle().apply {
+            putLoudnessGain(normalizationGainDb)
+        }
+    )
+    .build()
+
+/**
+ * 把 [tracks] 以 [startTrackId] 为开头旋转成播放队列后交给 [controller]；任一歌曲无流地址则放弃播放。
+ *
+ * [playableFilter] / [onBlocked]（可选）：离线时把没缓存的歌挡在队列外。要播的那首被挡住时
+ * 调 [onBlocked] 提示——明确说「这首歌没缓存」，不是转圈、不是「网络错误」；其余被挡的照常
+ * 留在列表里（能放的接着放），别把整条队列废掉。
+ */
 private fun playTracks(
     tracks: List<Track>,
     startTrackId: String,
     controller: MediaController,
     playbackMode: PlaybackMode,
-    streamUrlFor: (Track) -> String?
+    streamUrlFor: (Track) -> String?,
+    playableFilter: ((Track) -> Boolean)? = null,
+    onBlocked: (() -> Unit)? = null
 ) {
-    val order = buildPlaybackOrder(tracks, startTrackId) ?: return
+    val playable = playableFilter?.let { filter -> tracks.filter(filter) } ?: tracks
+    if (playable.isEmpty()) {
+        // 一首能放的都没有：提示后放弃，不把空队列塞给播放器。
+        onBlocked?.invoke()
+        return
+    }
+    val order = buildPlaybackOrder(playable, startTrackId) ?: run {
+        // 点的那首不在可播集合里（没缓存/已被过滤）：明确提示，而不是静默不响应。
+        onBlocked?.invoke()
+        return
+    }
     val mediaItems = order.map { t ->
         val url = streamUrlFor(t) ?: return
         // 把封面 tag 挂到条目上：Activity 被系统回收重建后，仍可从播放器读回封面信息。
@@ -2776,13 +3485,7 @@ private fun playTracks(
             .setUri(url)
             .setMediaId(t.id)
             .setTag(t.imageTag)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(t.title)
-                    .setArtist(t.artist)
-                    .setAlbumTitle(t.album)
-                    .build()
-            )
+            .setMediaMetadata(t.toPlaybackMetadata())
             .build()
     }
     // 一次性监听本次加载失败，避免失败时应用崩溃；成功就绪后自动移除，防止重复累积。
@@ -2853,7 +3556,10 @@ private fun MediaController.queueSnapshot(): List<QueueTrack> {
 }
 
 @Composable
-private fun rememberMediaController(controllerFuture: ListenableFuture<MediaController>?): ControllerState {
+private fun rememberMediaController(
+    controllerFuture: ListenableFuture<MediaController>?,
+    volumeKeys: ForegroundVolumeKeys
+): ControllerState {
     var controller by remember { mutableStateOf<MediaController?>(null) }
     var status by remember { mutableStateOf("正在连接播放服务…") }
     var playbackError by remember { mutableStateOf<String?>(null) }
@@ -2905,6 +3611,30 @@ private fun rememberMediaController(controllerFuture: ListenableFuture<MediaCont
             isPlaying = current.isPlaying
             status = controllerStatus(current, playbackError)
             onDispose { current.removeListener(listener) }
+        }
+    }
+    // 前台音量键接管：把"独占开关 + 下发口"交给 Activity 的 dispatchKeyEvent（MIUI 不向
+    // 远程音量会话派发音量键，见 ForegroundVolumeKeys 注释）。控制器没连上时清空，音量键
+    // 立刻还给系统。独占关闭也走同一条清空路径——这就是"关掉开关马上交还系统"。
+    DisposableEffect(controller, usbExclusiveEnabled) {
+        val current = controller
+        if (current == null) {
+            volumeKeys.snapshot = null
+            volumeKeys.sink = null
+        } else {
+            volumeKeys.snapshot =
+                ForegroundVolumeKeys.Snapshot(exclusiveEnabled = usbExclusiveEnabled)
+            volumeKeys.sink = ForegroundVolumeKeys.Sink { step ->
+                // 服务把算完的新音量随命令结果带回，拿它直接点亮浮窗——比等 500ms 轮询快一个来回。
+                adjustDeviceVolume(current, step, VolumeFeedback::show)
+            }
+        }
+        onDispose {
+            volumeKeys.snapshot = null
+            volumeKeys.sink = null
+            // 交还音量键的同时把浮窗也收了：关掉独占开关后立刻走系统音量，浮窗再赖 1.5 秒
+            // 会读成「还在调 App 的音量」。
+            VolumeFeedback.dismiss()
         }
     }
     // 轮询刷新进度与播放状态：每 500ms 读取一次当前位置、总时长、播放中标记、播放队列快照。
@@ -3049,6 +3779,46 @@ private fun rememberMediaController(controllerFuture: ListenableFuture<MediaCont
             ).addListener({}, { runnable -> runnable.run() })
         }
     )
+}
+
+/**
+ * 前台音量键的下发：把一档调整发到会话，由播放服务按自己手里的实时值算新音量。
+ *
+ * **不在这里自己算百分比**——百分比的真源在服务里（`usbVolumePercent`），UI 侧只有
+ * 500ms 轮询来的快照；连按两下时本地快照还没刷新，自己算会把第二下算成同一个目标值而
+ * 丢掉一档。传"加一档/减一档"走一个来回，算术就只有一处。
+ *
+ * 走自定义命令而不是 `MediaController.increaseDeviceVolume()`：后者依赖 MediaSession
+ * 把设备音量命令传给控制器，实测靠不住（`isCommandAvailable` 时真时假），而自定义命令
+ * 这条通道是 App 内滑块一直在用的、验证过好用的。
+ *
+ * @param step `+1` 加一档、`-1` 减一档。
+ * @param onApplied 服务算完（并夹紧）的新音量。**只在命令成功时调用**——吃掉按键却什么都没
+ *   发生时不该给音量反馈。
+ * @return `false` = 会话没提供这条命令（服务未连上）。此时按键交还系统，免得吃掉按键
+ *   却什么都不做。
+ */
+private fun adjustDeviceVolume(
+    controller: MediaController,
+    step: Int,
+    onApplied: (Int) -> Unit
+): Boolean {
+    val command = UsbExclusiveMediaCommands.adjustVolumeCommand()
+    if (!controller.isSessionCommandAvailable(command)) return false
+    return runCatching {
+        val future = controller.sendCustomCommand(
+            command, UsbExclusiveMediaCommands.adjustVolumeArgs(step)
+        )
+        // 结果顺着这次命令的返回值回来，比等 500ms 轮询快得多——音量浮窗就是靠它跟手的。
+        future.addListener({
+            runCatching {
+                val result = future.get()
+                if (result.resultCode == SessionResult.RESULT_SUCCESS) {
+                    UsbExclusiveMediaCommands.volumePercentFrom(result.extras)?.let(onApplied)
+                }
+            }
+        }, { runnable -> runnable.run() })
+    }.isSuccess
 }
 
 private fun usbExclusiveStateLabel(state: ControllerState): String = when (state.usbExclusiveState) {

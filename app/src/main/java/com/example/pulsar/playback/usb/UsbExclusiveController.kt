@@ -295,7 +295,8 @@ class UsbExclusiveController(context: Context) : UsbExclusiveDriver {
         val format = selectedFormat
         val range = hardwareVolumeRange
         if (conn != null && format != null && format.hasHardwareVolume && range != null) {
-            if (sendHardwareVolume(conn, format, range, percent)) {
+            val ok = sendHardwareVolume(conn, format, range, percent)
+            if (ok) {
                 UsbNativeDriver.nativeSetVolume(handle, 100)
                 return
             }

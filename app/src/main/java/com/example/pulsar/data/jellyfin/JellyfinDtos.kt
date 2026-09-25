@@ -36,7 +36,18 @@ data class JellyfinItemDto(
     @SerialName("ImageTags") val imageTags: Map<String, String> = emptyMap(),
     @SerialName("Type") val type: String? = null,
     @SerialName("IsFolder") val isFolder: Boolean? = null,
-    @SerialName("ChildCount") val childCount: Int? = null
+    @SerialName("ChildCount") val childCount: Int? = null,
+    /**
+     * 回放增益（dB）。Jellyfin 10.9+ 按 ReplayGain 2.0 的 -18 LUFS 基准现算：
+     * 有 LUFS 数据就用 `-18 - LUFS`，否则回落到文件里的 REPLAYGAIN_TRACK_GAIN 标签。
+     * 不受 Fields 参数限制，跟着歌曲列表一起返回；没有响度数据时为 null。
+     */
+    @SerialName("NormalizationGain") val normalizationGain: Float? = null,
+    /**
+     * 文件在电脑上的绝对路径。**仅管理员账号返回**（请求要带 Fields=Path），
+     * 供 PC 伴生服务的删歌/改名接口定位文件；拿不到时为 null。
+     */
+    @SerialName("Path") val path: String? = null
 )
 
 fun JellyfinItemDto.toTrack(): com.example.pulsar.domain.model.Track {
@@ -49,7 +60,9 @@ fun JellyfinItemDto.toTrack(): com.example.pulsar.domain.model.Track {
         artist = artist,
         album = album.orEmpty(),
         durationMs = runTimeTicks?.div(10_000),
-        imageTag = imageTags.values.firstOrNull()
+        imageTag = imageTags.values.firstOrNull(),
+        normalizationGainDb = normalizationGain,
+        filePath = path
     )
 }
 

@@ -54,32 +54,62 @@ class QQDownloadDataSource(
         json.decodeFromString<QQAlbumSearchResponse>(response.body()).albums
     }
 
-    override suspend fun albumSongs(albumMid: String): Result<List<String>> = execute {
+    override suspend fun albumSongs(albumMid: String): Result<List<QQAlbumSongDto>> = execute {
         val response = client.get("$baseUrl/api/album/$albumMid/songs") {
             accept(ContentType.Application.Json)
         }
         ensureSuccess(response.status, response.body())
-        json.decodeFromString<QQAlbumSongsResponse>(response.body()).songMids
+        json.decodeFromString<QQAlbumSongsResponse>(response.body()).songs
     }
 
-    override suspend fun enqueueDownload(songMid: String, quality: String, title: String?): Result<String> = execute {
+    override suspend fun enqueueDownload(
+        songMid: String,
+        quality: String,
+        title: String?,
+        artist: String?,
+        force: Boolean
+    ): Result<QQDownloadResponse> = execute {
         val response = client.post("$baseUrl/api/download") {
             accept(ContentType.Application.Json)
             contentType(ContentType.Application.Json)
-            setBody(json.encodeToString(QQDownloadRequest(songMid = songMid, quality = quality, title = title)))
+            setBody(
+                json.encodeToString(
+                    QQDownloadRequest(
+                        songMid = songMid,
+                        quality = quality,
+                        title = title,
+                        artist = artist,
+                        force = force
+                    )
+                )
+            )
         }
         ensureSuccess(response.status, response.body())
-        json.decodeFromString<QQDownloadResponse>(response.body()).jobId
+        json.decodeFromString<QQDownloadResponse>(response.body())
     }
 
-    override suspend fun enqueueAlbum(albumMid: String, quality: String): Result<Int> = execute {
+    override suspend fun enqueueAlbum(
+        albumMid: String,
+        quality: String,
+        songMids: List<String>?,
+        force: Boolean
+    ): Result<QQDownloadAlbumResponse> = execute {
         val response = client.post("$baseUrl/api/download/album") {
             accept(ContentType.Application.Json)
             contentType(ContentType.Application.Json)
-            setBody(json.encodeToString(QQDownloadAlbumRequest(albumMid = albumMid, quality = quality)))
+            setBody(
+                json.encodeToString(
+                    QQDownloadAlbumRequest(
+                        albumMid = albumMid,
+                        quality = quality,
+                        songMids = songMids,
+                        force = force
+                    )
+                )
+            )
         }
         ensureSuccess(response.status, response.body())
-        json.decodeFromString<QQDownloadAlbumResponse>(response.body()).count
+        json.decodeFromString<QQDownloadAlbumResponse>(response.body())
     }
 
     override suspend fun jobs(): Result<List<QQJobDto>> = execute {

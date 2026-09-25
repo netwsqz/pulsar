@@ -15,7 +15,10 @@ class JellyfinViewModelFactory(private val application: Application) : ViewModel
             sessionStore = (application as PulsarApplication).sessionRepository(),
             apiFactory = application.jellyfinApiFactory(),
             authorizationSink = application,
-            dispatcher = Dispatchers.Main.immediate
+            dispatcher = Dispatchers.Main.immediate,
+            libraryFilesFactory = application.libraryFilesFactory(),
+            mediaCache = application.mediaCache(),
+            snapshotRepository = application.librarySnapshotRepository()
         ) as T
     }
 }

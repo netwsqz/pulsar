@@ -4,6 +4,7 @@ import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
@@ -14,7 +15,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,11 +26,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -55,8 +61,6 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -70,8 +74,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -89,12 +94,14 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.C
 import androidx.media3.session.MediaController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.ReorderableLazyListState
@@ -105,19 +112,21 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackMode
 import com.example.pulsar.playback.PlaybackOutputInfo
+import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.formatPosition
+import com.example.pulsar.playback.positionReachedSeekTarget
+import com.example.pulsar.ui.components.LiquidGlassSlider
+import com.example.pulsar.ui.components.immersiveSliderColors
+import com.example.pulsar.ui.components.liquidGlass
 import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.PoppinsFontFamily
+import com.kyant.backdrop.backdrops.layerBackdrop
+import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 // ===== 深色沉浸页白字体系（与系统主题无关，全屏页永远深底白字） =====
 private val NpTextPrimary = Color.White
 private val NpTextSecondary = Color.White.copy(alpha = 0.7f)
 private val NpTextFaint = Color.White.copy(alpha = 0.5f)
-
-// 播放/暂停白色圆按钮的立体感参数：轻微纵向渐变 + 近黑图标，模拟 hi-fi 实体按键。
-private val NpPlayButtonTop = Color.White
-private val NpPlayButtonBottom = Color(0xFFE9E9EE)
-private val NpPlayButtonIcon = Color(0xFF15151A)
 
 /**
  * 迷你条小封面 ↔ 全屏页大封面共享同一个 key：打开/收起全屏页时封面跨布局连续飞行。
@@ -146,6 +155,37 @@ internal fun shouldDismissNowPlaying(draggedOffsetPx: Float, screenHeightPx: Flo
     if (!draggedOffsetPx.isFinite() || !screenHeightPx.isFinite()) return false
     if (draggedOffsetPx <= 0f || screenHeightPx <= 0f) return false
     return draggedOffsetPx > screenHeightPx * NOW_PLAYING_DISMISS_RATIO
+}
+
+/**
+ * 页指示器滑块的连续位置（单位：页）。
+ *
+ * 取 `currentPage + currentPageOffsetFraction`——横滑过程中这个和是**连续**变化的
+ * （停在第 1 页与第 2 页正中间时是 1.5），指示器因此能跟着手指走，而不是翻页时才跳。
+ * 位置钳制在 `[0, pageCount - 1]`：越界回弹期间不会滑出首尾页之外。
+ * 偏移为非有限值时回落到当前页；页数非正返回 0（无指示器可画）。
+ */
+internal fun indicatorOffsetFraction(
+    currentPage: Int,
+    pageOffsetFraction: Float,
+    pageCount: Int
+): Float {
+    if (pageCount <= 0) return 0f
+    val offset = if (pageOffsetFraction.isFinite()) pageOffsetFraction else 0f
+    return (currentPage + offset).coerceIn(0f, (pageCount - 1).toFloat())
+}
+
+/**
+ * 指示器滑块在滑动中的拉伸系数：静止为 1，滑到两页正中间时最大。
+ *
+ * `currentPageOffsetFraction` 在页边界间大致取值 -0.5..0.5，取绝对值乘 2 归一到 0..1，
+ * 于是「刚起步」拉得少、「正中间」拉得最多 —— 滑块被手指拽着走时像一滴液体在拉长。
+ * 非有限值按静止处理（返回 1，绝不返回 NaN 去污染宽度计算）。
+ */
+internal fun indicatorStretch(pageOffsetFraction: Float, maxStretch: Float = 0.5f): Float {
+    if (!pageOffsetFraction.isFinite()) return 1f
+    val magnitude = (kotlin.math.abs(pageOffsetFraction) * 2f).coerceIn(0f, 1f)
+    return 1f + maxStretch * magnitude
 }
 
 /**
@@ -191,6 +231,24 @@ internal fun NowPlayingScreen(
     val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
     var sliderPosition by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
+    // 松手 seek 后播放器上报的位置要等下一次轮询（500ms）才追上。追上之前继续显示拖动值，
+    // 否则进度条会先弹回**拖动前**的旧位置、再跳到新位置 —— 真机可见的「闪一下」。
+    // 非 null 即锁定中，值是松手时锁定的拖动位置。
+    var seekHoldSec by remember { mutableStateOf<Float?>(null) }
+    // 位置追上目标 → 放开锁定，显示值交还给播放器。
+    LaunchedEffect(seekHoldSec, controllerState.positionMs) {
+        val target = seekHoldSec ?: return@LaunchedEffect
+        if (positionReachedSeekTarget(controllerState.positionMs / 1000f, target)) seekHoldSec = null
+    }
+    // 超时兜底：seek 被忽略（无媒体 / 播放器已销毁）时位置永远追不上，别把显示值锁死。
+    LaunchedEffect(seekHoldSec) {
+        if (seekHoldSec == null) return@LaunchedEffect
+        delay(SEEK_SETTLE_TIMEOUT_MS)
+        seekHoldSec = null
+    }
+    // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
+    val currentQueueId = controllerState.queue.firstOrNull { it.isCurrent }?.id
+    LaunchedEffect(currentQueueId) { seekHoldSec = null }
     // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器。队列页在第 3 页整页展示。
     val hapticFeedback = LocalHapticFeedback.current
     var isQueueDragging by remember { mutableStateOf(false) }
@@ -216,8 +274,6 @@ internal fun NowPlayingScreen(
     val screenHeightPx = with(density) { LocalConfiguration.current.screenHeightDp.dp.toPx() }
     // 与 MainActivity 侧进出场一致的弹簧参数，弹回 / 滑出手感统一。
     val dismissSpring = spring<Float>(dampingRatio = 0.8f, stiffness = 400f)
-    // 模糊背景的图片加载上下文（非组合回调里不能用 LocalContext）。
-    val context = LocalContext.current
 
     Box(
         modifier
@@ -229,16 +285,7 @@ internal fun NowPlayingScreen(
                 val fraction = if (screenHeightPx > 0f) (offset / screenHeightPx).coerceIn(0f, 1f) else 0f
                 alpha = 1f - 0.5f * fraction
             }
-            // 背景层 1：与主界面同源的封面三色垂直渐变（MainActivity 传入的是动画后的颜色，
-            // 切歌跟随 800ms 过渡）。无封面 / 加载失败时它是唯一可见的背景。
-            .background(
-                Brush.verticalGradient(
-                    0f to gradientColors.top,
-                    0.3f to gradientColors.middle,
-                    1f to gradientColors.bottom
-                )
-            )
-            // 下滑收起手势加在根 Box 上：页内没有横向手势；进度 Slider 拖动、队列 LazyColumn 滚动 /
+            // 下滑收起手势加在根 Box 上：页内没有横向手势；进度条拖动、队列 LazyColumn 滚动 /
             // 长按排序都是子组件的 pointerInput，Android 指针分发子组件先消费（消费后父层收不到位移），
             // 因此只有从空白 / 不可交互区域起拖才会收起页面，天然防误触；点在纯 clickable 按钮上
             // 起拖则由本手势接管（按钮点击被取消），与底部弹层惯例一致。
@@ -281,46 +328,22 @@ internal fun NowPlayingScreen(
                 )
             }
     ) {
-        // 背景层 2：封面模糊图铺满。加载 96px 小位图（带鉴权头）拉伸到全屏，再叠高斯模糊：
-        // Android 12+ 用 Modifier.blur(40dp) 把像素块完全化开；旧系统无 RenderEffect，
-        // 回退纯拉伸（96px 双线性放大已比 48px 平滑一倍，无明显像素感）。
-        // alpha 0.7 + 饱和度 1.25 让封面颜色透出来不发灰；加载失败 / 无封面时此层不绘制，渐变兜底。
-        coverRequest?.let { request ->
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(request.url)
-                    .size(96)
-                    .addHeader("Authorization", request.headers["Authorization"].orEmpty())
-                    .allowHardware(false)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.25f) }),
-                modifier = Modifier
-                    .matchParentSize()
-                    .then(
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                            Modifier.blur(40.dp)
-                        } else {
-                            Modifier
-                        }
-                    )
-                    .alpha(0.7f)
-            )
-        }
-        // 背景层 3：垂直渐变深色 scrim（上浅下深），保证白字与白色播放键的对比度稳定。
-        // 压得不能太重：黑纱太厚会把封面颜色洗灰（用户反馈「太灰」后从 0.45/0.6 降到 0.25/0.45）。
+        // 本页局部的玻璃采样源。全屏页是 SharedTransitionLayout 里的独立浮层，拿不到主界面那套
+        // backdrop；而它自己的背景（渐变 + 模糊封面 + scrim）正好最适合当玻璃底，于是就地自建一个。
+        // 关键：**只录背景、不录控件**——进度条 / 播放键画在录制层之外，玻璃不会采样到自己
+        // （自引用会让采样滞后一帧；主界面那套录全局是因为它的玻璃条就压在内容上，这里没必要）。
+        val backdrop = rememberLayerBackdrop { drawContent() }
         Box(
             Modifier
                 .matchParentSize()
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = 0.25f),
-                        1f to Color.Black.copy(alpha = 0.45f)
-                    )
-                )
-        )
+                .layerBackdrop(backdrop)
+        ) {
+            NowPlayingBackground(
+                coverRequest = coverRequest,
+                gradientColors = gradientColors,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -437,23 +460,71 @@ internal fun NowPlayingScreen(
                     )
                 }
             }
-            // 页间指示器：三根小横条，当前页亮白。
-            Row(
+            // 页间指示器：底槽三根暗条固定不动（保留「一共几页」的提示），上面一个亮色滑块跟着
+            // 横滑**连续**移动——位置取 currentPage + currentPageOffsetFraction，滑到两页正中间时
+            // 位置正好在 .5，同时按 indicatorStretch 被拉长一点，像一滴液体被手指拽着走。
+            // 全部用 dp 算好再转 px（槽宽固定），不依赖测量，滑动过程不触发额外的布局。
+            val indicatorOffset = indicatorOffsetFraction(
+                pagerState.currentPage,
+                pagerState.currentPageOffsetFraction,
+                NOW_PLAYING_PAGE_COUNT
+            )
+            val indicatorPillWidth = IndicatorPillBaseWidth *
+                indicatorStretch(pagerState.currentPageOffsetFraction)
+            // 滑块左缘：先按「占满整格」定位，再减去（格宽 - 滑块宽）的一半让它居中于该格。
+            val indicatorPillStart = IndicatorSlotWidth * indicatorOffset +
+                (IndicatorSlotWidth - indicatorPillWidth) / 2f
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 10.dp),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
+                contentAlignment = Alignment.Center
             ) {
-                repeat(NOW_PLAYING_PAGE_COUNT) { page ->
-                    val selected = pagerState.currentPage == page
+                Box(
+                    Modifier
+                        .width(IndicatorSlotWidth * NOW_PLAYING_PAGE_COUNT)
+                        .height(IndicatorBarHeight)
+                ) {
+                    // 底槽：每格一根暗条。
+                    Row(Modifier.matchParentSize()) {
+                        repeat(NOW_PLAYING_PAGE_COUNT) {
+                            Box(Modifier.width(IndicatorSlotWidth).fillMaxHeight()) {
+                                Box(
+                                    Modifier
+                                        .align(Alignment.Center)
+                                        .size(width = IndicatorPillBaseWidth, height = IndicatorBarHeight)
+                                        .background(NpTextFaint.copy(alpha = 0.45f), RoundedCornerShape(percent = 50))
+                                )
+                            }
+                        }
+                    }
+                    // 滑块：亮色小胶囊 + 前端柔光；位置 / 宽度每帧变，drawBehind 之外只走 offset，代价很小。
                     Box(
                         Modifier
-                            .padding(horizontal = 4.dp)
-                            .size(width = if (selected) 20.dp else 8.dp, height = 4.dp)
+                            .offset { IntOffset(indicatorPillStart.roundToPx(), 0) }
+                            .width(indicatorPillWidth)
+                            .fillMaxHeight()
+                            .drawBehind {
+                                // 收得比较紧的一团柔光（不裁剪、可溢出 6dp 条高）：
+                                // 大而淡会糊成一块，紧而亮才像「滑块自己在发光」。
+                                val radius = size.height * 1.8f
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(NpTextPrimary.copy(alpha = 0.3f), Color.Transparent),
+                                        center = center,
+                                        radius = radius
+                                    ),
+                                    radius = radius,
+                                    center = center,
+                                    blendMode = BlendMode.Plus
+                                )
+                            }
+                            .clip(RoundedCornerShape(percent = 50))
                             .background(
-                                if (selected) NpTextPrimary else NpTextFaint,
-                                RoundedCornerShape(2.dp)
+                                Brush.verticalGradient(
+                                    0f to NpTextPrimary,
+                                    1f to NpTextPrimary.copy(alpha = 0.82f)
+                                )
                             )
                     )
                 }
@@ -464,17 +535,35 @@ internal fun NowPlayingScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 播放模式：图标切换（顺序循环 / 单曲循环 / 随机播放），激活纯白、未激活（无播放器）White50。
-                IconButton(
-                    onClick = { onPlaybackModeChange(playbackMode.next()) },
-                    enabled = controller != null,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        playbackModeIcon(playbackMode),
-                        contentDescription = "切换播放模式，当前：${playbackMode.label}",
-                        tint = if (controller != null) NpTextPrimary else NpTextFaint
+                // 播放模式：玻璃圆底 + 图标（顺序循环 / 单曲循环 / 随机播放）。
+                // 玻璃底直径 44dp，留在 48dp 点击区内部，不改变既有触摸目标。
+                Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .liquidGlass(
+                                backdrop = backdrop,
+                                surface = Color.White.copy(alpha = 0.12f),
+                                shape = CircleShape,
+                                // 44dp 小圆：折射按自身半径收窄，面板级的 14/28dp 会把它整个拧歪。
+                                lensRefraction = 6.dp,
+                                lensDepth = 12.dp
+                            )
                     )
+                    IconButton(
+                        onClick = { onPlaybackModeChange(playbackMode.next()) },
+                        enabled = controller != null,
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        // 切换模式时图标交叉淡入淡出，跟进度条那套柔和动效保持一致（不再是硬切）。
+                        Crossfade(targetState = playbackMode, label = "playbackModeIcon") { mode ->
+                            Icon(
+                                playbackModeIcon(mode),
+                                contentDescription = "切换播放模式，当前：${mode.label}",
+                                tint = if (controller != null) NpTextPrimary else NpTextFaint
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.size(48.dp))
             }
@@ -491,27 +580,35 @@ internal fun NowPlayingScreen(
                     .padding(top = 8.dp)
             )
             // ===== 5. 进度条 + 时间（durationSec/sliderPosition/isDragging 与主界面迷你进度线各自独立，
-            // 全屏页打开期间迷你条不可见，不存在同步问题）；白系配色适配深色页。 =====
-            Slider(
-                value = if (isDragging) sliderPosition else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec),
+            // 全屏页打开期间迷你条不可见，不存在同步问题）。液态玻璃胶囊：采样本页背景（模糊封面）。 =====
+            // 展示用位置：拖动中 / 松手后等播放器追上期间用拖动值，其余时间跟随播放器。
+            // 时间文案与进度条共用它，避免「条已经跳到新位置、左边的秒数还停在旧位置」。
+            val displayedPositionSec =
+                if (isDragging || seekHoldSec != null) sliderPosition
+                else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec)
+            LiquidGlassSlider(
+                value = displayedPositionSec,
                 onValueChange = { sliderPosition = it; isDragging = true },
                 onValueChangeFinished = {
                     controller?.seekTo((sliderPosition * 1000).toLong())
                     isDragging = false
+                    // 锁定显示值，等播放器位置追上来再放开（见上面的 seekHoldSec）。
+                    seekHoldSec = sliderPosition
                 },
+                // 拖动途中切歌导致 valueRange 变化时手势会被取消：只清拖动状态，不 seek
+                // （用户并没有确认这个位置，硬 seek 会让新歌从头跳到旧位置）。
+                onValueChangeCancelled = { isDragging = false },
                 valueRange = 0f..durationSec,
+                backdrop = backdrop,
                 enabled = hasMedia,
-                colors = SliderDefaults.colors(
-                    thumbColor = NpTextPrimary,
-                    activeTrackColor = NpTextPrimary,
-                    inactiveTrackColor = NpTextFaint
-                ),
+                // 填充与前端柔光都用当前专辑主色（无封面时回退品牌靛蓝）。
+                colors = immersiveSliderColors(gradientColors.accent),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp)
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(formatPosition(controllerState.positionMs), style = MaterialTheme.typography.labelSmall, color = NpTextSecondary)
+                Text(formatPosition((displayedPositionSec * 1000).toLong()), style = MaterialTheme.typography.labelSmall, color = NpTextSecondary)
                 Text(formatPosition(controllerState.durationMs), style = MaterialTheme.typography.labelSmall, color = NpTextSecondary)
             }
             // ===== 6. 底部控制行：只有三键——上一首（44dp）/ 播放暂停（72dp 白色实心圆）/ 下一首（44dp）。
@@ -539,25 +636,37 @@ internal fun NowPlayingScreen(
                         modifier = Modifier.size(32.dp)
                     )
                 }
-                // 播放/暂停主按钮：72dp 白色实心圆（轻微纵向渐变提升质感）+ 近黑图标 +
-                // 8dp 阴影立体感。shadow 在 clip 之前保证阴影不被裁掉。
+                // 播放/暂停主按钮：72dp 液态玻璃圆，材质与左边的播放模式圆钮同款
+                // （近乎全透的白膜 + 白图标，封面颜色直接透出来）+ 按下轻微缩小。
+                // 早期是「乳白实心圆 + 近黑图标 + 描边 + 投影」，在全屏页里像贴上去的一块固体，
+                // 换成模式钮那套薄玻璃后才是同一页上的同一种材质。
+                val playInteraction = remember { MutableInteractionSource() }
+                val playPressed by playInteraction.collectIsPressedAsState()
+                val playScale by animateFloatAsState(
+                    targetValue = if (playPressed) 0.94f else 1f,
+                    animationSpec = spring(dampingRatio = 0.6f, stiffness = 900f),
+                    label = "playButtonPressScale"
+                )
                 Box(
                     modifier = Modifier
                         .size(72.dp)
-                        .shadow(
-                            elevation = 8.dp,
+                        .graphicsLayer {
+                            scaleX = playScale
+                            scaleY = playScale
+                        }
+                        .liquidGlass(
+                            backdrop = backdrop,
+                            surface = Color.White.copy(alpha = 0.12f),
                             shape = CircleShape,
-                            ambientColor = Color(0x40000000),
-                            spotColor = Color(0x66000000)
+                            // 44dp 模式钮的折射比例（0.27R / 0.55R）按 72dp 放大，两个圆才是同一种凸起。
+                            lensRefraction = 10.dp,
+                            lensDepth = 20.dp
                         )
-                        .clip(CircleShape)
-                        .background(
-                            Brush.verticalGradient(
-                                0f to NpPlayButtonTop,
-                                1f to NpPlayButtonBottom
-                            )
-                        )
-                        .clickable(enabled = controller != null) {
+                        .clickable(
+                            interactionSource = playInteraction,
+                            indication = LocalIndication.current,
+                            enabled = controller != null
+                        ) {
                             controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                             controller?.let { if (it.isPlaying) it.pause() else it.play() }
                         },
@@ -566,7 +675,7 @@ internal fun NowPlayingScreen(
                     Icon(
                         if (controllerState.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = if (controllerState.isPlaying) "暂停播放" else "开始播放",
-                        tint = NpPlayButtonIcon,
+                        tint = NpTextPrimary,
                         modifier = Modifier.size(36.dp)
                     )
                 }
@@ -591,8 +700,88 @@ internal fun NowPlayingScreen(
     }
 }
 
+/**
+ * 全屏播放页的背景三层：封面三色渐变 → 96px 小图拉伸 + 高斯模糊 → 深色 scrim。
+ *
+ * 单独抽成一个 composable 是为了让它**整体落在录制层内**（调用处外面套了 `layerBackdrop`），
+ * 页内的玻璃进度条 / 播放键才有画面可采样。三层的顺序与视觉和抽出来之前完全一致。
+ */
+@Composable
+private fun NowPlayingBackground(
+    coverRequest: JellyfinRequest?,
+    gradientColors: CoverGradient,
+    modifier: Modifier = Modifier
+) {
+    // 模糊背景的图片加载上下文（AsyncImage 的 builder 不是组合回调，取不到 LocalContext）。
+    val context = LocalContext.current
+    Box(modifier) {
+        // 背景层 1：与主界面同源的封面三色垂直渐变（MainActivity 传入的是动画后的颜色，
+        // 切歌跟随 800ms 过渡）。无封面 / 加载失败时它是唯一可见的背景。
+        Box(
+            Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to gradientColors.top,
+                        0.3f to gradientColors.middle,
+                        1f to gradientColors.bottom
+                    )
+                )
+        )
+        // 背景层 2：封面模糊图铺满。加载 96px 小位图（带鉴权头）拉伸到全屏，再叠高斯模糊：
+        // Android 12+ 用 Modifier.blur(40dp) 把像素块完全化开；旧系统无 RenderEffect，
+        // 回退纯拉伸（96px 双线性放大已比 48px 平滑一倍，无明显像素感）。
+        // alpha 0.7 + 饱和度 1.25 让封面颜色透出来不发灰；加载失败 / 无封面时此层不绘制，渐变兜底。
+        coverRequest?.let { request ->
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(request.url)
+                    .size(96)
+                    .addHeader("Authorization", request.headers["Authorization"].orEmpty())
+                    .allowHardware(false)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                colorFilter = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(1.25f) }),
+                modifier = Modifier
+                    .matchParentSize()
+                    .then(
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            Modifier.blur(40.dp)
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .alpha(0.7f)
+            )
+        }
+        // 背景层 3：垂直渐变深色 scrim（上浅下深），保证白字与白色播放键的对比度稳定。
+        // 压得不能太重：黑纱太厚会把封面颜色洗灰（用户反馈「太灰」后从 0.45/0.6 降到 0.25/0.45）。
+        Box(
+            Modifier
+                .matchParentSize()
+                .background(
+                    Brush.verticalGradient(
+                        0f to Color.Black.copy(alpha = 0.25f),
+                        1f to Color.Black.copy(alpha = 0.45f)
+                    )
+                )
+        )
+    }
+}
+
 /** 全屏页页数：歌词 / 封面 / 队列。 */
 internal const val NOW_PLAYING_PAGE_COUNT = 3
+
+/** 页指示器：每格宽度。底槽按格居中，滑块按格定位，两者共用同一套几何。 */
+private val IndicatorSlotWidth = 28.dp
+
+/** 页指示器：底条与滑块的高度。 */
+private val IndicatorBarHeight = 6.dp
+
+/** 页指示器：滑块静止宽度（横滑过程中按 [indicatorStretch] 拉长）。 */
+private val IndicatorPillBaseWidth = 16.dp
 
 /**
  * 歌词页（横滑第 1 页）。三态：

@@ -27,3 +27,11 @@
 - 「完整副本」判据 = `ContentMetadata.getContentLength() > 0 && cache.isCached(key, 0, total)`，拿不到总长一律按不完整（`MediaCacheTest` 钉死）。
 - 剩余未勾项全部是真机验证（缓存目录增长、LRU 淘汰、`exo_len` 非 -1、搞坏目录照常播放），需要装机后逐条做。
 
+**Code review 补充（2026-09-27）：**
+
+- 字节码核实：打开失败的播放会留下「无 span、无 exo_len」的残条目，对它调
+  `isCached(key, 0, -1)` 直接抛 `IllegalArgumentException`（`getCachedBytesLength`
+  断言 length >= 0）。聚合统计里一个残条目会把整轮打断成 0，设置页「清空」按钮
+  因此永久禁用。判据已加 `total > 0` 前置短路。
+- `SimpleCache` 构造失败（索引库损坏/磁盘异常）是延迟到 `initializationException`
+  的，由 MediaCache 的 guarded 吞掉，**没有启动崩溃面**——不需要后台初始化降级。

@@ -24,11 +24,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import java.io.IOException
 
 private const val SEARCH_DEBOUNCE_MS = 300L
 
 /** 离线探活间隔：网一回来 App 自己回在线，用户不用做任何操作（用户故事 13）。 */
-private const val OFFLINE_RETRY_INTERVAL_MS = 15_000L
+internal const val OFFLINE_RETRY_INTERVAL_MS = 15_000L
 
 /** 探活上限（约 2 小时），见 [startOfflineRetry] 的说明。 */
 private const val kOfflineRetryMaxAttempts = 500
@@ -121,7 +122,8 @@ class JellyfinViewModel(
             fileOpsMessage = null,
             isOffline = false,
             cachedTrackIds = null,
-            isOfflineSearch = false
+            isOfflineSearch = false,
+            multiSelectIds = emptySet()
         )
         loginJob = viewModelScope.launch(dispatcher) {
             try {
@@ -135,7 +137,10 @@ class JellyfinViewModel(
                         source.authorizationHeader(signedIn.accessToken)
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
                     sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
-                    persistSnapshot()
+                    // 登录成功 = **整份替换**快照，不沿用旧的：快照里可能还躺着上一个账号的
+                    // 专辑列表（token 过期不清快照是铁律 5），merge 进来就是跨账号串数据。
+                    // 专辑/发现页之后随用户浏览逐屏补全。
+                    replaceSnapshot(tracks)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -206,24 +211,26 @@ class JellyfinViewModel(
 
     /**
      * 断网启动的兜底：拿本地会话 + 曲库快照直接进主页面，**乐观地**当作会话仍然有效
-     * （离线时本来也验证不了）。真失效了，联网后的第一次请求会 401，照常走
-     * [expireSession] 收场——而会话过期不碰缓存（铁律 5）。
+     * （离线时本来也验证不了）。真失效了，探活的第一次 401 会照常走 [expireSession]
+     * 收场——而会话过期不碰缓存（铁律 5）。
      */
     private suspend fun restoreFromSnapshotOffline(saved: SavedSession): Boolean {
         val loaded = snapshotRepository?.load() ?: return false
-        if (loaded.tracks.isEmpty() && loaded.albums.isEmpty()) return false
+        // 曲目表是快照的骨架：没有它，「全部音乐」和标灰判定都无从谈起，等于没兜底。
+        if (loaded.tracks.isEmpty()) return false
         val source = apiFactory.create(saved.serverUrl)
         snapshot = loaded
         session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
         dataSource = source
         authorizationSink.activeAuthorization = source.authorizationHeader(saved.accessToken)
+        _state.value = _state.value.copy(isLoading = false, isRestoring = false)
+        applySnapshot(loaded)
+        // 标灰集合先算完再进离线态，别让界面在未知集合上拦住能播的歌。
         _state.value = _state.value.copy(
-            isLoading = false,
-            isRestoring = false,
             isOffline = true,
+            cachedTrackIds = computeCachedTrackIds(),
             errorMessage = null
         )
-        applySnapshot(loaded)
         startOfflineRetry()
         return true
     }
@@ -244,6 +251,8 @@ class JellyfinViewModel(
         loginJob = null
         stopOfflineRetry()
         invalidateSessionRequests()
+        // 缓存键要趁 dataSource 还在时算好：清完会话 streamUrl 就拿不到了。
+        val keepKeys = setOfNotNull(_currentTrack.value?.let(::cacheKey))
         session = null
         dataSource = null
         authorizationSink.activeAuthorization = null
@@ -253,9 +262,10 @@ class JellyfinViewModel(
         _state.value = JellyfinUiState()
         // 主动退出 = 清空手机上的副本与快照（换账号不串数据）。缓存层出问题也不能
         // 挡住退出登录本身（铁律 1、工单 06）——两个 clear 实现自己吞异常。
+        // 正在播的那首保留：退出登录不该把正在听的歌拦腰打断。
         viewModelScope.launch(dispatcher) {
             sessionStore.clear()
-            clearLocalCopyAndSnapshot()
+            clearLocalCopyAndSnapshot(keepKeys)
         }
     }
 
@@ -416,8 +426,10 @@ class JellyfinViewModel(
             try {
                 val result = request(src, currentSession).getOrThrow()
                 if (coroutineContext.isActive && generation == albumsGeneration) {
-                    _state.value = success(result)
+                    // 先退离线态再赋成功值：markOnline 会清掉快照来源的几屏等界面重拉，
+                    // 顺序反了会把刚拉到的新数据当快照数据清掉。
                     markOnline()
+                    _state.value = success(result)
                     persistSnapshot()
                 }
             } catch (error: CancellationException) {
@@ -444,7 +456,7 @@ class JellyfinViewModel(
         val currentSession = session ?: return
         if (query.isEmpty()) {
             searchGeneration++
-            _state.value = _state.value.copy(searchResults = null, isSearching = false)
+            _state.value = _state.value.copy(searchResults = null, isSearching = false, isOfflineSearch = false)
             return
         }
         val generation = ++searchGeneration
@@ -823,6 +835,9 @@ class JellyfinViewModel(
     /**
      * 在线请求成功时顺手覆写快照（铁律 4：快照只在线下兜底，不在线上抢活）。
      * 还没加载过的那几屏沿用上一次的内容——只是「这次没拉到」，不是「服务器上没有」。
+     *
+     * 内容没变就不写盘：每次成功请求都全量序列化+落盘，几千首的库是每次好几 MB 的
+     * 纯重复 IO（专辑详情/发现页刷新全都走这里）。
      */
     private suspend fun persistSnapshot() {
         val repo = snapshotRepository ?: return
@@ -833,6 +848,15 @@ class JellyfinViewModel(
             albums = current.albums ?: previous?.albums.orEmpty(),
             discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty()
         )
+        if (next == previous) return
+        snapshot = next
+        repo.save(next)
+    }
+
+    /** 登录成功时的整份替换快照：旧账号的数据一个字段都不留（换账号不串数据）。 */
+    private suspend fun replaceSnapshot(tracks: List<Track>) {
+        val repo = snapshotRepository ?: return
+        val next = LibrarySnapshot(tracks = tracks)
         snapshot = next
         repo.save(next)
     }
@@ -846,7 +870,6 @@ class JellyfinViewModel(
             discoverAlbums = current.discoverAlbums ?: loaded.discoverAlbums.takeIf { it.isNotEmpty() },
             albumTracks = current.albumTracks ?: offlineAlbumTracks(loaded)
         )
-        refreshCachedTrackIds()
     }
 
     /**
@@ -860,27 +883,25 @@ class JellyfinViewModel(
     }
 
     /**
-     * 重算「哪些歌有完整副本」。离线时界面据此标灰，所以只在这时算——在线一律能放，
-     * 不需要知道。判完整要读缓存索引库，几百首逐个查，放在 IO 上跑（见 [MediaCache]）。
+     * 算出「哪些歌有完整副本」（一次 IO 往返拿全量键，再跟曲目表批量比对）。
+     * 失败 = 判不出来 = 全部按没缓存处理，绝不把异常抛给界面（铁律 1）。
+     *
+     * 只在**进离线态之前**算一次：isOffline 一翻 true 界面马上要用它标灰，拿未算完的
+     * null 硬撑会把有副本的歌也拦成「没缓存」——对能播的歌说谎比等一下更糟。
+     * 在线时不需要知道（一律能放），所以不提前算。
      */
-    private fun refreshCachedTrackIds() {
-        val cache = mediaCache ?: return
-        val candidates = knownTracks()
-        viewModelScope.launch(dispatcher) {
-            // 缓存层在接口层面也可能抛（铁律 1 的最后一道防线）：异常 = 判不出来 =
-            // 全部按不可播处理，绝不能让标灰计算冲出去打断界面。
-            val cached = try {
-                candidates.filter { track ->
-                    val key = cacheKey(track)
-                    key != null && cache.hasCompleteCopy(key)
-                }.map { it.id }.toSet()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                emptySet()
-            }
-            if (_state.value.isOffline) _state.value = _state.value.copy(cachedTrackIds = cached)
+    private suspend fun computeCachedTrackIds(): Set<String> {
+        val cache = mediaCache ?: return emptySet()
+        val cachedKeys = try {
+            cache.completeKeys()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            emptySet()
         }
+        return knownTracks().filter { track ->
+            cacheKey(track)?.let { it in cachedKeys } == true
+        }.map { it.id }.toSet()
     }
 
     /** 当前可能出现在界面上的所有曲目（去重）。标灰判定要覆盖每一屏。 */
@@ -902,9 +923,21 @@ class JellyfinViewModel(
     private suspend fun goOffline(needsNetwork: Boolean) {
         val loaded = loadSnapshot()
         if (loaded != null) applySnapshot(loaded)
+        // 快照连「全部音乐」都撑不起来（没有快照 / 刚被 login 清掉）：没有可显示的库，
+        // 退回「连不上服务器」+ 登录表单，跟没有缓存功能时的行为一致——空骨架更糟。
+        if (_state.value.tracks == null) {
+            _state.value = _state.value.copy(
+                isLoading = false,
+                errorMessage = friendlyError(JellyfinError.Network(IOException("offline, no snapshot")))
+            )
+            return
+        }
+        // 标灰集合先算完再进离线态（见 [computeCachedTrackIds]）。
+        val cached = computeCachedTrackIds()
         _state.value = _state.value.copy(
             isLoading = false,
             isOffline = true,
+            cachedTrackIds = cached,
             errorMessage = if (needsNetwork) "播放列表需要联网才能查看" else null
         )
         startOfflineRetry()
@@ -930,14 +963,24 @@ class JellyfinViewModel(
         if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
     }
 
-    /** 任意一次请求成功 = 网络通了。退出离线态并停掉探活。 */
+    /**
+     * 任意一次请求成功 = 网络通了。退出离线态并停掉探活。
+     *
+     * 快照来源的那几屏一并清掉：它们不该被幂等守卫当成「最新服务器数据」挡住不刷新
+     * （铁律 4）。清掉后界面的 LaunchedEffect（key 含 isOffline）会重新触发对应分区的
+     * 加载。调用方要把本次成功结果赋回 state——顺序必须是 markOnline 在前、赋值在后，
+     * 不然刚拉到的新数据会被清掉。
+     */
     private fun markOnline() {
         stopOfflineRetry()
         if (_state.value.isOffline) {
             _state.value = _state.value.copy(
                 isOffline = false,
                 cachedTrackIds = null,
-                isOfflineSearch = false
+                isOfflineSearch = false,
+                albums = null,
+                discoverAlbums = null,
+                albumTracks = null
             )
         }
     }
@@ -959,16 +1002,26 @@ class JellyfinViewModel(
             repeat(kOfflineRetryMaxAttempts) {
                 if (!isActive || !_state.value.isOffline) return@launch
                 delay(OFFLINE_RETRY_INTERVAL_MS)
-                val tracks = try {
-                    src.getMusicItems(currentSession.userId, currentSession.accessToken).getOrNull()
+                val result = try {
+                    src.getMusicItems(currentSession.userId, currentSession.accessToken)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
                     null
                 }
-                if (tracks != null) {
-                    goOnline(tracks)
-                    return@launch
+                when {
+                    // token 已失效：照实走会话过期，别空转到上限——断网兜底时的乐观会话
+                    // 就在这里收口（真失效了 401 会说话）。
+                    result != null && result.exceptionOrNull() is JellyfinError.Unauthorized -> {
+                        expireSession()
+                        return@launch
+                    }
+                    result?.isSuccess == true -> {
+                        goOnline(result.getOrThrow())
+                        return@launch
+                    }
+                    // 网络还是不通：下一轮再试
+                    else -> Unit
                 }
             }
         }
@@ -993,20 +1046,28 @@ class JellyfinViewModel(
         }
     }
 
-    /** 清空手机上的副本（界面已二次确认）。只动手机本地：没网、PC 服务没开都照常成功（铁律 3）。 */
+    /**
+     * 清空手机上的副本（界面已二次确认）。只动手机本地：没网、PC 服务没开都照常成功（铁律 3）。
+     * 正在播的那首**保留**：清空不该把正在听的歌从播放流底下抽走（离线时表现为中途断播）。
+     */
     fun clearCache() {
         val cache = mediaCache ?: return
         if (_state.value.isCacheBusy) return
+        val keepCurrent = setOfNotNull(_currentTrack.value?.let(::cacheKey))
         viewModelScope.launch(dispatcher) {
             _state.value = _state.value.copy(isCacheBusy = true, cacheMessage = null)
-            cache.clear()
+            cache.clear(keepKeys = keepCurrent)
             _state.value = _state.value.copy(
                 isCacheBusy = false,
                 cacheBytes = cache.usedBytes(),
                 cacheTrackCount = cache.completeCount(),
-                cacheMessage = "已清空手机上的副本，电脑里的歌一首没动",
-                // 刚清完，手机上什么都不剩；离线时标灰集合直接置空（不用再逐首查一遍）。
-                cachedTrackIds = if (_state.value.isOffline) emptySet() else _state.value.cachedTrackIds
+                cacheMessage = if (keepCurrent.isEmpty()) {
+                    "已清空手机上的副本，电脑里的歌一首没动"
+                } else {
+                    "已清空手机上的副本（正在播的那首先留着），电脑里的歌一首没动"
+                },
+                // 刚清完只剩正在播的一首；离线时标灰集合直接重算（不用逐首猜）。
+                cachedTrackIds = if (_state.value.isOffline) computeCachedTrackIds() else _state.value.cachedTrackIds
             )
         }
     }
@@ -1019,8 +1080,8 @@ class JellyfinViewModel(
     }
 
     /** 退出登录时清空手机上的副本与快照。两个实现都不抛，清不掉也不挡退出登录。 */
-    private suspend fun clearLocalCopyAndSnapshot() {
-        mediaCache?.clear()
+    private suspend fun clearLocalCopyAndSnapshot(keepKeys: Set<String>) {
+        mediaCache?.clear(keepKeys = keepKeys)
         snapshotRepository?.clear()
         snapshot = null
     }
@@ -1062,7 +1123,8 @@ class JellyfinViewModel(
             fileOpsMessage = null,
             isOffline = false,
             cachedTrackIds = null,
-            isOfflineSearch = false
+            isOfflineSearch = false,
+            multiSelectIds = emptySet()
         )
         viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }

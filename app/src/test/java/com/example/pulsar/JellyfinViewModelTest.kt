@@ -815,6 +815,78 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `换账号重新登录后快照整份替换，不残留旧账号数据`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        val snapshotRepo = FakeSnapshotRepository()
+        // 上一账号留下的专辑列表（token 过期不清快照是铁律 5，所以它还在）
+        snapshotRepo.stored = LibrarySnapshot(
+            tracks = listOf(track),
+            albums = listOf(Album("old-account-album", "别人的专辑", "别人", 9, null))
+        )
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, snapshotRepository = snapshotRepo
+        )
+        advanceUntilIdle()
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user-2")
+        viewModel.updatePassword("pass-2")
+        viewModel.login()
+        advanceUntilIdle()
+
+        // 新账号的快照里只有新账号的曲库，旧账号的专辑一个字段都不留
+        assertTrue(snapshotRepo.stored?.albums.isNullOrEmpty())
+        assertEquals(listOf(track), snapshotRepo.stored?.tracks)
+    }
+
+    @Test
+    fun `探活撞上 token 失效走会话过期，不空转到上限`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val snapshotRepo = FakeSnapshotRepository()
+        snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val authorization = FakeAuthorizationSink()
+        val viewModel = createViewModel(sessions, api, authorization, snapshotRepository = snapshotRepo)
+        advanceBounded()
+        assertTrue(viewModel.state.value.isOffline)
+
+        // 网络恢复了，但 token 已被服务端吊销：探活必须如实过期，而不是每 15s 空转
+        api.musicItemsError = JellyfinError.Unauthorized()
+        advanceTimeBy(OFFLINE_RETRY_INTERVAL_MS * 2 + 1_000)
+        advanceBounded()
+
+        assertTrue(sessions.cleared)
+        assertNull(authorization.value)
+        assertTrue(!viewModel.state.value.isOffline)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `清空缓存保留正在播的那首，不被从播放流底下抽走`() = runTest {
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/track-1"
+        mediaCache.completeKeys += "stream/other"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(track)),
+            mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        viewModel.setPlaybackQueue(listOf(track), "track-1")
+
+        viewModel.clearCache()
+        advanceUntilIdle()
+
+        // 正在播的 "stream/track-1" 留下，其余副本全清
+        assertEquals(setOf("stream/track-1"), mediaCache.completeKeys)
+        assertEquals(setOf("stream/track-1"), mediaCache.lastClearKept)
+        assertTrue(mediaCache.removedKeys.contains("stream/other"))
+    }
+
+    @Test
     fun `删歌成功后顺带删掉这首的本地副本`() = runTest {
         val mediaCache = FakeMediaCache()
         val fileOps = FakeLibraryFilesApi()
@@ -902,6 +974,7 @@ class JellyfinViewModelTest {
     private class FakeMediaCache : MediaCache {
         val completeKeys = mutableSetOf<String>()
         var cleared = false
+        var lastClearKept: Set<String>? = null
         val removedKeys = mutableListOf<String>()
         var failAll = false
         override suspend fun hasCompleteCopy(key: String): Boolean {
@@ -910,7 +983,17 @@ class JellyfinViewModelTest {
         }
         override suspend fun usedBytes(): Long = if (failAll) throw RuntimeException("cache broken") else 36_000_000L
         override suspend fun completeCount(): Int = if (failAll) throw RuntimeException("cache broken") else completeKeys.size
-        override suspend fun clear() { cleared = true; completeKeys.clear() }
+        override suspend fun completeKeys(): Set<String> {
+            if (failAll) throw RuntimeException("cache broken")
+            return completeKeys.toSet()
+        }
+        override suspend fun clear(keepKeys: Set<String>) {
+            cleared = true
+            lastClearKept = keepKeys
+            (completeKeys - keepKeys).forEach { removedKeys += it }
+            completeKeys.clear()
+            completeKeys += keepKeys
+        }
         override suspend fun remove(key: String) { removedKeys += key; completeKeys -= key }
     }
 
@@ -957,7 +1040,10 @@ class JellyfinViewModelTest {
         val searchQueries = mutableListOf<String>()
         var lyricsCalls = 0
         val lyricsTrackIds = mutableListOf<String>()
-        override suspend fun login(username: String, password: String) = Result.failure<com.example.pulsar.data.jellyfin.JellyfinSession>(IllegalStateException())
+        /** 登录结果：默认失败；测「换账号重登」时注入成功。 */
+        var loginResult: Result<com.example.pulsar.data.jellyfin.JellyfinSession>? = null
+        override suspend fun login(username: String, password: String) =
+            loginResult ?: Result.failure<com.example.pulsar.data.jellyfin.JellyfinSession>(IllegalStateException())
         override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> {
             musicItemsCalls++
             return musicItemsError?.let { Result.failure(it) } ?: Result.success(tracks)

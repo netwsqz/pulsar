@@ -575,15 +575,22 @@ private fun MusicLibraryScreen(
     // 离线时 playTracks 内部会跳过没缓存的歌（队列里混着能放/不能放时按工单 03 口径处理）。
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
+    // 离线没缓存的歌的统一话术（文案只此一处，经 ViewModel 的 unplayableReason 出口）。
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
         val controller = controllerState.controller
         if (controller != null) {
-            viewModel.setPlaybackQueue(trackList, trackId)
-            playTracks(
-                trackList, trackId, controller, playbackMode, viewModel::streamUrl,
-                playableFilter = { viewModel.isPlayable(it) },
-                onBlocked = { snackbarScope.launch { snackbarHostState.showSnackbar("这首歌没有缓存，联网后才能播放") } }
-            )
+            val start = trackList.firstOrNull { it.id == trackId }
+            val reason = start?.let(viewModel::unplayableReason)
+            if (reason != null) {
+                // 先守门再进队列：点了没缓存的歌只弹提示，不把它写进「正在播」镜像——
+                // 不然迷你条/高亮/歌词都会指向一首根本没在放的歌。
+                snackbarScope.launch { snackbarHostState.showSnackbar(reason) }
+            } else {
+                // 队列里只留能放的：离线播到没缓存的歌只会中途断掉。
+                val playable = trackList.filter(viewModel::isPlayable)
+                viewModel.setPlaybackQueue(playable, trackId)
+                playTracks(playable, trackId, controller, playbackMode, viewModel::streamUrl)
+            }
         }
     }
     // 离线态（工单 03/04）：列表行据此标灰，点击没缓存的歌给明确提示。
@@ -602,8 +609,9 @@ private fun MusicLibraryScreen(
         val ctrl = controllerState.controller
         if (ctrl != null) {
             // 离线没缓存的歌进不了队列——插进去等到它播也是断，不如当场说清。
-            if (!viewModel.isPlayable(track)) {
-                snackbarScope.launch { snackbarHostState.showSnackbar("这首歌没有缓存，联网后才能播放") }
+            val reason = viewModel.unplayableReason(track)
+            if (reason != null) {
+                snackbarScope.launch { snackbarHostState.showSnackbar(reason) }
             } else {
                 val url = viewModel.streamUrl(track)
                 if (url != null) {
@@ -1350,7 +1358,7 @@ private val LocalOfflineState = compositionLocalOf<OfflineState?> { null }
  * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。
  * 手势用 combinedClickable（Material 水波纹按压反馈），长按触觉由框架内置；触点坐标由旁挂的
  * 轻量 pointerInput 只观察不消费地记录，菜单仍锚定真实触点。
- * 离线时没缓存的歌整行变灰（[dimmed]）：能看到、但现在放不了——跟「没有这首歌」是两回事。 */
+ * 离线时没缓存的歌整行变灰：能看到、但现在放不了——跟「没有这首歌」是两回事。 */
 @Composable
 private fun TrackRow(
     track: Track,
@@ -1360,7 +1368,6 @@ private fun TrackRow(
     isCurrent: Boolean = false,
     isPlaying: Boolean = false,
     onAddToQueue: (() -> Unit)? = null,
-    dimmed: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -2241,8 +2248,6 @@ private fun PlaylistsContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val playlists = state.playlists
             when {
-                // 播放列表不进快照（规格「明确不做」）：断网时明说需要联网，不转圈、不显示空白。
-                state.isOffline -> EmptyState("播放列表需要联网才能查看")
                 playlists == null && state.isLoading -> {
                     // 骨架屏：2列网格
                     val shimmer = rememberSkeletonShimmer()
@@ -2292,6 +2297,9 @@ private fun PlaylistsContent(
                         }
                     }
                 }
+                // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
+                // 已加载的照常显示——断网不该把现成的列表藏掉。
+                playlists == null && state.isOffline -> EmptyState("播放列表需要联网才能查看")
                 playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 playlists.orEmpty().isEmpty() -> EmptyState("暂无播放列表")
                 else -> {
@@ -3455,27 +3463,16 @@ private fun Track.toPlaybackMetadata(): MediaMetadata = MediaMetadata.Builder()
 
 /**
  * 把 [tracks] 以 [startTrackId] 为开头旋转成播放队列后交给 [controller]；任一歌曲无流地址则放弃播放。
- *
- * [playableFilter] / [onBlocked]（可选）：离线时把没缓存的歌挡在队列外。要播的那首被挡住时
- * 调 [onBlocked] 提示——明确说「这首歌没缓存」，不是转圈、不是「网络错误」；其余被挡的照常
- * 留在列表里（能放的接着放），别把整条队列废掉。
+ * 调用方（[onPlayTrack]）负责离线守门：传进来的列表里只有能放的歌。
  */
 private fun playTracks(
     tracks: List<Track>,
     startTrackId: String,
     controller: MediaController,
     playbackMode: PlaybackMode,
-    streamUrlFor: (Track) -> String?,
-    playableFilter: ((Track) -> Boolean)? = null,
-    onBlocked: (() -> Unit)? = null
+    streamUrlFor: (Track) -> String?
 ) {
-    val playable = playableFilter?.let { filter -> tracks.filter(filter) } ?: tracks
-    // buildPlaybackOrder 对空列表 / startId 不在列表中都返回 null——空队列、点中被
-    // 过滤的歌，统一走这一处提示，不把空队列塞给播放器。
-    val order = buildPlaybackOrder(playable, startTrackId) ?: run {
-        onBlocked?.invoke()
-        return
-    }
+    val order = buildPlaybackOrder(tracks, startTrackId) ?: return
     val mediaItems = order.map { t ->
         val url = streamUrlFor(t) ?: return
         // 把封面 tag 挂到条目上：Activity 被系统回收重建后，仍可从播放器读回封面信息。

@@ -3,9 +3,6 @@ package com.example.pulsar
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -78,36 +75,37 @@ object LibrarySnapshotCodec {
  */
 class FileLibrarySnapshotRepository(private val file: File) : LibrarySnapshotRepository {
 
-    override suspend fun load(): LibrarySnapshot? = guarded(null) {
-        if (!file.exists()) return@guarded null
+    /** 串行化写盘：两个并发 save 共用同一个 tmp 文件时，A 的 rename 会把 B 写了一半的文件搬正。 */
+    private val saveLock = Any()
+
+    override suspend fun load(): LibrarySnapshot? = guardedIo(null) {
+        if (!file.exists()) return@guardedIo null
         LibrarySnapshotCodec.decode(file.readText())
     }
 
     override suspend fun save(snapshot: LibrarySnapshot) {
-        guarded(Unit) {
+        guardedIo(Unit) {
             val text = LibrarySnapshotCodec.encode(snapshot)
-            val temp = File(file.parentFile, "${file.name}.tmp")
-            temp.writeText(text)
-            if (!temp.renameTo(file)) {
-                // 改名失败（少见）：退回直接写，至少内容是对的。
-                file.writeText(text)
+            // 临时名带时间戳：就算锁外有并发（未来改动破坏串行化），也不会互踩同一个 tmp。
+            val temp = File(file.parentFile, "${file.name}.${System.nanoTime()}.tmp")
+            synchronized(saveLock) {
+                temp.writeText(text)
+                if (!temp.renameTo(file)) {
+                    // 目标已存在时部分平台 renameTo 会失败：先把旧的挪走再试一次。
+                    val backup = File(file.parentFile, "${file.name}.old")
+                    file.renameTo(backup)
+                    if (!temp.renameTo(file)) {
+                        // ponytail: 最后的兜底是非原子原地写，仅在连续两次 rename 都失败时走到
+                        file.writeText(text)
+                    }
+                    backup.delete()
+                }
                 temp.delete()
             }
         }
     }
 
     override suspend fun clear() {
-        guarded(Unit) { file.delete() }
-    }
-
-    /** 落盘在 IO 线程上跑，失败一律吞掉；协程取消照常上抛。 */
-    private suspend fun <T> guarded(fallback: T, block: () -> T): T = withContext(Dispatchers.IO) {
-        try {
-            block()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            fallback
-        }
+        guardedIo(Unit) { file.delete() }
     }
 }

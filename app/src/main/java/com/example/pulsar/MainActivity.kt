@@ -3470,13 +3470,9 @@ private fun playTracks(
     onBlocked: (() -> Unit)? = null
 ) {
     val playable = playableFilter?.let { filter -> tracks.filter(filter) } ?: tracks
-    if (playable.isEmpty()) {
-        // 一首能放的都没有：提示后放弃，不把空队列塞给播放器。
-        onBlocked?.invoke()
-        return
-    }
+    // buildPlaybackOrder 对空列表 / startId 不在列表中都返回 null——空队列、点中被
+    // 过滤的歌，统一走这一处提示，不把空队列塞给播放器。
     val order = buildPlaybackOrder(playable, startTrackId) ?: run {
-        // 点的那首不在可播集合里（没缓存/已被过滤）：明确提示，而不是静默不响应。
         onBlocked?.invoke()
         return
     }

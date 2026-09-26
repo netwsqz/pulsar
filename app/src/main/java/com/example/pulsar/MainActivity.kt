@@ -536,8 +536,10 @@ private fun MusicLibraryScreen(
     // `sessionReady` 也作为 key：主页面现在在恢复会话期间就已经组合了，首次触发时
     // 还没有 dataSource，loadLibrary 会直接 return（静默无操作）。必须等会话到位再补
     // 跑一次，否则发现页/专辑页会永远停在骨架屏上。
+    // `isOffline` 也作为 key：探活回在线时 ViewModel 会清掉快照来源的那几屏
+    // （albums/discoverAlbums/albumTracks），靠 key 变化重新触发加载，拉服务器的新值。
     val sessionReady = state.tracks != null
-    LaunchedEffect(section, sessionReady) {
+    LaunchedEffect(section, sessionReady, state.isOffline) {
         when (val s = section) {
             LibrarySection.Discover -> if (sessionReady) viewModel.loadDiscoverAlbums()
             LibrarySection.Tracks -> Unit

@@ -1,5 +1,9 @@
 # Pulsar MVP keeps default R8 rules until release dependencies are finalized.
 
+# JNI：C++ 侧符号按「包名_类名_方法名」写死（usb_jni.cpp），native 方法/类被改名就
+# 找不到符号，USB 独占直接失效。只保名字不保体，R8 仍可删无用方法。
+-keepclasseswithmembernames class com.example.pulsar.** { native <methods>; }
+
 # kotlinx.serialization
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt

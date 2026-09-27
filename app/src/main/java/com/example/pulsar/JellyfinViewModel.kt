@@ -1095,7 +1095,15 @@ class JellyfinViewModel(
             _state.value = _state.value.copy(cachedAlbums = emptyList())
             return
         }
-        viewModelScope.launch(dispatcher) { refreshCachedAlbums(tracks) }
+        viewModelScope.launch(dispatcher) {
+            // 分组需要专辑对象（封面/详情跳转用）。专辑页没逛过、快照里也没有时，
+            // 在线就现拉一次（幂等），落地后再分组；离线只能用快照里有的。
+            if (_state.value.albums == null && !_state.value.isOffline) {
+                loadAlbums()
+                albumsJob?.join()
+            }
+            refreshCachedAlbums(tracks)
+        }
     }
 
     /**

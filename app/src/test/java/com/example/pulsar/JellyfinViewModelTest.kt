@@ -918,6 +918,25 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `专辑页没加载过时进已缓存页会先拉专辑再分组`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 1, null)
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/t1"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
+            mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        // 不先逛专辑页：直接进已缓存页（快照里也没有专辑列表）
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+
+        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 1)), viewModel.state.value.cachedAlbums)
+    }
+
+    @Test
     fun `按专辑删副本：正在播的保留，其余删掉，统计与列表同步刷新`() = runTest {
         val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
         val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)

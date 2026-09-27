@@ -887,6 +887,117 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `已缓存页按专辑列出完整副本的进度`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
+        val t3 = Track("t3", "Song B1", "Artist Y", "Album B", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 2, null)
+        val albumB = Album("a2", "Album B", "Artist Y", 1, null)
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/t1"
+        mediaCache.completeKeys += "stream/t3"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1, t2, t3), albums = listOf(albumA, albumB)),
+            mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                CachedAlbum(albumA, cachedCount = 1, totalCount = 2),
+                CachedAlbum(albumB, cachedCount = 1, totalCount = 1)
+            ),
+            viewModel.state.value.cachedAlbums
+        )
+    }
+
+    @Test
+    fun `按专辑删副本：正在播的保留，其余删掉，统计与列表同步刷新`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 2, null)
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/t1"
+        mediaCache.completeKeys += "stream/t2"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
+            mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+        viewModel.setPlaybackQueue(listOf(t1, t2), "t1")
+
+        viewModel.deleteAlbumCopies(albumA)
+        advanceUntilIdle()
+
+        assertEquals(setOf("stream/t1"), mediaCache.completeKeys)
+        assertTrue(mediaCache.removedKeys.contains("stream/t2"))
+        assertEquals(1, viewModel.state.value.cacheTrackCount)
+        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 2)), viewModel.state.value.cachedAlbums)
+    }
+
+    @Test
+    fun `整张专辑删光后从已缓存列表消失`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val t3 = Track("t3", "Song B1", "Artist Y", "Album B", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 1, null)
+        val albumB = Album("a2", "Album B", "Artist Y", 1, null)
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/t1"
+        mediaCache.completeKeys += "stream/t3"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1, t3), albums = listOf(albumA, albumB)),
+            mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+
+        viewModel.deleteAlbumCopies(albumB)
+        advanceUntilIdle()
+
+        assertTrue(mediaCache.removedKeys.contains("stream/t3"))
+        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 1)), viewModel.state.value.cachedAlbums)
+    }
+
+    @Test
+    fun `换账号重新登录后已缓存列表清空，不残留旧账号的分组`() = runTest {
+        val mediaCache = FakeMediaCache()
+        mediaCache.completeKeys += "stream/track-1"
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaCache = mediaCache
+        )
+        advanceUntilIdle()
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+        assertEquals(emptyList<CachedAlbum>(), viewModel.state.value.cachedAlbums)
+
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user-2")
+        viewModel.updatePassword("pass-2")
+        viewModel.login()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.cachedAlbums)
+    }
+
+    @Test
     fun `删歌成功后顺带删掉这首的本地副本`() = runTest {
         val mediaCache = FakeMediaCache()
         val fileOps = FakeLibraryFilesApi()
@@ -1030,6 +1141,7 @@ class JellyfinViewModelTest {
 
     private class FakeJellyfinApi(
         private val tracks: List<Track> = emptyList(),
+        private val albums: List<Album> = emptyList(),
         var musicItemsError: Throwable? = null,
         var albumsError: Throwable? = null,
         private val searchResults: SearchResults = SearchResults(),
@@ -1049,7 +1161,7 @@ class JellyfinViewModelTest {
             return musicItemsError?.let { Result.failure(it) } ?: Result.success(tracks)
         }
         override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
-            albumsError?.let { Result.failure(it) } ?: Result.success(emptyList())
+            albumsError?.let { Result.failure(it) } ?: Result.success(albums)
         override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int) = Result.success(emptyList<Album>())
         override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = Result.success(emptyList<Track>())
         var playlistsError: Throwable? = null

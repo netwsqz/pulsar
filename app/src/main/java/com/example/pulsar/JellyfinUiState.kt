@@ -60,6 +60,8 @@ data class JellyfinUiState(
     val cachedTrackIds: Set<String>? = null,
     /** 当前搜索结果来自本地快照而不是 Jellyfin——界面要标明「离线搜索」，范围变小了。 */
     val isOfflineSearch: Boolean = false,
+    /** 已缓存列表（设置页进）：按专辑分组的完整副本进度。null = 还没进过这页。 */
+    val cachedAlbums: List<CachedAlbum>? = null,
     /** 缓存占用字节数 / 完整副本首数（设置页缓存区块）。 */
     val cacheBytes: Long = 0,
     val cacheTrackCount: Int = 0,

@@ -548,6 +548,7 @@ private fun MusicLibraryScreen(
             LibrarySection.Search -> Unit
             LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
             LibrarySection.Settings -> Unit
+            LibrarySection.CachedCopies -> viewModel.loadCachedAlbums()
             is LibrarySection.AlbumDetail -> if (sessionReady) viewModel.loadAlbumTracks(s.album)
             is LibrarySection.PlaylistDetail -> if (sessionReady) viewModel.loadPlaylistTracks(s.playlist)
         }
@@ -675,12 +676,20 @@ private fun MusicLibraryScreen(
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
                 section = detailOrigin
+                // 来源已消费：二级链（设置 → 已缓存 → 专辑）返回后不留陈旧来源，
+                // 否则再往回退会卡在 设置↔已缓存 的循环里。
+                detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.PlaylistDetail -> {
                 viewModel.clearPlaylistDetail()
                 section = detailOrigin
+                detailOrigin = LibrarySection.Discover
             }
-            LibrarySection.Settings -> section = detailOrigin
+            LibrarySection.Settings -> {
+                section = detailOrigin
+                detailOrigin = LibrarySection.Discover
+            }
+            LibrarySection.CachedCopies -> section = LibrarySection.Settings
             else -> section = LibrarySection.Discover
         }
     }
@@ -877,10 +886,18 @@ private fun MusicLibraryScreen(
                         isPlaying = controllerState.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
+                    LibrarySection.CachedCopies -> CachedCopiesContent(
+                        state = state,
+                        viewModel = viewModel,
+                        albumCoverFor = viewModel::albumCover,
+                        onOpenAlbum = openAlbum,
+                        modifier = Modifier.fillMaxSize()
+                    )
                     LibrarySection.Settings -> SettingsContent(
                         state = state,
                         viewModel = viewModel,
                         controllerState = controllerState,
+                        onOpenCachedCopies = { section = LibrarySection.CachedCopies },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -2588,6 +2605,7 @@ private fun SettingsContent(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
     controllerState: ControllerState,
+    onOpenCachedCopies: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val controller = controllerState.controller
@@ -2754,7 +2772,7 @@ private fun SettingsContent(
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
         RecycleBinSection(state = state, viewModel = viewModel)
         // 手机缓存：听过的歌在手机上留的副本，离线能听。占了空间就得看得见（ADR-0003）。
-        MediaCacheSection(state = state, viewModel = viewModel)
+        MediaCacheSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
     }
 }
 
@@ -2852,10 +2870,129 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
     }
 }
 
+/** 已缓存列表页（CONTEXT.md「已缓存列表」）：按专辑分组的完整副本。点专辑进详情页，
+ * 每张专辑可单独删副本——删的是手机副本，歌还在电脑上（确认框说清，同 ADR-0003）。 */
+@Composable
+private fun CachedCopiesContent(
+    state: JellyfinUiState,
+    viewModel: JellyfinViewModel,
+    albumCoverFor: (Album) -> JellyfinRequest?,
+    onOpenAlbum: (Album) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp).padding(top = 8.dp)
+    ) {
+        Text(
+            "已缓存",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+        )
+        val cachedAlbums = state.cachedAlbums
+        when {
+            cachedAlbums == null -> Box(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator() }
+            cachedAlbums.isEmpty() -> Box(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) { EmptyState("还没有缓存的音乐\n先在线听几首，副本会自动留下") }
+            else -> {
+                var deleteTarget by remember { mutableStateOf<CachedAlbum?>(null) }
+                LazyColumn(
+                    Modifier.weight(1f).fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(bottom = 96.dp)
+                ) {
+                    items(cachedAlbums, key = { it.album.id }) { entry ->
+                        CachedAlbumRow(
+                            entry = entry,
+                            cover = albumCoverFor(entry.album),
+                            busy = state.isCacheBusy,
+                            onOpen = { onOpenAlbum(entry.album) },
+                            onDelete = { deleteTarget = entry }
+                        )
+                    }
+                }
+                deleteTarget?.let { target ->
+                    AlertDialog(
+                        onDismissRequest = { deleteTarget = null },
+                        title = { Text("删掉这张专辑的副本？") },
+                        text = {
+                            Text(
+                                "将删掉《${target.album.name}》在手机上的 ${target.cachedCount} 首副本。\n" +
+                                    "歌还在电脑上一首没动，下次联网听过会自动再攒；正在播的那首会保留。"
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                enabled = !state.isCacheBusy,
+                                onClick = {
+                                    val album = target.album
+                                    deleteTarget = null
+                                    viewModel.deleteAlbumCopies(album)
+                                }
+                            ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 已缓存列表的一行：封面 + 专辑名 + 进度，右侧删除按钮。整行点击进专辑详情页。 */
+@Composable
+private fun CachedAlbumRow(
+    entry: CachedAlbum,
+    cover: JellyfinRequest?,
+    busy: Boolean,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        onClick = onOpen,
+        modifier = Modifier.fillMaxWidth().border(
+            width = 1.dp,
+            color = cardBorderColor(),
+            shape = RoundedCornerShape(12.dp)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            AlbumCover(cover, entry.album.name, Modifier.size(64.dp))
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    entry.album.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "${entry.album.artist} · 已缓存 ${entry.cachedCount}/${entry.totalCount} 首",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            IconButton(onClick = onDelete, enabled = !busy) {
+                Icon(Icons.Filled.Delete, contentDescription = "删除这张专辑的副本")
+            }
+        }
+    }
+}
+
 /** 设置页的手机缓存区块（工单 05）：占用 + 首数 + 一键清空。
  * 清空的只是手机上的副本，歌还在电脑上——确认框里必须说清这一点（ADR-0003）。 */
 @Composable
-private fun MediaCacheSection(state: JellyfinUiState, viewModel: JellyfinViewModel) {
+private fun MediaCacheSection(
+    state: JellyfinUiState,
+    viewModel: JellyfinViewModel,
+    onOpenCachedCopies: () -> Unit
+) {
     // 每次进设置页重拉：播放随时在攒副本，数字不能停在旧值。
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
     var showClearConfirm by remember { mutableStateOf(false) }
@@ -2873,6 +3010,10 @@ private fun MediaCacheSection(state: JellyfinUiState, viewModel: JellyfinViewMod
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            TextButton(
+                onClick = onOpenCachedCopies,
+                enabled = state.cacheTrackCount > 0
+            ) { Text("已缓存") }
             TextButton(
                 onClick = { showClearConfirm = true },
                 enabled = state.cacheTrackCount > 0 && !state.isCacheBusy

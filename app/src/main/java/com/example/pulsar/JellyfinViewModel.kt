@@ -122,6 +122,7 @@ class JellyfinViewModel(
             fileOpsMessage = null,
             isOffline = false,
             cachedTrackIds = null,
+            cachedAlbums = null,
             isOfflineSearch = false,
             multiSelectIds = emptySet()
         )
@@ -1038,12 +1039,16 @@ class JellyfinViewModel(
 
     /** 拉缓存占用（进设置页时调）。 */
     fun loadCacheStats() {
+        viewModelScope.launch(dispatcher) { refreshCacheStats() }
+    }
+
+    /** 缓存统计（设置页卡片）：占用 + 完整副本首数。 */
+    private suspend fun refreshCacheStats() {
         val cache = mediaCache ?: return
-        viewModelScope.launch(dispatcher) {
-            val bytes = cache.usedBytes()
-            val count = cache.completeCount()
-            _state.value = _state.value.copy(cacheBytes = bytes, cacheTrackCount = count)
-        }
+        _state.value = _state.value.copy(
+            cacheBytes = cache.usedBytes(),
+            cacheTrackCount = cache.completeCount()
+        )
     }
 
     /**
@@ -1077,6 +1082,54 @@ class JellyfinViewModel(
         val cache = mediaCache ?: return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) { cache.remove(key) }
+    }
+
+    /**
+     * 已缓存列表（设置页进）：按专辑分组显示有完整副本的歌。进页面时重拉一次——
+     * 播放随时在攒副本，进页时算的才是当下。曲库没到位（恢复会话中/恢复失败）按
+     * 空列表处理：列表页转圈没有尽头，空态是更诚实的占位。
+     */
+    fun loadCachedAlbums() {
+        val tracks = _state.value.tracks
+        if (tracks == null) {
+            _state.value = _state.value.copy(cachedAlbums = emptyList())
+            return
+        }
+        viewModelScope.launch(dispatcher) { refreshCachedAlbums(tracks) }
+    }
+
+    /**
+     * 删掉一张专辑所有歌的手机副本（界面已二次确认）。正在播的那首**保留**（同
+     * [clearCache]：不能把正在听的歌从播放流底下抽走）。只动手机本地（铁律 3），
+     * 失败静默（铁律 1）——删完重算，列表说的永远是当下。
+     */
+    fun deleteAlbumCopies(album: Album) {
+        val cache = mediaCache ?: return
+        val tracks = _state.value.tracks ?: return
+        // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
+        if (_state.value.isCacheBusy) return
+        _state.value = _state.value.copy(isCacheBusy = true)
+        val keepCurrent = setOfNotNull(_currentTrack.value?.let(::cacheKey))
+        val keys = tracks.filter { it.album == album.name }
+            .mapNotNull { cacheKey(it) }
+            .filter { it !in keepCurrent }
+        viewModelScope.launch(dispatcher) {
+            keys.forEach { cache.remove(it) }
+            refreshCachedAlbums(tracks)
+            refreshCacheStats()
+            _state.value = _state.value.copy(isCacheBusy = false)
+        }
+    }
+
+    /** 重算已缓存列表。专辑对象从专辑页拿（没加载过就退快照）按专辑名配对。 */
+    private suspend fun refreshCachedAlbums(tracks: List<Track>) {
+        val cached = computeCachedTrackIds()
+        val albums = _state.value.albums ?: loadSnapshot()?.albums.orEmpty()
+        _state.value = _state.value.copy(
+            cachedAlbums = groupCachedByAlbum(tracks, albums, cached),
+            // 离线时标灰集合跟着删副本走：删掉的那首马上变成「没缓存」不能放。
+            cachedTrackIds = if (_state.value.isOffline) cached else _state.value.cachedTrackIds
+        )
     }
 
     /** 退出登录时清空手机上的副本与快照。两个实现都不抛，清不掉也不挡退出登录。 */
@@ -1123,6 +1176,7 @@ class JellyfinViewModel(
             fileOpsMessage = null,
             isOffline = false,
             cachedTrackIds = null,
+            cachedAlbums = null,
             isOfflineSearch = false,
             multiSelectIds = emptySet()
         )

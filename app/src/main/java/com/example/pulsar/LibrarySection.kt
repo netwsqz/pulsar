@@ -11,6 +11,7 @@ internal sealed interface LibrarySection {
     data object Search : LibrarySection
     data object QQDownload : LibrarySection
     data object Settings : LibrarySection
+    data object CachedCopies : LibrarySection
     data class AlbumDetail(val album: Album) : LibrarySection
     data class PlaylistDetail(val playlist: Playlist) : LibrarySection
 }
@@ -18,4 +19,5 @@ internal sealed interface LibrarySection {
 internal fun LibrarySection.isDetail(): Boolean =
     this is LibrarySection.AlbumDetail ||
         this is LibrarySection.PlaylistDetail ||
-        this is LibrarySection.Settings
+        this is LibrarySection.Settings ||
+        this is LibrarySection.CachedCopies

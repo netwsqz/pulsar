@@ -29,7 +29,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
@@ -59,6 +58,7 @@ import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQSongDto
+import com.example.pulsar.ui.theme.Dimens
 
 /**
  * 「QQ 下载」区块：搜索 QQ 音乐 → 选音质下载（单曲/整专辑/专辑选曲）→ 看任务进度。
@@ -69,8 +69,6 @@ import com.example.pulsar.data.qqdownload.QQSongDto
 @Composable
 internal fun QQDownloadScreen(
     state: QQDownloadUiState,
-    onServiceUrlInput: (String) -> Unit,
-    onConnectService: () -> Unit,
     onQualityChange: (String) -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onDownloadSong: (QQSongDto) -> Unit,
@@ -96,10 +94,10 @@ internal fun QQDownloadScreen(
         modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = Dimens.SpaceMedium)
             .padding(top = GlassIslandTopSpacing),
         contentPadding = PaddingValues(bottom = 96.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         if (state.credentialExpired) {
             item { CredentialExpiredCard(state.isRetryingCredential, onRetryCredential) }
@@ -118,13 +116,7 @@ internal fun QQDownloadScreen(
             }
         }
         if (!state.serviceReachable || state.serviceUrl.isBlank()) {
-            item {
-                ServiceSetupCard(
-                    state = state,
-                    onServiceUrlInput = onServiceUrlInput,
-                    onConnectService = onConnectService
-                )
-            }
+            item { ServiceStatusCard(state) }
         }
         item {
             OutlinedTextField(
@@ -137,7 +129,7 @@ internal fun QQDownloadScreen(
                     {
                         IconButton(
                             onClick = { onSearchQueryChange("") },
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(Dimens.TouchTargetSmall)
                         ) {
                             Icon(Icons.Filled.Close, contentDescription = "清除搜索内容")
                         }
@@ -157,7 +149,7 @@ internal fun QQDownloadScreen(
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState()),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
             ) {
                 Text(
                     "音质",
@@ -200,7 +192,7 @@ internal fun QQDownloadScreen(
         }
         if (state.isSearching) {
             item {
-                Box(Modifier.fillMaxWidth().padding(vertical = 24.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
             }
@@ -306,7 +298,7 @@ private fun FileOpsKeyCard(
     onSaveFileOpsKey: () -> Unit
 ) {
     var visible by remember { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)) {
         Text("文件操作密钥", style = MaterialTheme.typography.titleMedium)
         Text(
             "长按歌曲删除/改名时要用。密钥在电脑上服务启动日志里，或 E:\\nsmic\\server\\.file_ops_key 文件里。",
@@ -330,7 +322,7 @@ private fun FileOpsKeyCard(
                     }
                 }
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Dimens.SpaceSmall))
             TextButton(
                 onClick = onSaveFileOpsKey,
                 enabled = state.fileOpsKeyInput.isNotBlank() && state.fileOpsKeyInput.trim() != state.fileOpsKey
@@ -339,29 +331,23 @@ private fun FileOpsKeyCard(
     }
 }
 
-/** 服务地址设置卡：未连接时显示。 */
+/** 服务状态卡：地址由 Jellyfin 服务器地址自动推导（同主机 + 8900），没有手动入口。 */
 @Composable
-private fun ServiceSetupCard(
-    state: QQDownloadUiState,
-    onServiceUrlInput: (String) -> Unit,
-    onConnectService: () -> Unit
-) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("连接 QQ 下载服务", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "先在电脑上双击 E:\\nsmic\\server\\start.bat 启动服务，再填入电脑的局域网地址。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        OutlinedTextField(
-            value = state.serviceUrlInput.ifBlank { state.serviceUrl },
-            onValueChange = onServiceUrlInput,
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("http://192.168.1.10:8900") },
-            singleLine = true
-        )
-        Button(onClick = onConnectService, modifier = Modifier.fillMaxWidth()) {
-            Text(if (state.serviceReachable) "已连接 · 重新连接" else "连接")
+private fun ServiceStatusCard(state: QQDownloadUiState) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
+        Text("QQ 下载服务", style = MaterialTheme.typography.titleMedium)
+        if (state.serviceUrl.isBlank()) {
+            Text(
+                "等待服务器地址：登录 Jellyfin 后会自动连接同机的下载服务。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            Text(
+                "连不上 ${state.serviceUrl}：确认电脑上已双击 server\\start.bat 启动服务，且手机和电脑在同一网络。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -375,8 +361,8 @@ private fun CredentialExpiredCard(
     Column(
         Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(vertical = Dimens.SpaceTiny),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         Text(
             "QQ 音乐凭证已过期",
@@ -391,7 +377,7 @@ private fun CredentialExpiredCard(
         OutlinedButton(onClick = onRetryCredential, enabled = !isRetrying) {
             if (isRetrying) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(Dimens.SpaceSmall))
             }
             Text("重试提取凭证")
         }
@@ -407,15 +393,15 @@ private fun CredentialRefreshRow(
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         TextButton(onClick = onRefreshCredential, enabled = !state.isRetryingCredential) {
             if (state.isRetryingCredential) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(Dimens.SpaceSmall))
             } else {
                 Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(Dimens.SpaceTiny))
             }
             Text("刷新凭证")
         }
@@ -435,7 +421,7 @@ private fun QQSectionHeader(title: String) {
         title,
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(top = 4.dp)
+        modifier = Modifier.padding(top = Dimens.SpaceTiny)
     )
 }
 
@@ -454,7 +440,7 @@ private fun QQSongRow(
     onRequestRedownload: () -> Unit
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -478,7 +464,7 @@ private fun QQSongRow(
                     else -> null
                 }
                 if (tag != null) {
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Dimens.SpaceSmall))
                     Text(
                         tag.first,
                         style = MaterialTheme.typography.labelSmall,
@@ -517,7 +503,7 @@ private fun QQAlbumRow(
     onDownloadAll: () -> Unit
 ) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -587,7 +573,7 @@ private fun AlbumPickerDialog(
             )
         },
         text = {
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)) {
                 if (errorMessage != null) {
                     Text(
                         errorMessage,
@@ -600,7 +586,7 @@ private fun AlbumPickerDialog(
                 }
                 when {
                     picker.isLoading -> Box(
-                        Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge),
                         contentAlignment = Alignment.Center
                     ) {
                         CircularProgressIndicator()
@@ -674,7 +660,7 @@ private fun AlbumPickerDialog(
             TextButton(onClick = onConfirm, enabled = !isEnqueuing && picker.selectedMids.isNotEmpty()) {
                 if (isEnqueuing) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(Dimens.SpaceSmall))
                 }
                 Text(
                     if (picker.selectedMids.isEmpty()) "下载选中"
@@ -710,7 +696,7 @@ private fun QQTrackPickRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Checkbox(checked = checked, onCheckedChange = null, enabled = enabled)
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.width(Dimens.SpaceTiny))
         Text(
             name,
             style = MaterialTheme.typography.bodyMedium,
@@ -720,7 +706,7 @@ private fun QQTrackPickRow(
             color = if (enabled) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
         )
         if (tag != null) {
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(Dimens.SpaceSmall))
             Text(
                 tag.first,
                 style = MaterialTheme.typography.labelSmall,
@@ -734,7 +720,7 @@ private fun QQTrackPickRow(
 @Composable
 private fun QQJobRow(job: QQJobDto) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
@@ -744,7 +730,7 @@ private fun QQJobRow(job: QQJobDto) {
                 else -> Text("×", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
             }
         }
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(Dimens.SpaceMidMedium))
         Column(Modifier.weight(1f)) {
             Text(
                 job.title ?: job.songMid,

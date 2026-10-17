@@ -909,7 +909,7 @@ private fun QueuePage(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "从「全部音乐 / 专辑 / 播放列表」里点一首歌开始",
+                text = "从「歌曲 / 专辑 / 播放列表」里点一首歌开始",
                 style = MaterialTheme.typography.bodyMedium,
                 color = NpTextFaint,
                 textAlign = TextAlign.Center

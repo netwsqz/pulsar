@@ -696,7 +696,7 @@ private fun MusicLibraryScreen(
         LibrarySection.Search -> state.searchResults?.tracks.orEmpty()
         else -> emptyList()
     }
-    // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（全部音乐/专辑/播放列表/搜索）
+    // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
     BackHandler(section != LibrarySection.Discover) {
         when (section) {
@@ -789,18 +789,20 @@ private fun MusicLibraryScreen(
                 .navigationBarsPadding()
                 .layerBackdrop(backdrop)
         ) {
-            // 页面切换动画：进详情页从右侧推入、返回从左侧退回；
+            // 页面切换动画：进详情页 / 搜索页从右侧推入、返回从左侧退回；
             // 顶层页签之间按 tab 顺序左右滑（与 Auxio 的 ViewPager 方向一致）。
             AnimatedContent(
                 targetState = section,
                 transitionSpec = {
-                    val enteringDetail = targetState.isDetail()
                     val fromIndex = initialState.navIndex()
                     val toIndex = targetState.navIndex()
-                    val forward = if (fromIndex >= 0 && toIndex >= 0) {
-                        toIndex > fromIndex
-                    } else {
-                        enteringDetail
+                    val forward = when {
+                        // 顶层页签之间：序号增大 = 往右翻。
+                        fromIndex >= 0 && toIndex >= 0 -> toIndex > fromIndex
+                        // 顶层 → 非顶层（详情 / 搜索 / 设置）：往里走，从右侧推入。
+                        fromIndex >= 0 -> true
+                        // 非顶层 → 任何页：往外退，从左侧退回。
+                        else -> false
                     }
                     val enter = slideInHorizontally(tween(320)) { width ->
                         if (forward) width else -width
@@ -853,7 +855,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Artists, LibrarySection.Genres -> ComingSoonContent(
-                        title = if (s == LibrarySection.Artists) "艺术家" else "流派",
+                        title = s.navLabel().orEmpty(),
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
@@ -1144,7 +1146,7 @@ private fun MusicLibraryScreen(
 
 /**
  * 顶部玻璃岛：悬浮的液态玻璃面板（与播放条同款：四角圆角 + 模糊 + 透镜 + 高光），
- * 装「发现 / 全部音乐 / 专辑 / 播放列表」与搜索 / 设置 / 退出按钮。
+ * 装「发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表 / QQ 下载」与搜索 / 设置 / 退出按钮。
  * chip 分组可横向滑动（分区多了会挤不下），滑动区域两侧有渐变提示，选中项切换时自动滚入可见区。
  */
 @Composable
@@ -3402,7 +3404,7 @@ private fun MiniPlayerBar(
                     ) {
                         if (queue.isEmpty()) {
                             Text(
-                                text = "暂无队列：从「全部音乐 / 专辑 / 播放列表」里点一首歌开始",
+                                text = "暂无队列：从「歌曲 / 专辑 / 播放列表」里点一首歌开始",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )

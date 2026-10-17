@@ -92,6 +92,17 @@ class JellyfinDtoTest {
     }
 
     @Test
+    fun `album carries genres for the client side grouping`() {
+        val album = JellyfinItemDto(
+            id = "album-7",
+            name = "Great Album",
+            genres = listOf("Rock", "Pop")
+        ).toAlbum()
+
+        assertEquals(listOf("Rock", "Pop"), album.genres)
+    }
+
+    @Test
     fun `album image tag is null when no Primary image exists`() {
         val album = JellyfinItemDto(
             id = "album-6",

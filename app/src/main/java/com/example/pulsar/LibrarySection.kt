@@ -16,6 +16,13 @@ internal sealed interface LibrarySection {
     data object CachedCopies : LibrarySection
     data class AlbumDetail(val album: Album) : LibrarySection
     data class PlaylistDetail(val playlist: Playlist) : LibrarySection
+
+    /**
+     * 艺术家 / 流派分组详情（工单 06）：点艺术家或流派进入，列出它下面的专辑。
+     * 只带组名与来源类型，专辑从已加载的 [com.example.pulsar.JellyfinUiState.albums] 现算——
+     * 不复制一份列表进导航状态，数据刷新后详情页自动跟着变。
+     */
+    data class GroupDetail(val name: String, val isGenre: Boolean) : LibrarySection
 }
 
 /**
@@ -46,5 +53,6 @@ internal fun LibrarySection.navLabel(): String? =
 internal fun LibrarySection.isDetail(): Boolean =
     this is LibrarySection.AlbumDetail ||
         this is LibrarySection.PlaylistDetail ||
+        this is LibrarySection.GroupDetail ||
         this is LibrarySection.Settings ||
         this is LibrarySection.CachedCopies

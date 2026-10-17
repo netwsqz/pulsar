@@ -35,6 +35,14 @@ class LibrarySectionTest {
     }
 
     @Test
+    fun `group detail is a non top level detail page`() {
+        val group = LibrarySection.GroupDetail(name = "Rock", isGenre = true)
+        assertEquals(-1, group.navIndex())
+        assertNull(group.navLabel())
+        assertEquals(true, group.isDetail())
+    }
+
+    @Test
     fun `nav label matches the chip text and is null for non top level pages`() {
         assertEquals("发现", LibrarySection.Discover.navLabel())
         assertEquals("歌曲", LibrarySection.Tracks.navLabel())

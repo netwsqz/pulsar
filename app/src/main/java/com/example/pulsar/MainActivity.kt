@@ -375,25 +375,131 @@ private fun EmptyState(
     }
 }
 /**
- * 艺术家 / 流派页的临时占位（工单 04 只做导航壳，页面本身归工单 06）。
- * 玻璃岛和页面切换照常可用，避免点了 tab 什么都不发生。
+ * 艺术家 / 流派列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
+ * 行语言沿用 Auxio 列表项：封面 + 组名 + 「N 张专辑」副信息。
+ * 封面取组内第一张专辑的封面——服务端没给艺术家/流派单独的图。
  */
 @Composable
-private fun ComingSoonContent(title: String, modifier: Modifier = Modifier) {
+private fun LibraryGroupsContent(
+    state: JellyfinUiState,
+    isGenre: Boolean,
+    onOpenGroup: (LibraryGroup) -> Unit,
+    coverFor: (Album) -> JellyfinRequest?,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val title = if (isGenre) "流派" else "艺术家"
+    val albums = state.albums
+    val groups = remember(albums, isGenre) {
+        val loaded = albums.orEmpty()
+        if (isGenre) groupAlbumsByGenre(loaded) else groupAlbumsByArtist(loaded)
+    }
     Column(
-        modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars),
+        modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = Dimens.SpaceMedium),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         Text(
             title,
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(
-                start = Dimens.SpaceMedium,
-                end = Dimens.SpaceMedium,
-                top = GlassIslandTopSpacing - Dimens.SpaceSmall
-            )
+            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
-        EmptyState("${title}页正在做，先用搜索或专辑页浏览")
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            when {
+                albums == null && state.isLoading -> TrackListSkeleton(count = 8)
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                groups.isEmpty() -> EmptyState(if (isGenre) "暂无流派" else "暂无艺术家")
+                else -> LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 96.dp),
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+                ) {
+                    itemsIndexed(groups, key = { _, g -> g.name }) { index, group ->
+                        val coverAlbum = group.albums.firstOrNull()
+                        SearchResultRow(
+                            cover = coverAlbum?.let(coverFor),
+                            title = group.name,
+                            subtitle = "${group.albums.size} 张专辑",
+                            onClick = { onOpenGroup(group) },
+                            showDivider = index != groups.lastIndex,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 艺术家 / 流派详情（工单 06）：标题 + 该组下的专辑网格，点专辑进专辑详情。 */
+@Composable
+private fun LibraryGroupDetailContent(
+    state: JellyfinUiState,
+    groupName: String,
+    isGenre: Boolean,
+    onOpenAlbum: (Album) -> Unit,
+    coverFor: (Album) -> JellyfinRequest?,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val albums = state.albums
+    // 组名来自导航状态，专辑列表可能还在加载/刷新：按组名重新分组，找不到就显示空态。
+    val group = remember(albums, groupName, isGenre) {
+        val loaded = albums.orEmpty()
+        val groups = if (isGenre) groupAlbumsByGenre(loaded) else groupAlbumsByArtist(loaded)
+        groups.firstOrNull { it.name == groupName }
+    }
+    Column(
+        modifier.fillMaxSize().statusBarsPadding()
+            .padding(horizontal = Dimens.SpaceMedium).padding(top = Dimens.SpaceSmall),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
+            Text(groupName, style = MaterialTheme.typography.titleLarge)
+            group?.let {
+                Text(
+                    "${it.albums.size} 张专辑",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            when {
+                albums == null && state.isLoading -> {
+                    val shimmer = rememberSkeletonShimmer()
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(2),
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 96.dp),
+                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+                    ) {
+                        items(6) {
+                            SkeletonBox(
+                                Modifier.fillMaxWidth().aspectRatio(1f),
+                                progress = shimmer,
+                                shape = RoundedCornerShape(Dimens.CornerLarge)
+                            )
+                        }
+                    }
+                }
+                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                group == null || group.albums.isEmpty() -> EmptyState("这里还没有专辑")
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(2),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = 96.dp),
+                    horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+                ) {
+                    items(group.albums, key = { it.id }) { album ->
+                        AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -573,9 +679,10 @@ private fun MusicLibraryScreen(
             }
             LibrarySection.Tracks -> Unit
             LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
-            // 艺术家 / 流派页本身由工单 06 落地（客户端分组，零新 API）；这里先占位。
-            LibrarySection.Artists -> Unit
-            LibrarySection.Genres -> Unit
+            // 艺术家 / 流派页由已加载的专辑客户端分组而来（工单 06），零新 API：
+            // 只确保专辑列表到位，其余全在 UI 侧现算。
+            LibrarySection.Artists, LibrarySection.Genres -> if (sessionReady) viewModel.loadAlbums()
+            is LibrarySection.GroupDetail -> if (sessionReady) viewModel.loadAlbums()
             LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
             LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
@@ -714,6 +821,11 @@ private fun MusicLibraryScreen(
             }
             is LibrarySection.PlaylistDetail -> {
                 viewModel.clearPlaylistDetail()
+                section = detailOrigin
+                detailOrigin = LibrarySection.Discover
+            }
+            is LibrarySection.GroupDetail -> {
+                // 组详情没有可清的服务端状态（专辑列表还在用），直接退回来源页。
                 section = detailOrigin
                 detailOrigin = LibrarySection.Discover
             }
@@ -860,8 +972,15 @@ private fun MusicLibraryScreen(
                         onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
-                    LibrarySection.Artists, LibrarySection.Genres -> ComingSoonContent(
-                        title = s.navLabel().orEmpty(),
+                    LibrarySection.Artists, LibrarySection.Genres -> LibraryGroupsContent(
+                        state = state,
+                        isGenre = s == LibrarySection.Genres,
+                        onOpenGroup = { group ->
+                            detailOrigin = section
+                            section = LibrarySection.GroupDetail(group.name, isGenre = s == LibrarySection.Genres)
+                        },
+                        coverFor = viewModel::albumCover,
+                        onRetry = viewModel::loadAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
@@ -929,6 +1048,15 @@ private fun MusicLibraryScreen(
                         onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
+                        state = state,
+                        groupName = s.name,
+                        isGenre = s.isGenre,
+                        onOpenAlbum = openAlbum,
+                        coverFor = viewModel::albumCover,
+                        onRetry = viewModel::loadAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.CachedCopies -> CachedCopiesContent(
@@ -2221,6 +2349,51 @@ private fun DiscoverAlbumCard(
     }
 }
 
+/** 专辑网格卡（Auxio 封面网格语言）：方形封面 + 专辑名 + 「歌手 · N 首」。
+ * 专辑页与艺术家/流派详情页共用，避免两处各写一份卡片样式。 */
+@Composable
+private fun AlbumGridCard(
+    album: Album,
+    cover: JellyfinRequest?,
+    onClick: () -> Unit
+) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = cardBorderColor(),
+                shape = RoundedCornerShape(Dimens.CornerLarge)
+            ),
+        shape = RoundedCornerShape(Dimens.CornerLarge)
+    ) {
+        Column {
+            AlbumCover(
+                cover,
+                album.name,
+                Modifier.fillMaxWidth().aspectRatio(1f),
+                cornerRadius = Dimens.CornerLarge
+            )
+            Column(
+                Modifier.padding(Dimens.SpaceMidMedium),
+                verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+            ) {
+                Text(
+                    album.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AlbumsContent(
     state: JellyfinUiState,
@@ -2307,28 +2480,7 @@ private fun AlbumsContent(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         items(albumList, key = { it.id }) { album ->
-                            Card(
-                                onClick = { onOpenAlbum(album) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = cardBorderColor(),
-                                        shape = RoundedCornerShape(12.dp)
-                                    ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column {
-                                    AlbumCover(coverFor(album), album.name, Modifier.fillMaxWidth().aspectRatio(1f))
-                                    Column(Modifier.padding(12.dp)) {
-                                        Text(album.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        Text(
-                                            album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
-                                    }
-                                }
-                            }
+                            AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
                         }
                     }
                 }

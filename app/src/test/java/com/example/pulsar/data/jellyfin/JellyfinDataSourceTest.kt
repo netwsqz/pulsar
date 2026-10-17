@@ -180,7 +180,7 @@ class JellyfinDataSourceTest {
         assertEquals("/Users/user-1/Items", request.url.encodedPath)
         assertEquals("MusicAlbum", request.url.parameters["IncludeItemTypes"])
         assertEquals("true", request.url.parameters["Recursive"])
-        assertEquals("ChildCount", request.url.parameters["Fields"])
+        assertEquals("ChildCount,Genres", request.url.parameters["Fields"])
         assertEquals("SortName", request.url.parameters["SortBy"])
         assertEquals("Ascending", request.url.parameters["SortOrder"])
         assertEquals(

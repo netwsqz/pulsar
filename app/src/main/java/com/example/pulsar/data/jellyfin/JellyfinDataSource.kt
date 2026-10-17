@@ -74,7 +74,8 @@ class JellyfinDataSource(
                 mapOf(
                     "IncludeItemTypes" to "MusicAlbum",
                     "Recursive" to "true",
-                    "Fields" to "ChildCount",
+                    // Genres 供艺术家/流派页做客户端分组（工单 06），不需要额外请求
+                    "Fields" to "ChildCount,Genres",
                     "SortBy" to "SortName",
                     "SortOrder" to "Ascending"
                 )

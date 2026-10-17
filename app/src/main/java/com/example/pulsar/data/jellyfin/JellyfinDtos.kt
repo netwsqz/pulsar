@@ -34,6 +34,8 @@ data class JellyfinItemDto(
     @SerialName("Artists") val artists: List<String> = emptyList(),
     @SerialName("RunTimeTicks") val runTimeTicks: Long? = null,
     @SerialName("ImageTags") val imageTags: Map<String, String> = emptyMap(),
+    /** 流派列表（请求要带 Fields=Genres）。艺术家/流派页按它做客户端分组。 */
+    @SerialName("Genres") val genres: List<String> = emptyList(),
     @SerialName("Type") val type: String? = null,
     @SerialName("IsFolder") val isFolder: Boolean? = null,
     @SerialName("ChildCount") val childCount: Int? = null,
@@ -75,7 +77,8 @@ fun JellyfinItemDto.toAlbum(): com.example.pulsar.domain.model.Album {
         name = name,
         artist = artist,
         trackCount = childCount,
-        imageTag = imageTags["Primary"]
+        imageTag = imageTags["Primary"],
+        genres = genres
     )
 }
 

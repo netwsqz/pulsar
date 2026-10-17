@@ -11,6 +11,7 @@ import com.example.pulsar.ui.components.glassBarSliderColors
 import com.example.pulsar.ui.components.liquidGlass
 import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
+import com.example.pulsar.ui.theme.Dimens
 import com.example.pulsar.ui.theme.PulsarTheme
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
@@ -373,6 +374,29 @@ private fun EmptyState(
         )
     }
 }
+/**
+ * 艺术家 / 流派页的临时占位（工单 04 只做导航壳，页面本身归工单 06）。
+ * 玻璃岛和页面切换照常可用，避免点了 tab 什么都不发生。
+ */
+@Composable
+private fun ComingSoonContent(title: String, modifier: Modifier = Modifier) {
+    Column(
+        modifier.fillMaxSize().windowInsetsPadding(WindowInsets.statusBars),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(
+                start = Dimens.SpaceMedium,
+                end = Dimens.SpaceMedium,
+                top = GlassIslandTopSpacing - Dimens.SpaceSmall
+            )
+        )
+        EmptyState("${title}页正在做，先用搜索或专辑页浏览")
+    }
+}
+
 /** 骨架占位块的共享扫光进度（0f..1f 循环）：一处骨架屏取一次、传给它所有的占位块，
  * 避免每个占位块各起一套 infinite transition；所有块同步扫光，视觉上是一整片微光扫过。
  *
@@ -544,6 +568,9 @@ private fun MusicLibraryScreen(
             LibrarySection.Discover -> if (sessionReady) viewModel.loadDiscoverAlbums()
             LibrarySection.Tracks -> Unit
             LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
+            // 艺术家 / 流派页本身由工单 06 落地（客户端分组，零新 API）；这里先占位。
+            LibrarySection.Artists -> Unit
+            LibrarySection.Genres -> Unit
             LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
             LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
@@ -762,16 +789,24 @@ private fun MusicLibraryScreen(
                 .navigationBarsPadding()
                 .layerBackdrop(backdrop)
         ) {
-            // 页面切换动画：进详情页从右侧推入、返回从左侧退回；列表页之间同款轻量滑动。
+            // 页面切换动画：进详情页从右侧推入、返回从左侧退回；
+            // 顶层页签之间按 tab 顺序左右滑（与 Auxio 的 ViewPager 方向一致）。
             AnimatedContent(
                 targetState = section,
                 transitionSpec = {
                     val enteringDetail = targetState.isDetail()
+                    val fromIndex = initialState.navIndex()
+                    val toIndex = targetState.navIndex()
+                    val forward = if (fromIndex >= 0 && toIndex >= 0) {
+                        toIndex > fromIndex
+                    } else {
+                        enteringDetail
+                    }
                     val enter = slideInHorizontally(tween(320)) { width ->
-                        if (enteringDetail) width else -width / 3
+                        if (forward) width else -width
                     } + fadeIn(tween(320))
                     val exit = slideOutHorizontally(tween(320)) { width ->
-                        if (enteringDetail) -width / 3 else width
+                        if (forward) -width else width
                     } + fadeOut(tween(320))
                     enter.togetherWith(exit)
                 },
@@ -817,6 +852,10 @@ private fun MusicLibraryScreen(
                         onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
+                    LibrarySection.Artists, LibrarySection.Genres -> ComingSoonContent(
+                        title = if (s == LibrarySection.Artists) "艺术家" else "流派",
+                        modifier = Modifier.fillMaxSize()
+                    )
                     LibrarySection.Search -> SearchContent(
                         state = state,
                         trackCoverFor = viewModel::trackCover,
@@ -837,8 +876,6 @@ private fun MusicLibraryScreen(
                         if (qq != null) {
                             QQDownloadScreen(
                                 state = qqState,
-                                onServiceUrlInput = qq::updateServiceUrlInput,
-                                onConnectService = qq::connectService,
                                 onQualityChange = qq::updateQuality,
                                 onSearchQueryChange = qq::updateSearchQuery,
                                 onDownloadSong = { qq.downloadSong(it) },
@@ -915,12 +952,8 @@ private fun MusicLibraryScreen(
             GlassChipBar(
                 backdrop = backdrop,
                 section = section,
-                onShowDiscover = { section = LibrarySection.Discover },
-                onShowTracks = { section = LibrarySection.Tracks },
-                onShowAlbums = { section = LibrarySection.Albums },
-                onShowPlaylists = { section = LibrarySection.Playlists },
+                onSelectSection = { section = it },
                 onShowSearch = { section = LibrarySection.Search },
-                onShowQQDownload = { section = LibrarySection.QQDownload },
                 onShowSettings = {
                     detailOrigin = section
                     section = LibrarySection.Settings
@@ -1118,12 +1151,8 @@ private fun MusicLibraryScreen(
 private fun GlassChipBar(
     backdrop: Backdrop,
     section: LibrarySection,
-    onShowDiscover: () -> Unit,
-    onShowTracks: () -> Unit,
-    onShowAlbums: () -> Unit,
-    onShowPlaylists: () -> Unit,
+    onSelectSection: (LibrarySection) -> Unit,
     onShowSearch: () -> Unit,
-    onShowQQDownload: () -> Unit,
     onShowSettings: () -> Unit,
     onSignOut: () -> Unit,
     modifier: Modifier = Modifier
@@ -1132,20 +1161,10 @@ private fun GlassChipBar(
     val glassSurface = MaterialTheme.colorScheme.surface
     val chipScrollState = rememberScrollState()
     // 每个 chip 的可见区请求器：选中项切换时用它把自己滚入可见范围，避免切到被滑出屏幕的分区看不出当前在哪。
-    val discoverRequester = remember { BringIntoViewRequester() }
-    val tracksRequester = remember { BringIntoViewRequester() }
-    val albumsRequester = remember { BringIntoViewRequester() }
-    val playlistsRequester = remember { BringIntoViewRequester() }
-    val qqDownloadRequester = remember { BringIntoViewRequester() }
-    LaunchedEffect(section) {
-        when (section) {
-            LibrarySection.Discover -> discoverRequester.bringIntoView()
-            LibrarySection.Tracks -> tracksRequester.bringIntoView()
-            LibrarySection.Albums -> albumsRequester.bringIntoView()
-            LibrarySection.Playlists -> playlistsRequester.bringIntoView()
-            LibrarySection.QQDownload -> qqDownloadRequester.bringIntoView()
-            else -> Unit
-        }
+    val requesters = remember { TopLevelSections.map { BringIntoViewRequester() } }
+    val selectedIndex = section.navIndex()
+    LaunchedEffect(selectedIndex) {
+        if (selectedIndex in requesters.indices) requesters[selectedIndex].bringIntoView()
     }
     Row(
         modifier = modifier
@@ -1154,10 +1173,10 @@ private fun GlassChipBar(
                 // 表面色比播放条更实：岛下压着滚动的曲库，太透会看不清 chip 文字。
                 surface = glassSurface.copy(alpha = 0.8f)
             )
-            .height(56.dp)
-            .padding(horizontal = 8.dp),
+            .height(Dimens.TouchTargetMedium)
+            .padding(horizontal = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         // chip 分组可横向滑动的区域：两侧叠加渐变遮罩提示"还能划"，避免用户以为只有这几个按钮。
         Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -1166,48 +1185,19 @@ private fun GlassChipBar(
                     .fillMaxHeight()
                     .horizontalScroll(chipScrollState),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
             ) {
-                FilterChip(
-                    selected = section == LibrarySection.Discover,
-                    onClick = onShowDiscover,
-                    label = { Text("发现", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    colors = glassChipColors(selected = section == LibrarySection.Discover),
-                    border = glassChipBorder(),
-                    modifier = Modifier.bringIntoViewRequester(discoverRequester)
-                )
-                FilterChip(
-                    selected = section == LibrarySection.Tracks,
-                    onClick = onShowTracks,
-                    label = { Text("全部音乐", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    colors = glassChipColors(selected = section == LibrarySection.Tracks),
-                    border = glassChipBorder(),
-                    modifier = Modifier.bringIntoViewRequester(tracksRequester)
-                )
-                FilterChip(
-                    selected = section == LibrarySection.Albums,
-                    onClick = onShowAlbums,
-                    label = { Text("专辑", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    colors = glassChipColors(selected = section == LibrarySection.Albums),
-                    border = glassChipBorder(),
-                    modifier = Modifier.bringIntoViewRequester(albumsRequester)
-                )
-                FilterChip(
-                    selected = section == LibrarySection.Playlists,
-                    onClick = onShowPlaylists,
-                    label = { Text("播放列表", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    colors = glassChipColors(selected = section == LibrarySection.Playlists),
-                    border = glassChipBorder(),
-                    modifier = Modifier.bringIntoViewRequester(playlistsRequester)
-                )
-                FilterChip(
-                    selected = section == LibrarySection.QQDownload,
-                    onClick = onShowQQDownload,
-                    label = { Text("QQ 下载", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    colors = glassChipColors(selected = section == LibrarySection.QQDownload),
-                    border = glassChipBorder(),
-                    modifier = Modifier.bringIntoViewRequester(qqDownloadRequester)
-                )
+                TopLevelSections.forEachIndexed { index, (target, label) ->
+                    val selected = section == target
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectSection(target) },
+                        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        colors = glassChipColors(selected = selected),
+                        border = glassChipBorder(),
+                        modifier = Modifier.bringIntoViewRequester(requesters[index])
+                    )
+                }
             }
             // 左侧渐变遮罩：还能往左滑时显示。
             if (chipScrollState.canScrollBackward) {
@@ -1215,7 +1205,7 @@ private fun GlassChipBar(
                     Modifier
                         .align(Alignment.CenterStart)
                         .fillMaxHeight()
-                        .width(16.dp)
+                        .width(Dimens.SpaceMedium)
                         .background(
                             Brush.horizontalGradient(
                                 listOf(glassSurface.copy(alpha = 0.8f), glassSurface.copy(alpha = 0f))
@@ -1229,7 +1219,7 @@ private fun GlassChipBar(
                     Modifier
                         .align(Alignment.CenterEnd)
                         .fillMaxHeight()
-                        .width(16.dp)
+                        .width(Dimens.SpaceMedium)
                         .background(
                             Brush.horizontalGradient(
                                 listOf(glassSurface.copy(alpha = 0f), glassSurface.copy(alpha = 0.8f))
@@ -1241,7 +1231,7 @@ private fun GlassChipBar(
         // 搜索：放大镜图标，进入搜索页时高亮为品牌色。
         IconButton(
             onClick = onShowSearch,
-            modifier = Modifier.size(48.dp)
+            modifier = Modifier.size(Dimens.TouchTargetSmall)
         ) {
             Icon(
                 Icons.Filled.Search,
@@ -1255,7 +1245,7 @@ private fun GlassChipBar(
         }
         IconButton(
             onClick = onShowSettings,
-            modifier = Modifier.size(48.dp)
+            modifier = Modifier.size(Dimens.TouchTargetSmall)
         ) {
             Icon(
                 Icons.Filled.Settings,
@@ -1269,7 +1259,7 @@ private fun GlassChipBar(
         }
         IconButton(
             onClick = onSignOut,
-            modifier = Modifier.size(48.dp)
+            modifier = Modifier.size(Dimens.TouchTargetSmall)
         ) {
             Icon(Icons.Filled.ExitToApp, contentDescription = "退出登录")
         }

@@ -565,7 +565,12 @@ private fun MusicLibraryScreen(
     val sessionReady = state.tracks != null
     LaunchedEffect(section, sessionReady, state.isOffline) {
         when (val s = section) {
-            LibrarySection.Discover -> if (sessionReady) viewModel.loadDiscoverAlbums()
+            LibrarySection.Discover -> if (sessionReady) {
+                viewModel.loadDiscoverAlbums()
+                viewModel.loadRecentlyPlayed()
+                viewModel.loadMostPlayed()
+                viewModel.loadRecentlyAdded()
+            }
             LibrarySection.Tracks -> Unit
             LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
             // 艺术家 / 流派页本身由工单 06 落地（客户端分组，零新 API）；这里先占位。
@@ -825,7 +830,8 @@ private fun MusicLibraryScreen(
                         onAddToQueue = onAddToQueue,
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
-                        onRefresh = viewModel::refreshDiscoverAlbums,
+                        onRefresh = viewModel::refreshDiscover,
+                        onRefreshAlbums = viewModel::refreshDiscoverAlbums,
                         onRetry = viewModel::loadDiscoverAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -1805,10 +1811,13 @@ private fun StaggeredMenuItem(
 }
 
 /**
- * 发现页：参考音乐 App 首页结构——顶部「每日推荐」单曲行（按天稳定随机 4 首，点击即播），
- * 下方「随机专辑」横滑封面墙（3 张可见，点击进详情）。整个页面一个 LazyColumn 滚动。
- * 「查看更多」跳全部音乐页；「换一批」重拉随机专辑。
- * 首次进入时懒加载随机专辑；换一批请求进行中按钮转圈禁用；专辑换批后按批次内容做交叉淡入淡出，不硬切。
+ * 发现页（工单 03）：个人化聚合首页，自上而下——
+ * 最近播放 / 最常播放 / 最近添加 / 每日推荐 / 随机专辑。
+ *
+ * 布局语言取 Auxio 的列表项规格（封面 + 主副文本），尺寸走 [Dimens]；
+ * 这一页在 Auxio 里没有参照（Auxio 的 Home 就是曲库列表本身），属自创。
+ * 各 section 独立降级：某一节失败/为空只是那一节不出现，整页照常可看。
+ * 每日推荐是本地计算（按天稳定随机 + 下拉换批），其余走服务端。
  */
 @Composable
 private fun DiscoverContent(
@@ -1822,6 +1831,7 @@ private fun DiscoverContent(
     currentTrackId: String?,
     isPlaying: Boolean,
     onRefresh: () -> Unit,
+    onRefreshAlbums: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -1839,11 +1849,11 @@ private fun DiscoverContent(
     val dailyPicks = remember(tracks, picksVariant) {
         discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
     }
-    // 下拉刷新：Material3 PullToRefreshBox 包住整页；刷新是本地计算所以 isRefreshing 恒为 false，
-    // 指示器拉过阈值即自动收回，列表内容同步换批。
+    // 下拉刷新：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段放行幂等守卫），
+    // 每日推荐是本地计算，递增变体编号立刻换一批。
     val pullRefreshState = rememberPullToRefreshState()
     PullToRefreshBox(
-        isRefreshing = false,
+        isRefreshing = state.isDiscoverRefreshing,
         onRefresh = {
             picksVariant++
             onRefresh()
@@ -1854,28 +1864,61 @@ private fun DiscoverContent(
     LazyColumn(
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = GlassIslandTopSpacing, bottom = 96.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        contentPadding = PaddingValues(start = Dimens.SpaceMedium, end = Dimens.SpaceMedium, top = GlassIslandTopSpacing, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
+        // 三节历史来自服务端，各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
+        // 还没拉到且这一节没失败时显示横滑骨架——失败过的不再转圈（否则永远等下去）。
+        fun historyLoading(section: String) =
+            !state.isOffline && section !in state.discoverFailedSections
+        item(key = "recentlyPlayed") {
+            DiscoverTrackStrip(
+                title = "最近播放",
+                tracks = state.recentlyPlayed,
+                showSkeleton = historyLoading("recentlyPlayed"),
+                trackCoverFor = trackCoverFor,
+                onPlayTrack = onPlayTrack,
+                onAddToQueue = onAddToQueue,
+                currentTrackId = currentTrackId,
+                isPlaying = isPlaying
+            )
+        }
+        item(key = "mostPlayed") {
+            DiscoverTrackStrip(
+                title = "最常播放",
+                tracks = state.mostPlayed,
+                showSkeleton = historyLoading("mostPlayed"),
+                trackCoverFor = trackCoverFor,
+                onPlayTrack = onPlayTrack,
+                onAddToQueue = onAddToQueue,
+                currentTrackId = currentTrackId,
+                isPlaying = isPlaying
+            )
+        }
+        item(key = "recentlyAdded") {
+            DiscoverAlbumStrip(
+                title = "最近添加",
+                albums = state.recentlyAdded,
+                showSkeleton = historyLoading("recentlyAdded"),
+                onOpenAlbum = onOpenAlbum,
+                coverFor = coverFor
+            )
+        }
+        // 三节历史全部失败：单节失败是静默缺席（不打扰），全挂了才给一次错误 + 重试。
+        if (state.discoverFailedSections.size == 3) {
+            item(key = "historyError") {
+                ErrorState("推荐内容暂时加载失败", onRetry = onRefresh)
+            }
+        }
         // ── 每日推荐 ─────────────────────────────────────────────
         item(key = "dailyHeader") {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "每日推荐",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            DiscoverSectionHeader("每日推荐", Modifier.padding(top = Dimens.SpaceMidLarge))
         }
         if (state.tracks == null) {
             // 会话还没恢复完：灰色波浪占位。不能走下面的"登录后这里会推荐…"空态文案——
             // 那是"确实没有内容"，而这里是"还在连"，两者语义完全不同。
             item(key = "dailySkeleton") {
-                TrackListSkeleton(count = 3, modifier = Modifier.padding(top = 4.dp))
+                TrackListSkeleton(count = 3, modifier = Modifier.padding(top = Dimens.SpaceTiny))
             }
         } else if (dailyPicks.isEmpty() && tracks.isEmpty()) {
             item(key = "dailyEmpty") {
@@ -1883,7 +1926,7 @@ private fun DiscoverContent(
                     "登录后这里会推荐当天的歌曲",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 12.dp)
+                    modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
                 )
             }
         }
@@ -1901,68 +1944,30 @@ private fun DiscoverContent(
         }
         // ── 随机专辑（横滑封面墙）──────────────────────────────────
         item(key = "albumHeader") {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "随机专辑",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f)
-                )
-                IconButton(
-                    onClick = onRefresh,
-                    enabled = !state.isLoading,
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Icon(
-                        Icons.Filled.Refresh,
-                        contentDescription = "换一批专辑",
-                        modifier = if (state.isLoading) Modifier.rotate(refreshRotation) else Modifier
-                    )
+            DiscoverSectionHeader(
+                "随机专辑",
+                Modifier.padding(top = Dimens.SpaceMidLarge),
+                action = {
+                    IconButton(
+                        onClick = onRefreshAlbums,
+                        enabled = !state.isLoading,
+                        modifier = Modifier.size(Dimens.TouchTargetSmall)
+                    ) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "换一批专辑",
+                            modifier = if (state.isLoading) Modifier.rotate(refreshRotation) else Modifier
+                        )
+                    }
                 }
-            }
+            )
         }
         val albums = state.discoverAlbums
         when {
             albums == null && state.isLoading -> {
-                // 骨架屏：横滑占位卡（与旧网格骨架同款样式，改为一排 3 张）。
+                // 骨架屏：与历史 section 同一份横滑骨架（同宽同造型）。
                 item(key = "albumSkeleton") {
-                    val shimmer = rememberSkeletonShimmer()
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        repeat(3) {
-                            Card(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .border(
-                                        width = 1.dp,
-                                        color = cardBorderColor(),
-                                        shape = RoundedCornerShape(12.dp)
-                                    ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column {
-                                    SkeletonBox(
-                                        Modifier.fillMaxWidth().aspectRatio(1f),
-                                        progress = shimmer
-                                    )
-                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        SkeletonBox(
-                                            Modifier.fillMaxWidth(0.7f).height(16.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                        SkeletonBox(
-                                            Modifier.fillMaxWidth(0.5f).height(14.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    DiscoverStripSkeleton()
                 }
             }
             albums == null && state.errorMessage != null -> {
@@ -1978,50 +1983,241 @@ private fun DiscoverContent(
                 item(key = "albumWall") {
                     Crossfade(targetState = batchKey, label = "discoverAlbumsBatch") {
                         LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
                             contentPadding = PaddingValues(horizontal = 2.dp)
                         ) {
                             items(albumList, key = { it.id }) { album ->
-                                Column(
-                                    modifier = Modifier
-                                        .width(140.dp)
-                                        // 整列可点：点封面或文字都进专辑详情。
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .clickable { onOpenAlbum(album) },
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    AlbumCover(
-                                        coverFor(album),
-                                        album.name,
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                    )
-                                    Text(
-                                        album.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier.padding(top = 6.dp)
-                                    )
-                                    Text(
-                                        album.artist,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        textAlign = TextAlign.Center
-                                    )
-                                }
+                                DiscoverAlbumCard(album, coverFor(album), onOpenAlbum)
                             }
                         }
                     }
                 }
             }
         }
+        // 整页都没有可看的内容（登录了、服务端也确实没歌）：给一句明确空态，而不是一片空白。
+        val hasAnySection = dailyPicks.isNotEmpty() ||
+            state.recentlyPlayed.orEmpty().isNotEmpty() ||
+            state.mostPlayed.orEmpty().isNotEmpty() ||
+            state.recentlyAdded.orEmpty().isNotEmpty() ||
+            state.discoverAlbums.orEmpty().isNotEmpty()
+        if (state.tracks != null && !hasAnySection && !state.isLoading) {
+            item(key = "discoverEmpty") {
+                EmptyState("曲库还是空的——去 QQ 下载页搜歌，或在设置里刷新曲库")
+            }
+        }
     }
+    }
+}
+
+/** 发现页 section 标题行（可选右侧动作），与库页标题同一层级。 */
+@Composable
+private fun DiscoverSectionHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f)
+        )
+        action?.invoke()
+    }
+}
+
+/**
+ * 发现页的曲目横滑 section（最近播放 / 最常播放）：Auxio 的列表项语言压成竖卡——
+ * 方形封面 + 歌名 + 歌手，点击直接播放（整条队列 = 这一节）。
+ * tracks == null 且 [showSkeleton] 时显示骨架；为 null 且不显示骨架（失败/离线）时整节隐藏。
+ */
+@Composable
+private fun DiscoverTrackStrip(
+    title: String,
+    tracks: List<Track>?,
+    showSkeleton: Boolean,
+    trackCoverFor: (Track) -> JellyfinRequest?,
+    onPlayTrack: (List<Track>, String) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    currentTrackId: String?,
+    isPlaying: Boolean
+) {
+    if (tracks != null && tracks.isEmpty()) return
+    if (tracks == null && !showSkeleton) return
+    Column {
+        DiscoverSectionHeader(title, Modifier.padding(top = Dimens.SpaceMidLarge))
+        if (tracks == null) {
+            DiscoverStripSkeleton()
+            return@Column
+        }
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+            contentPadding = PaddingValues(horizontal = 2.dp)
+        ) {
+            items(tracks, key = { it.id }) { track ->
+                DiscoverTrackCard(
+                    track = track,
+                    cover = trackCoverFor(track),
+                    onClick = { onPlayTrack(tracks, track.id) },
+                    onAddToQueue = { onAddToQueue(track) },
+                    isCurrent = currentTrackId == track.id,
+                    isPlaying = isPlaying
+                )
+            }
+        }
+    }
+}
+
+/** 发现页的专辑横滑 section（最近添加）。 */
+@Composable
+private fun DiscoverAlbumStrip(
+    title: String,
+    albums: List<Album>?,
+    showSkeleton: Boolean,
+    onOpenAlbum: (Album) -> Unit,
+    coverFor: (Album) -> JellyfinRequest?
+) {
+    if (albums != null && albums.isEmpty()) return
+    if (albums == null && !showSkeleton) return
+    Column {
+        DiscoverSectionHeader(title, Modifier.padding(top = Dimens.SpaceMidLarge))
+        if (albums == null) {
+            DiscoverStripSkeleton()
+            return@Column
+        }
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+            contentPadding = PaddingValues(horizontal = 2.dp)
+        ) {
+            items(albums, key = { it.id }) { album ->
+                DiscoverAlbumCard(album, coverFor(album), onOpenAlbum)
+            }
+        }
+    }
+}
+
+/** 横滑 section 的骨架：三张与真卡同宽的占位（封面方块 + 两根文字条）。 */
+@Composable
+private fun DiscoverStripSkeleton() {
+    val shimmer = rememberSkeletonShimmer()
+    Row(
+        modifier = Modifier.padding(top = Dimens.SpaceSmall),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    ) {
+        repeat(3) {
+            Column(Modifier.width(DiscoverCardWidth)) {
+                SkeletonBox(
+                    Modifier.fillMaxWidth().aspectRatio(1f),
+                    progress = shimmer,
+                    shape = RoundedCornerShape(Dimens.CornerLarge)
+                )
+                Spacer(Modifier.height(Dimens.SpaceSmall))
+                SkeletonBox(
+                    Modifier.fillMaxWidth(0.8f).height(14.dp),
+                    progress = shimmer,
+                    shape = RoundedCornerShape(4.dp)
+                )
+                Spacer(Modifier.height(Dimens.SpaceTiny))
+                SkeletonBox(
+                    Modifier.fillMaxWidth(0.5f).height(11.dp),
+                    progress = shimmer,
+                    shape = RoundedCornerShape(4.dp)
+                )
+            }
+        }
+    }
+}
+
+/** 发现页横滑卡片的统一宽度（Auxio hero_small 128dp 附近，Pulsar 沿用 140dp 的既有手感）。 */
+private val DiscoverCardWidth = 140.dp
+
+@Composable
+private fun DiscoverTrackCard(
+    track: Track,
+    cover: JellyfinRequest?,
+    onClick: () -> Unit,
+    onAddToQueue: () -> Unit,
+    isCurrent: Boolean,
+    isPlaying: Boolean
+) {
+    Column(
+        modifier = Modifier
+            .width(DiscoverCardWidth)
+            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .combinedClickable(onClick = onClick, onLongClick = onAddToQueue)
+    ) {
+        Box {
+            AlbumCover(
+                cover,
+                track.title,
+                Modifier.fillMaxWidth().aspectRatio(1f),
+                cornerRadius = Dimens.CornerLarge
+            )
+            // 正在播放：封面右下角的均衡器指示，与列表行同一套语言。
+            if (isCurrent) {
+                PlayingIndicatorOverlay(
+                    isPlaying = isPlaying,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(Dimens.SpaceSmall)
+                        .size(24.dp)
+                        .clip(CircleShape)
+                )
+            }
+        }
+        Text(
+            track.title,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = Dimens.SpaceSmall)
+        )
+        Text(
+            track.artist,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun DiscoverAlbumCard(
+    album: Album,
+    cover: JellyfinRequest?,
+    onOpenAlbum: (Album) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(DiscoverCardWidth)
+            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .clickable { onOpenAlbum(album) }
+    ) {
+        AlbumCover(
+            cover,
+            album.name,
+            Modifier.fillMaxWidth().aspectRatio(1f),
+            cornerRadius = Dimens.CornerLarge
+        )
+        Text(
+            album.name,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = Dimens.SpaceSmall)
+        )
+        Text(
+            album.artist,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

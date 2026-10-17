@@ -118,6 +118,8 @@ class JellyfinViewModel(
             recentlyPlayed = null,
             mostPlayed = null,
             recentlyAdded = null,
+            discoverFailedSections = emptySet(),
+            isDiscoverRefreshing = false,
             albums = null,
             albumTracks = null,
             selectedAlbum = null,
@@ -394,28 +396,66 @@ class JellyfinViewModel(
     fun loadRecentlyPlayed() {
         if (_state.value.recentlyPlayed != null) return
         recentlyPlayedJob?.cancel()
+        markSectionLoading("recentlyPlayed")
         loadSection(
             request = { src, s -> src.getRecentlyPlayed(s.userId, s.accessToken) },
-            success = { tracks -> _state.value.copy(recentlyPlayed = tracks) }
+            success = { tracks -> _state.value.copy(recentlyPlayed = tracks) },
+            section = "recentlyPlayed"
         ) { recentlyPlayedJob = it }
     }
 
     fun loadMostPlayed() {
         if (_state.value.mostPlayed != null) return
         mostPlayedJob?.cancel()
+        markSectionLoading("mostPlayed")
         loadSection(
             request = { src, s -> src.getMostPlayed(s.userId, s.accessToken) },
-            success = { tracks -> _state.value.copy(mostPlayed = tracks) }
+            success = { tracks -> _state.value.copy(mostPlayed = tracks) },
+            section = "mostPlayed"
         ) { mostPlayedJob = it }
     }
 
     fun loadRecentlyAdded() {
         if (_state.value.recentlyAdded != null) return
         recentlyAddedJob?.cancel()
+        markSectionLoading("recentlyAdded")
         loadSection(
             request = { src, s -> src.getRecentlyAdded(s.userId, s.accessToken) },
-            success = { albums -> _state.value.copy(recentlyAdded = albums) }
+            success = { albums -> _state.value.copy(recentlyAdded = albums) },
+            section = "recentlyAdded"
         ) { recentlyAddedJob = it }
+    }
+
+    /** 这一节重新发起请求：清掉它的失败标记，界面重新显示骨架（重试可见）。 */
+    private fun markSectionLoading(section: String) {
+        if (section in _state.value.discoverFailedSections) {
+            _state.value = _state.value.copy(discoverFailedSections = _state.value.discoverFailedSections - section)
+        }
+    }
+
+    /**
+     * 发现页下拉刷新：随机专辑 + 三节历史全部重拉（幂等守卫靠先把字段清回 null 放行）。
+     * 每日推荐是纯本地计算，界面自己换一批，不经过这里。
+     */
+    fun refreshDiscover() {
+        // 只清三节历史（幂等守卫靠 null 放行）；随机专辑**不清**——它本来就不幂等，
+        // 保留旧封面墙才能让界面按批次交叉淡入，而不是先掉进骨架屏再弹回来。
+        _state.value = _state.value.copy(
+            recentlyPlayed = null,
+            mostPlayed = null,
+            recentlyAdded = null,
+            discoverFailedSections = emptySet(),
+            isDiscoverRefreshing = true
+        )
+        refreshDiscoverAlbums()
+        loadRecentlyPlayed()
+        loadMostPlayed()
+        loadRecentlyAdded()
+        // 四路都落地（成功或失败）再收刷新圈。
+        viewModelScope.launch(dispatcher) {
+            listOfNotNull(albumsJob, recentlyPlayedJob, mostPlayedJob, recentlyAddedJob).joinAll()
+            _state.value = _state.value.copy(isDiscoverRefreshing = false)
+        }
     }
 
     /**
@@ -428,6 +468,7 @@ class JellyfinViewModel(
     private fun <T> loadSection(
         request: suspend (JellyfinApi, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<List<T>>,
         success: (List<T>) -> JellyfinUiState,
+        section: String,
         assignJob: (Job) -> Unit
     ) {
         val src = dataSource ?: return
@@ -453,7 +494,10 @@ class JellyfinViewModel(
                             is JellyfinError.Unauthorized -> expireSession()
                             // 断网照旧进离线态（探活/标灰全 App 共用），不是这一节自己的事
                             is JellyfinError.Network -> goOffline(needsNetwork = false)
-                            else -> Unit
+                            // 其余失败：这一节缺席，界面不再为它显示骨架（否则永远转圈）
+                            else -> _state.value = _state.value.copy(
+                                discoverFailedSections = _state.value.discoverFailedSections + section
+                            )
                         }
                     }
                 )
@@ -1052,6 +1096,8 @@ class JellyfinViewModel(
             recentlyPlayed = null,
             mostPlayed = null,
             recentlyAdded = null,
+            discoverFailedSections = emptySet(),
+            isDiscoverRefreshing = false,
             albumTracks = null
         )
         persistSnapshot()
@@ -1079,6 +1125,8 @@ class JellyfinViewModel(
                 recentlyPlayed = null,
                 mostPlayed = null,
                 recentlyAdded = null,
+                discoverFailedSections = emptySet(),
+            isDiscoverRefreshing = false,
                 albumTracks = null
             )
         }
@@ -1272,6 +1320,8 @@ class JellyfinViewModel(
             recentlyPlayed = null,
             mostPlayed = null,
             recentlyAdded = null,
+            discoverFailedSections = emptySet(),
+            isDiscoverRefreshing = false,
             albums = null,
             albumTracks = null,
             selectedAlbum = null,

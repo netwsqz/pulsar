@@ -29,6 +29,16 @@ data class JellyfinUiState(
     val recentlyPlayed: List<Track>? = null,
     val mostPlayed: List<Track>? = null,
     val recentlyAdded: List<Album>? = null,
+    /**
+     * 三节历史里**已经失败过**的那些节（按 section 名记，如 `"recentlyPlayed"`）。
+     *
+     * 失败的那节字段保持 null，界面据此**不再为它显示骨架**（否则永远转圈），只让这一节缺席；
+     * 其余 section 照常显示。单节失败不打扰用户，三节全失败才给一次错误 + 重试。
+     * 下一次真正发起请求时把对应项移出（重试能看到骨架）。
+     */
+    val discoverFailedSections: Set<String> = emptySet(),
+    /** 发现页下拉刷新进行中（指示器用）。与 [isLoading] 分开：进页时的常规加载不该弹刷新圈。 */
+    val isDiscoverRefreshing: Boolean = false,
     val albums: List<Album>? = null,
     val albumTracks: List<Track>? = null,
     val selectedAlbum: Album? = null,

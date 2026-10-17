@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1279,6 +1280,100 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `发现页下拉刷新重拉随机专辑与三节历史`() = runTest {
+        val recent = Track("recent-1", "刚听的", "歌手", "专辑", 1L, null)
+        val frequent = Track("frequent-1", "常听的", "歌手", "专辑", 1L, null)
+        val added = Album("album-1", "新专辑", "歌手", 10, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(recent))
+            mostPlayedResult = Result.success(listOf(frequent))
+            recentlyAddedResult = Result.success(listOf(added))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadDiscoverAlbums()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+        assertEquals(1, api.recentlyPlayedCalls)
+        assertEquals(1, api.randomAlbumsCalls)
+
+        viewModel.refreshDiscover()
+        advanceUntilIdle()
+
+        // 清字段放行幂等守卫：三节都真的重新请求了
+        assertEquals(2, api.recentlyPlayedCalls)
+        assertEquals(2, api.mostPlayedCalls)
+        assertEquals(2, api.recentlyAddedCalls)
+        // 随机专辑也一起重拉（它本来就不幂等，这里锁住接线）
+        assertEquals(2, api.randomAlbumsCalls)
+        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        assertEquals(listOf(added), viewModel.state.value.recentlyAdded)
+    }
+
+    @Test
+    fun `播放历史请求失败时只标记失败的那一节，其余照常加载`() = runTest {
+        val frequent = Track("frequent-1", "常听的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
+            mostPlayedResult = Result.success(listOf(frequent))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        // 失败只影响最近播放：界面只对那一节不再显示骨架，最常播放照常显示
+        assertEquals(setOf("recentlyPlayed"), viewModel.state.value.discoverFailedSections)
+        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+    }
+
+    @Test
+    fun `重新发起加载会清掉该节的失败标记，重试能看到骨架`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+        assertTrue("recentlyPlayed" in viewModel.state.value.discoverFailedSections)
+
+        // 失败字段保持 null，所以幂等守卫放行；再次加载先清标记再请求
+        api.recentlyPlayedResult = Result.success(listOf(track))
+        viewModel.loadRecentlyPlayed()
+        assertFalse("recentlyPlayed" in viewModel.state.value.discoverFailedSections)
+        advanceUntilIdle()
+
+        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+    }
+
+    @Test
+    fun `下拉刷新期间刷新标记为真，全部落地后复位`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.refreshDiscover()
+        assertTrue(viewModel.state.value.isDiscoverRefreshing)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.isDiscoverRefreshing)
+    }
+
+    @Test
     fun `退出登录清空播放历史，不残留上个账号的数据`() = runTest {
         val recent = Track("recent-1", "刚听的", "歌手", "专辑", 1L, null)
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
@@ -1451,7 +1546,11 @@ class JellyfinViewModelTest {
         }
         override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
             albumsError?.let { Result.failure(it) } ?: Result.success(albums)
-        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int) = Result.success(emptyList<Album>())
+        var randomAlbumsCalls = 0
+        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+            randomAlbumsCalls++
+            return Result.success(emptyList())
+        }
         override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = Result.success(emptyList<Track>())
         var playlistsError: Throwable? = null
         override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =

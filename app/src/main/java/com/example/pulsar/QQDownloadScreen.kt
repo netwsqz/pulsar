@@ -1,11 +1,16 @@
 package com.example.pulsar
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,10 +25,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
@@ -47,7 +55,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -97,16 +107,20 @@ internal fun QQDownloadScreen(
             .padding(horizontal = Dimens.SpaceMedium)
             .padding(top = GlassIslandTopSpacing),
         contentPadding = PaddingValues(bottom = 96.dp),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         if (state.credentialExpired) {
-            item { CredentialExpiredCard(state.isRetryingCredential, onRetryCredential) }
+            item(key = "credentialExpired") {
+                QQCard {
+                    CredentialExpiredCard(state.isRetryingCredential, onRetryCredential)
+                }
+            }
         }
         // 错误反馈：ViewModel 几乎所有失败路径都写 errorMessage，这里统一展示
         //（凭证过期已有专属卡片，跳过避免重复）。
         val errorText = state.errorMessage?.takeIf { !state.credentialExpired }
         if (errorText != null) {
-            item {
+            item(key = "errorText") {
                 Text(
                     errorText,
                     style = MaterialTheme.typography.bodySmall,
@@ -116,13 +130,14 @@ internal fun QQDownloadScreen(
             }
         }
         if (!state.serviceReachable || state.serviceUrl.isBlank()) {
-            item { ServiceStatusCard(state) }
+            item(key = "serviceStatus") { QQCard { ServiceStatusCard(state) } }
         }
-        item {
+        item(key = "searchField") {
             OutlinedTextField(
                 value = state.searchQuery,
                 onValueChange = onSearchQueryChange,
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(Dimens.CornerLarge),
                 placeholder = { Text("搜索 QQ 音乐歌曲、专辑") },
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
                 trailingIcon = if (state.searchQuery.isNotEmpty()) {
@@ -142,7 +157,7 @@ internal fun QQDownloadScreen(
             )
         }
         // 默认下载音质：下载时优先用这档，音源没有则自动降级。
-        item {
+        item(key = "quality") {
             Row(
                 // 标签 + 4 个 chip 在窄屏放不下，整行可横向滚动（同顶部玻璃岛 chip 行的做法）。
                 Modifier
@@ -171,34 +186,37 @@ internal fun QQDownloadScreen(
             }
         }
         // 文件操作密钥：删歌/改名（长按菜单）要用。与下载服务同一台电脑，配在同一处。
-        item { FileOpsKeyCard(state, onFileOpsKeyInput, onSaveFileOpsKey) }
+        item(key = "fileOpsKey") {
+            QQCard { FileOpsKeyCard(state, onFileOpsKeyInput, onSaveFileOpsKey) }
+        }
         // 曲库信息：排查用——它说某首没有但你明明有，先看它扫的是哪个目录、扫到多少首。
         // 老服务端没有曲库索引（root 为空且就绪）时不显示这行。
         // 绑 serviceUrl 而不是 serviceReachable：服务不可达时它同样是 false，会把
         // 「连不上服务」和「这是台没索引的老服务端」两种完全不同的病因混成同一句话。
         if (state.serviceUrl.isNotBlank() && (!state.libraryReady || state.libraryRoot.isNotBlank())) {
-            item {
+            item(key = "libraryInfo") {
                 Text(
                     if (state.libraryReady) "曲库：${state.libraryRoot} · ${state.libraryCount} 首"
                     else "曲库：扫描中…（服务刚启动要先扫一遍曲库，约十几秒）",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = Dimens.SpaceTiny)
                 )
             }
         }
         // 手动一键刷新凭证：只在已连接且未过期时显示（过期时顶部横幅已有重试按钮）。
         if (state.serviceReachable && !state.credentialExpired) {
-            item { CredentialRefreshRow(state, onRefreshCredential) }
+            item(key = "credentialRefresh") { CredentialRefreshRow(state, onRefreshCredential) }
         }
         if (state.isSearching) {
-            item {
+            item(key = "searching") {
                 Box(Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
             }
         }
         if (state.songs.isNotEmpty()) {
-            item { QQSectionHeader("歌曲") }
+            item(key = "songsHeader") { QQSectionHeader("歌曲") }
             items(state.songs, key = { song -> "song-${song.songMid}-${song.title}" }) { song ->
                 QQSongRow(
                     song = song,
@@ -211,7 +229,7 @@ internal fun QQDownloadScreen(
             }
         }
         if (state.albums.isNotEmpty()) {
-            item { QQSectionHeader("专辑") }
+            item(key = "albumsHeader") { QQSectionHeader("专辑") }
             items(state.albums, key = { "album-${it.albumMid}" }) { album ->
                 QQAlbumRow(
                     album = album,
@@ -225,18 +243,19 @@ internal fun QQDownloadScreen(
         if (state.searchQuery.isNotBlank() && !state.isSearching &&
             state.songs.isEmpty() && state.albums.isEmpty()
         ) {
-            item {
+            item(key = "noResults") {
                 Text(
                     "没有搜到相关内容（也可能是凭证或网络问题）",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(vertical = Dimens.SpaceSmall)
                 )
             }
         }
         if (state.jobs.isNotEmpty()) {
-            item {
+            item(key = "jobsHeader") {
                 Row(
-                    Modifier.fillMaxWidth(),
+                    Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -275,6 +294,7 @@ internal fun QQDownloadScreen(
     state.redownloadPrompt?.let { song ->
         AlertDialog(
             onDismissRequest = onDismissRedownload,
+            shape = RoundedCornerShape(Dimens.CornerExtraLarge),
             title = { Text("重新下载？") },
             text = {
                 Text("《${song.title}》已在曲库中，仍要重新下载一份吗？")
@@ -287,6 +307,31 @@ internal fun QQDownloadScreen(
             }
         )
     }
+}
+
+/**
+ * Auxio 风格的区块卡：低饱和表面 + 细描边 + 大圆角。
+ * 凭证横幅、服务状态、密钥这类「设置块」套这一层；歌曲/专辑/任务行仍是无卡片的
+ * 列表语言（图标位 + 主副文本 + 右侧按钮 + 分隔线），与库页 TrackRow 的结构一致。
+ */
+@Composable
+private fun QQCard(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .border(
+                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+                RoundedCornerShape(Dimens.CornerLarge)
+            )
+            .padding(horizontal = Dimens.SpaceMidMedium, vertical = Dimens.SpaceMidMedium),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
+        content = content
+    )
 }
 
 /** 文件操作密钥卡：删除/改名接口的锁（工单 06）。密码样式输入 + 显示切换，
@@ -359,9 +404,7 @@ private fun CredentialExpiredCard(
     onRetryCredential: () -> Unit
 ) {
     Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = Dimens.SpaceTiny),
+        Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         Text(
@@ -421,12 +464,58 @@ private fun QQSectionHeader(title: String) {
         title,
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(top = Dimens.SpaceTiny)
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = Dimens.SpaceSmall, start = Dimens.SpaceTiny)
     )
 }
 
+/** 列表行左端的方形图标位（Auxio 列表项里的「封面」位）：QQ 结果没有图，用图标占位。
+ * 自带右间距——歌曲 / 专辑 / 任务行都是「图标位 + 12dp + 文本列」的同一结构。 */
+@Composable
+private fun RowScope.QQIconSlot(content: @Composable () -> Unit) {
+    Box(
+        Modifier
+            .size(Dimens.TouchTargetSmall)
+            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
+    }
+    Spacer(Modifier.width(Dimens.SpaceMidMedium))
+}
+
+/** 装饰性图标位（纯装饰，无 contentDescription）。
+ * 图标 24dp 与描边 1dp 是组件自身尺寸，按工单 01 的约定不进 Dimens（同 spinner 16/20）。 */
+@Composable
+private fun RowScope.QQLeadingIcon(icon: ImageVector) {
+    QQIconSlot {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp)
+        )
+    }
+}
+
 /**
- * 单曲行：标题/歌手/专辑 + 下载按钮。
+ * 任务行的状态图标位：与 [QQLeadingIcon] 同尺寸同位置，让任务行和搜索行对齐。
+ * 排队/下载中 → 转圈；完成 → ✓；失败 → ×。
+ */
+@Composable
+private fun RowScope.QQStatusIcon(status: String) {
+    QQIconSlot {
+        when (status) {
+            "queued", "running" -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            "done" -> Text("✓", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleSmall)
+            else -> Text("×", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
+        }
+    }
+}
+
+/**
+ * 单曲行：封面位图标 + 标题/歌手/专辑 + 下载按钮。
  *
  * 三态：普通 → 可下；已在库 → 图标置灰但仍可点（点了弹重下确认），带「已在库」灰标签；
  * 下载中 → 图标禁用，带「下载中」标签。歌名与歌手永远保持正常颜色——整行调暗会让人找不着歌。
@@ -443,6 +532,7 @@ private fun QQSongRow(
         Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        QQLeadingIcon(Icons.Filled.MusicNote)
         Column(Modifier.weight(1f)) {
             Text(song.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
@@ -506,6 +596,7 @@ private fun QQAlbumRow(
         Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        QQLeadingIcon(Icons.Filled.Album)
         Column(Modifier.weight(1f)) {
             Text(album.albumName, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
@@ -564,6 +655,7 @@ private fun AlbumPickerDialog(
     AlertDialog(
         // 入队中不许关：正在提交选择，关掉会让人以为没提交
         onDismissRequest = { if (!isEnqueuing) onDismiss() },
+        shape = RoundedCornerShape(Dimens.CornerExtraLarge),
         title = {
             Text(
                 picker.albumName.ifBlank { "选择曲目" },
@@ -716,21 +808,14 @@ private fun QQTrackPickRow(
     }
 }
 
-/** 任务行：状态 + 曲名/错误。 */
+/** 任务行：状态图标 + 曲名/错误。 */
 @Composable
 private fun QQJobRow(job: QQJobDto) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-            when (job.status) {
-                "queued", "running" -> CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                "done" -> Text("✓", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleSmall)
-                else -> Text("×", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
-            }
-        }
-        Spacer(Modifier.width(Dimens.SpaceMidMedium))
+        QQStatusIcon(job.status)
         Column(Modifier.weight(1f)) {
             Text(
                 job.title ?: job.songMid,

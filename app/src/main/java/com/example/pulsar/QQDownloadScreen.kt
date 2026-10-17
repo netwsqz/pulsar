@@ -1,13 +1,11 @@
 package com.example.pulsar
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -68,6 +66,7 @@ import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQSongDto
+import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.theme.Dimens
 
 /**
@@ -111,7 +110,7 @@ internal fun QQDownloadScreen(
     ) {
         if (state.credentialExpired) {
             item(key = "credentialExpired") {
-                QQCard {
+                SurfaceCard {
                     CredentialExpiredCard(state.isRetryingCredential, onRetryCredential)
                 }
             }
@@ -130,7 +129,7 @@ internal fun QQDownloadScreen(
             }
         }
         if (!state.serviceReachable || state.serviceUrl.isBlank()) {
-            item(key = "serviceStatus") { QQCard { ServiceStatusCard(state) } }
+            item(key = "serviceStatus") { SurfaceCard { ServiceStatusCard(state) } }
         }
         item(key = "searchField") {
             OutlinedTextField(
@@ -187,7 +186,7 @@ internal fun QQDownloadScreen(
         }
         // 文件操作密钥：删歌/改名（长按菜单）要用。与下载服务同一台电脑，配在同一处。
         item(key = "fileOpsKey") {
-            QQCard { FileOpsKeyCard(state, onFileOpsKeyInput, onSaveFileOpsKey) }
+            SurfaceCard { FileOpsKeyCard(state, onFileOpsKeyInput, onSaveFileOpsKey) }
         }
         // 曲库信息：排查用——它说某首没有但你明明有，先看它扫的是哪个目录、扫到多少首。
         // 老服务端没有曲库索引（root 为空且就绪）时不显示这行。
@@ -307,31 +306,6 @@ internal fun QQDownloadScreen(
             }
         )
     }
-}
-
-/**
- * Auxio 风格的区块卡：低饱和表面 + 细描边 + 大圆角。
- * 凭证横幅、服务状态、密钥这类「设置块」套这一层；歌曲/专辑/任务行仍是无卡片的
- * 列表语言（图标位 + 主副文本 + 右侧按钮 + 分隔线），与库页 TrackRow 的结构一致。
- */
-@Composable
-private fun QQCard(
-    modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(Dimens.CornerLarge))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-            .border(
-                BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-                RoundedCornerShape(Dimens.CornerLarge)
-            )
-            .padding(horizontal = Dimens.SpaceMidMedium, vertical = Dimens.SpaceMidMedium),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
-        content = content
-    )
 }
 
 /** 文件操作密钥卡：删除/改名接口的锁（工单 06）。密码样式输入 + 显示切换，

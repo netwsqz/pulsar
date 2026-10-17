@@ -1551,7 +1551,7 @@ private fun TrackRow(
                 .onGloballyPositioned { coordinates ->
                     rowWindowOffset = coordinates.positionInWindow()
                 }
-                .padding(vertical = 6.dp),
+                .padding(vertical = Dimens.SpaceSmall),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 多选模式：行首勾选框只做指示，勾选动作在整行点击上。
@@ -1560,10 +1560,10 @@ private fun TrackRow(
                     checked = track.id in multiSelect.selected,
                     onCheckedChange = null
                 )
-                Spacer(Modifier.width(4.dp))
+                Spacer(Modifier.width(Dimens.SpaceTiny))
             }
             Box {
-                AlbumCover(cover, track.title, Modifier.size(48.dp))
+                AlbumCover(cover, track.title, Modifier.size(Dimens.TouchTargetSmall))
                 // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
                 // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
                 if (isCurrent) {
@@ -1575,7 +1575,7 @@ private fun TrackRow(
                     )
                 }
             }
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(Dimens.SpaceMidMedium))
             Column(Modifier.weight(1f)) {
                 Text(
                     track.title,
@@ -1606,7 +1606,7 @@ private fun TrackRow(
         // 分隔线从封面右缘开始：封面下方不画线，行之间更干净。
         if (showDivider) {
             HorizontalDivider(
-                modifier = Modifier.padding(start = 60.dp),
+                modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
                 color = MaterialTheme.colorScheme.outlineVariant
             )
         }
@@ -2718,23 +2718,25 @@ private fun SearchContent(
     Column(
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = Dimens.SpaceMedium)
             // 让出顶部玻璃岛高度（与列表页同款占位），搜索框固定在岛正下方。
             .padding(top = GlassIslandTopSpacing),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         // 搜索框固定顶部：输入时 ViewModel 防抖后请求；非空时显示清除按钮。
+        // 圆角与 QQ 下载页搜索框同档（CornerLarge），两页的搜索语言一致。
         OutlinedTextField(
             value = state.searchQuery,
             onValueChange = onSearchQueryChange,
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
+            shape = RoundedCornerShape(Dimens.CornerLarge),
             placeholder = { Text("搜索歌曲、专辑、播放列表") },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
             trailingIcon = if (state.searchQuery.isNotEmpty()) {
                 {
                     IconButton(
                         onClick = { onSearchQueryChange("") },
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(Dimens.TouchTargetSmall)
                     ) {
                         Icon(Icons.Filled.Close, contentDescription = "清除搜索内容")
                     }
@@ -2760,6 +2762,7 @@ private fun SearchContent(
             when {
                 state.searchQuery.isBlank() -> Text(
                     "输入关键词搜索音乐库",
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 state.isSearching -> CircularProgressIndicator()
@@ -2772,7 +2775,7 @@ private fun SearchContent(
                     LazyColumn(
                         Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 96.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
                         if (searchResults.tracks.isNotEmpty()) {
                             item { SearchSectionHeader("歌曲") }
@@ -2822,14 +2825,15 @@ private fun SearchContent(
     }
 }
 
-/** 搜索结果分区标题。 */
+/** 搜索结果分区标题（与 QQ 下载页的区块标题同语言：小号、半粗、次要色）。 */
 @Composable
 private fun SearchSectionHeader(title: String) {
     Text(
         title,
         style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = Dimens.SpaceSmall, bottom = Dimens.SpaceTiny, start = Dimens.SpaceTiny)
     )
 }
 
@@ -2848,11 +2852,11 @@ private fun SearchResultRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onClick)
-                .padding(vertical = 6.dp),
+                .padding(vertical = Dimens.SpaceSmall),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AlbumCover(cover, title, Modifier.size(48.dp))
-            Spacer(Modifier.width(12.dp))
+            AlbumCover(cover, title, Modifier.size(Dimens.TouchTargetSmall))
+            Spacer(Modifier.width(Dimens.SpaceMidMedium))
             Column(Modifier.weight(1f)) {
                 Text(
                     title,
@@ -2871,7 +2875,7 @@ private fun SearchResultRow(
         }
         if (showDivider) {
             HorizontalDivider(
-                modifier = Modifier.padding(start = 60.dp),
+                modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
                 color = MaterialTheme.colorScheme.outlineVariant
             )
         }
@@ -2964,155 +2968,178 @@ private fun SettingsContent(
         modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .padding(horizontal = 16.dp)
+            .padding(horizontal = Dimens.SpaceMedium)
             .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
-        Text("设置", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
-        // USB 独占开关：与普通系统 USB 路由信息分开显示。
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("USB 独占输出", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    usbExclusiveStateLabel(controllerState),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Switch(
-                checked = controllerState.usbExclusiveEnabled,
-                onCheckedChange = controllerState.onUsbExclusiveChange,
-                enabled = controller != null && !controllerState.usbExclusivePending
-            )
-        }
-        // USB 独占输出音量：独占路径绕过系统音量、满刻度直送会削顶，
-        // 提供 0..100 数字衰减（100 = bit-perfect 原样直送）。
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "USB 音量",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.width(88.dp)
-            )
-            Slider(
-                value = usbVolumeLocal.toFloat(),
-                onValueChange = {
-                    usbVolumeLocal = it.roundToInt()
-                    usbVolumeDragging = true
-                },
-                onValueChangeFinished = {
-                    controllerState.onUsbVolumeChange(usbVolumeLocal)
-                    usbVolumeDragging = false
-                },
-                valueRange = 0f..100f,
-                enabled = controllerState.usbExclusiveEnabled && controller != null,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = "$usbVolumeLocal%",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.width(52.dp)
-            )
-        }
-        // 静音跳曲开关：检测音频尾部静音并自动跳到下一首。
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("静音跳曲", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (controllerState.silenceSkipEnabled) "已开启" else "已关闭",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Switch(
-                checked = controllerState.silenceSkipEnabled,
-                onCheckedChange = controllerState.onSilenceSkipChange,
-                enabled = controller != null
-            )
-        }
-        // 回放增益：按每首歌的响度数据统一音量。直接读写 DataStore——播放服务订阅的是
-        // 同一个 DataStore，不需要为它再走一套 MediaSession 自定义命令。
-        val loudnessContext = LocalContext.current
-        val loudnessPreferences = remember {
-            LoudnessPreferences(loudnessContext.pulsarPreferencesDataStore)
-        }
-        val loudnessEnabled by loudnessPreferences.enabled
-            .collectAsStateWithLifecycle(initialValue = LoudnessPreferences.DEFAULT_ENABLED)
-        val loudnessScope = rememberCoroutineScope()
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text("回放增益", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    if (loudnessEnabled) "已开启（响的歌会被压低，整体安静一些）" else "已关闭",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Switch(
-                checked = loudnessEnabled,
-                onCheckedChange = { enabled ->
-                    // 写失败（磁盘满/DataStore 损坏）不能让协程带着异常冲出去：
-                    // checked 读的是 DataStore，写失败时开关会自己弹回，日志留个痕迹。
-                    loudnessScope.launch {
-                        runCatching { loudnessPreferences.setEnabled(enabled) }
-                            .onFailure { error ->
-                                if (error is CancellationException) throw error
-                                Log.w("MainActivity", "保存回放增益开关失败", error)
-                            }
-                    }
+        Text(
+            "设置",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(top = Dimens.SpaceSmall, bottom = Dimens.SpaceSmall)
+        )
+        // 播放相关开关收进一张卡：与 QQ 下载页的凭证/服务/密钥卡同一套卡片语言。
+        SettingsSectionHeader("播放")
+        SurfaceCard {
+            // USB 独占开关：与普通系统 USB 路由信息分开显示。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("USB 独占输出", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        usbExclusiveStateLabel(controllerState),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
-            )
-        }
-        // 定时关闭：拖动滑块设置分钟数，松手才真正启动/取消定时器。5 分钟一档（steps=11 表示 0-60 共 12 档）。
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 24.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("定时关闭", style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.width(12.dp))
-            Slider(
-                value = when {
-                    isSleepDragging -> sleepSliderMinutes
-                    sleepState.isActive -> (sleepState.remainingMs / 60_000f).coerceIn(0f, 60f)
-                    else -> 0f
-                },
-                onValueChange = { sleepSliderMinutes = it; isSleepDragging = true },
-                onValueChangeFinished = {
-                    val minutes = sleepSliderMinutes.roundToInt()
-                    if (minutes <= 0) SleepTimer.cancel() else SleepTimer.start(minutes * 60_000L)
-                    isSleepDragging = false
-                },
-                valueRange = 0f..60f,
-                steps = 11,
-                modifier = Modifier.weight(1f)
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = when {
-                    isSleepDragging -> "约 ${sleepSliderMinutes.roundToInt()} 分钟"
-                    sleepState.isActive -> "剩余 ${formatPosition(sleepState.remainingMs)}"
-                    else -> "未开启"
-                },
-                style = MaterialTheme.typography.labelMedium
-            )
+                Switch(
+                    checked = controllerState.usbExclusiveEnabled,
+                    onCheckedChange = controllerState.onUsbExclusiveChange,
+                    enabled = controller != null && !controllerState.usbExclusivePending
+                )
+            }
+            // USB 独占输出音量：独占路径绕过系统音量、满刻度直送会削顶，
+            // 提供 0..100 数字衰减（100 = bit-perfect 原样直送）。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "USB 音量",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.width(88.dp)
+                )
+                Slider(
+                    value = usbVolumeLocal.toFloat(),
+                    onValueChange = {
+                        usbVolumeLocal = it.roundToInt()
+                        usbVolumeDragging = true
+                    },
+                    onValueChangeFinished = {
+                        controllerState.onUsbVolumeChange(usbVolumeLocal)
+                        usbVolumeDragging = false
+                    },
+                    valueRange = 0f..100f,
+                    enabled = controllerState.usbExclusiveEnabled && controller != null,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(Dimens.SpaceMidMedium))
+                Text(
+                    text = "$usbVolumeLocal%",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.width(52.dp)
+                )
+            }
+            // 静音跳曲开关：检测音频尾部静音并自动跳到下一首。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("静音跳曲", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (controllerState.silenceSkipEnabled) "已开启" else "已关闭",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = controllerState.silenceSkipEnabled,
+                    onCheckedChange = controllerState.onSilenceSkipChange,
+                    enabled = controller != null
+                )
+            }
+            // 回放增益：按每首歌的响度数据统一音量。直接读写 DataStore——播放服务订阅的是
+            // 同一个 DataStore，不需要为它再走一套 MediaSession 自定义命令。
+            val loudnessContext = LocalContext.current
+            val loudnessPreferences = remember {
+                LoudnessPreferences(loudnessContext.pulsarPreferencesDataStore)
+            }
+            val loudnessEnabled by loudnessPreferences.enabled
+                .collectAsStateWithLifecycle(initialValue = LoudnessPreferences.DEFAULT_ENABLED)
+            val loudnessScope = rememberCoroutineScope()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("回放增益", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (loudnessEnabled) "已开启（响的歌会被压低，整体安静一些）" else "已关闭",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = loudnessEnabled,
+                    onCheckedChange = { enabled ->
+                        // 写失败（磁盘满/DataStore 损坏）不能让协程带着异常冲出去：
+                        // checked 读的是 DataStore，写失败时开关会自己弹回，日志留个痕迹。
+                        loudnessScope.launch {
+                            runCatching { loudnessPreferences.setEnabled(enabled) }
+                                .onFailure { error ->
+                                    if (error is CancellationException) throw error
+                                    Log.w("MainActivity", "保存回放增益开关失败", error)
+                                }
+                        }
+                    }
+                )
+            }
+            // 定时关闭：拖动滑块设置分钟数，松手才真正启动/取消定时器。5 分钟一档（steps=11 表示 0-60 共 12 档）。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("定时关闭", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.width(Dimens.SpaceMidMedium))
+                Slider(
+                    value = when {
+                        isSleepDragging -> sleepSliderMinutes
+                        sleepState.isActive -> (sleepState.remainingMs / 60_000f).coerceIn(0f, 60f)
+                        else -> 0f
+                    },
+                    onValueChange = { sleepSliderMinutes = it; isSleepDragging = true },
+                    onValueChangeFinished = {
+                        val minutes = sleepSliderMinutes.roundToInt()
+                        if (minutes <= 0) SleepTimer.cancel() else SleepTimer.start(minutes * 60_000L)
+                        isSleepDragging = false
+                    },
+                    valueRange = 0f..60f,
+                    steps = 11,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(Dimens.SpaceMidMedium))
+                Text(
+                    text = when {
+                        isSleepDragging -> "约 ${sleepSliderMinutes.roundToInt()} 分钟"
+                        sleepState.isActive -> "剩余 ${formatPosition(sleepState.remainingMs)}"
+                        else -> "未开启"
+                    },
+                    style = MaterialTheme.typography.labelMedium
+                )
+            }
         }
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
-        RecycleBinSection(state = state, viewModel = viewModel)
+        SettingsSectionHeader("存储")
+        SurfaceCard { RecycleBinSection(state = state, viewModel = viewModel) }
         // 手机缓存：听过的歌在手机上留的副本，离线能听。占了空间就得看得见（ADR-0003）。
-        MediaCacheSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
+        SurfaceCard {
+            MediaCacheSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
+        }
     }
+}
+
+/** 设置页分组标题（与 QQ 下载页的区块标题同语言：小号、半粗、次要色）。 */
+@Composable
+private fun SettingsSectionHeader(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = Dimens.SpaceSmall, start = Dimens.SpaceTiny)
+    )
 }
 
 /** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。 */
@@ -3122,8 +3149,8 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
     LaunchedEffect(Unit) { viewModel.loadRecycle() }
     var showPurgeConfirm by remember { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -3220,12 +3247,15 @@ private fun CachedCopiesContent(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp).padding(top = 8.dp)
+        modifier.fillMaxSize()
+            .statusBarsPadding()
+            .padding(horizontal = Dimens.SpaceMedium)
+            .padding(top = Dimens.SpaceSmall)
     ) {
         Text(
             "已缓存",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+            modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.SpaceMidMedium)
         )
         val cachedAlbums = state.cachedAlbums
         when {
@@ -3241,7 +3271,7 @@ private fun CachedCopiesContent(
                 var deleteTarget by remember { mutableStateOf<CachedAlbum?>(null) }
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
                     contentPadding = PaddingValues(bottom = 96.dp)
                 ) {
                     items(cachedAlbums, key = { it.album.id }) { entry ->
@@ -3284,7 +3314,8 @@ private fun CachedCopiesContent(
     }
 }
 
-/** 已缓存列表的一行：封面 + 专辑名 + 进度，右侧删除按钮。整行点击进专辑详情页。 */
+/** 已缓存列表的一行：封面 + 专辑名 + 进度，右侧删除按钮。整行点击进专辑详情页。
+ * 与设置页 / QQ 下载页同用 [SurfaceCard]（列表里的卡片语言）。 */
 @Composable
 private fun CachedAlbumRow(
     entry: CachedAlbum,
@@ -3293,18 +3324,10 @@ private fun CachedAlbumRow(
     onOpen: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
-        onClick = onOpen,
-        modifier = Modifier.fillMaxWidth().border(
-            width = 1.dp,
-            color = cardBorderColor(),
-            shape = RoundedCornerShape(12.dp)
-        ),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            AlbumCover(cover, entry.album.name, Modifier.size(64.dp))
-            Spacer(Modifier.width(12.dp))
+    SurfaceCard(onClick = onOpen) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            AlbumCover(cover, entry.album.name, Modifier.size(Dimens.TouchTargetLarge))
+            Spacer(Modifier.width(Dimens.SpaceMidMedium))
             Column(Modifier.weight(1f)) {
                 Text(
                     entry.album.name,
@@ -3336,8 +3359,8 @@ private fun MediaCacheSection(
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
     var showClearConfirm by remember { mutableStateOf(false) }
     Column(
-        Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {

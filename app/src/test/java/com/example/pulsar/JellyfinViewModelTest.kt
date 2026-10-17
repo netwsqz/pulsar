@@ -1074,6 +1074,252 @@ class JellyfinViewModelTest {
         assertTrue(!viewModel.state.value.isCacheBusy)
     }
 
+    // ── 播放历史（工单 02：发现页个人化聚合的数据基础） ──────────────────
+
+    @Test
+    fun `最近播放与最常播放各自加载一次，重复调用不再请求`() = runTest {
+        val recent = Track("recent-1", "刚听的", "歌手", "专辑", 1L, null)
+        val frequent = Track("frequent-1", "常听的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(recent))
+            mostPlayedResult = Result.success(listOf(frequent))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        // 幂等：字段非空即已加载，切回发现页不重发
+        assertEquals(1, api.recentlyPlayedCalls)
+        assertEquals(1, api.mostPlayedCalls)
+    }
+
+    @Test
+    fun `最近添加加载专辑列表`() = runTest {
+        val album = Album("album-1", "新专辑", "歌手", 10, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyAddedResult = Result.success(listOf(album))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+
+        assertEquals(listOf(album), viewModel.state.value.recentlyAdded)
+    }
+
+    @Test
+    fun `单个播放历史查询失败不影响其余 section`() = runTest {
+        val frequent = Track("frequent-1", "常听的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
+            mostPlayedResult = Result.success(listOf(frequent))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        // 失败的一节保持 null（界面隐藏该 section），另一节照常显示
+        assertNull(viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        // 局部失败不升级成整页错误，也不把用户踢回登录
+        assertNull(viewModel.state.value.errorMessage)
+    }
+
+    @Test
+    fun `播放历史请求失败后下次进页会重试，不被幂等守卫永久挡住`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+        assertNull(viewModel.state.value.recentlyPlayed)
+
+        // 服务恢复：失败不能写成「已加载且为空」，否则这一节到进程结束都不再请求
+        api.recentlyPlayedResult = Result.success(listOf(track))
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+
+        assertEquals(2, api.recentlyPlayedCalls)
+        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+    }
+
+    @Test
+    fun `播放历史断网时进离线态而非伪装成没数据`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Network(IOException("no network")))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        advanceBounded()
+
+        assertTrue(viewModel.state.value.isOffline)
+        assertNull(viewModel.state.value.recentlyPlayed)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `最近添加同样幂等且失败可重试`() = runTest {
+        val album = Album("album-1", "新专辑", "歌手", 10, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyAddedResult = Result.failure(JellyfinError.Http(500))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+        assertNull(viewModel.state.value.recentlyAdded)
+
+        api.recentlyAddedResult = Result.success(listOf(album))
+        viewModel.loadRecentlyAdded()
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+
+        assertEquals(2, api.recentlyAddedCalls)
+        assertEquals(listOf(album), viewModel.state.value.recentlyAdded)
+    }
+
+    @Test
+    fun `播放历史查询撞上 401 走会话过期`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.failure(JellyfinError.Unauthorized())
+        }
+        val authorization = FakeAuthorizationSink("active-auth")
+        val viewModel = createViewModel(sessions, api, authorization)
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+
+        assertTrue(sessions.cleared)
+        assertNull(authorization.value)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+    }
+
+    @Test
+    fun `播放历史过期响应不写入新会话状态`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val stale = Track("stale-1", "上个账号的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            historyGate = gate
+            recentlyPlayedResult = Result.success(listOf(stale))
+        }
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+
+        viewModel.loadRecentlyPlayed()
+        advanceTimeBy(1)
+        // 请求还没回来就切会话：旧响应必须作废
+        viewModel.signOut()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.recentlyPlayed)
+    }
+
+    @Test
+    fun `换账号重新登录清空播放历史，不残留上个账号的数据`() = runTest {
+        val recent = Track("recent-1", "刚听的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(recent))
+            mostPlayedResult = Result.success(listOf(recent))
+            recentlyAddedResult = Result.success(listOf(Album("album-1", "新专辑", "歌手", 10, null)))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.recentlyPlayed != null)
+
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user-2")
+        viewModel.updatePassword("pass-2")
+        viewModel.login()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.mostPlayed)
+        assertNull(viewModel.state.value.recentlyAdded)
+    }
+
+    @Test
+    fun `退出登录清空播放历史，不残留上个账号的数据`() = runTest {
+        val recent = Track("recent-1", "刚听的", "歌手", "专辑", 1L, null)
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(recent))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
+
+        viewModel.signOut()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.recentlyPlayed)
+    }
+
+    @Test
+    fun `会话过期清空播放历史`() = runTest {
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(track))
+            albumsError = JellyfinError.Unauthorized()
+        }
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.recentlyPlayed != null)
+
+        // 曲库请求撞上 401 → 会话过期，历史一并清空
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.mostPlayed)
+        assertNull(viewModel.state.value.recentlyAdded)
+    }
+
     private fun TestScope.createViewModelWithFileOps(
         fileOps: FakeLibraryFilesApi,
         tracks: List<Track>,
@@ -1171,6 +1417,30 @@ class JellyfinViewModelTest {
         val searchQueries = mutableListOf<String>()
         var lyricsCalls = 0
         val lyricsTrackIds = mutableListOf<String>()
+        /** 播放历史（工单 02）：默认成功返回空列表，各用例按需注入。 */
+        var recentlyPlayedResult: Result<List<Track>> = Result.success(emptyList())
+        var mostPlayedResult: Result<List<Track>> = Result.success(emptyList())
+        var recentlyAddedResult: Result<List<Album>> = Result.success(emptyList())
+        var recentlyPlayedCalls = 0
+        var mostPlayedCalls = 0
+        var recentlyAddedCalls = 0
+        /** 挂起播放历史请求，模拟「响应回来前会话已切换」。 */
+        var historyGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+            recentlyPlayedCalls++
+            historyGate?.await()
+            return recentlyPlayedResult
+        }
+        override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+            mostPlayedCalls++
+            historyGate?.await()
+            return mostPlayedResult
+        }
+        override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+            recentlyAddedCalls++
+            historyGate?.await()
+            return recentlyAddedResult
+        }
         /** 登录结果：默认失败；测「换账号重登」时注入成功。 */
         var loginResult: Result<com.example.pulsar.data.jellyfin.JellyfinSession>? = null
         override suspend fun login(username: String, password: String) =

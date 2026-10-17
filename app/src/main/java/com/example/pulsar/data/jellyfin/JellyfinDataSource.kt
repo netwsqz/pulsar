@@ -99,6 +99,60 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toAlbum)
         }
 
+    /**
+     * 最近播放：服务端播放历史，按最后播放时间倒序。
+     * `Filters=IsPlayed` 是必需的——没播过的歌 DatePlayed 为空，不加过滤会混进来。
+     */
+    override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> =
+        playedTracks(userId, accessToken, "DatePlayed", limit)
+
+    /** 最常播放：服务端播放次数倒序（同样只看播过的）。 */
+    override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> =
+        playedTracks(userId, accessToken, "PlayCount", limit)
+
+    /** 播过的曲目按 [sortBy] 倒序取前 [limit] 首。 */
+    private suspend fun playedTracks(
+        userId: String,
+        accessToken: String,
+        sortBy: String,
+        limit: Int
+    ): Result<List<Track>> = execute {
+        require(userId.isNotBlank()) { "User ID must not be blank" }
+        require(accessToken.isNotBlank()) { "Access token must not be blank" }
+        fetchItems(
+            userId,
+            accessToken,
+            mapOf(
+                "IncludeItemTypes" to "Audio",
+                "Recursive" to "true",
+                "Filters" to "IsPlayed",
+                "SortBy" to sortBy,
+                "SortOrder" to "Descending",
+                "Limit" to limit.toString(),
+                "Fields" to "PrimaryImageAspectRatio,Genres,Path"
+            )
+        ).map(JellyfinItemDto::toTrack)
+    }
+
+    /** 最近添加：按入库时间倒序的专辑。 */
+    override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int): Result<List<Album>> =
+        execute {
+            require(userId.isNotBlank()) { "User ID must not be blank" }
+            require(accessToken.isNotBlank()) { "Access token must not be blank" }
+            fetchItems(
+                userId,
+                accessToken,
+                mapOf(
+                    "IncludeItemTypes" to "MusicAlbum",
+                    "Recursive" to "true",
+                    "Fields" to "ChildCount",
+                    "SortBy" to "DateCreated",
+                    "SortOrder" to "Descending",
+                    "Limit" to limit.toString()
+                )
+            ).map(JellyfinItemDto::toAlbum)
+        }
+
     override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String): Result<List<Track>> =
         execute {
             require(userId.isNotBlank()) { "User ID must not be blank" }

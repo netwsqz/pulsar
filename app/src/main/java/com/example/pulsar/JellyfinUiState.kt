@@ -22,6 +22,13 @@ data class JellyfinUiState(
     val errorMessage: String? = null,
     val tracks: List<Track>? = null,
     val discoverAlbums: List<Album>? = null,
+    /**
+     * 发现页个人化聚合（工单 02）。null = 还没成功拉到（含上次失败，进页会重试）；
+     * 空列表 = 拉到了但服务端没有数据（没播过歌），界面据此隐藏该 section。
+     */
+    val recentlyPlayed: List<Track>? = null,
+    val mostPlayed: List<Track>? = null,
+    val recentlyAdded: List<Album>? = null,
     val albums: List<Album>? = null,
     val albumTracks: List<Track>? = null,
     val selectedAlbum: Album? = null,

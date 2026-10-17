@@ -54,6 +54,12 @@ class JellyfinViewModel(
     private var loginGeneration = 0
     private var albumsJob: Job? = null
     private var albumsGeneration = 0
+    // 播放历史三节各自独立（工单 02）：一节失败/取消不能拖垮另外两节。
+    private var recentlyPlayedJob: Job? = null
+    private var mostPlayedJob: Job? = null
+    private var recentlyAddedJob: Job? = null
+    /** 会话代次：只随会话切换/过期递增，同会话内多次加载互不作废。 */
+    private var historyGeneration = 0
     private var searchJob: Job? = null
     private var searchGeneration = 0
     private var offlineRetryJob: Job? = null
@@ -109,6 +115,9 @@ class JellyfinViewModel(
             password = "",
             tracks = null,
             discoverAlbums = null,
+            recentlyPlayed = null,
+            mostPlayed = null,
+            recentlyAdded = null,
             albums = null,
             albumTracks = null,
             selectedAlbum = null,
@@ -240,6 +249,13 @@ class JellyfinViewModel(
         albumsJob?.cancel()
         albumsJob = null
         albumsGeneration++
+        recentlyPlayedJob?.cancel()
+        recentlyPlayedJob = null
+        mostPlayedJob?.cancel()
+        mostPlayedJob = null
+        recentlyAddedJob?.cancel()
+        recentlyAddedJob = null
+        historyGeneration++
         searchJob?.cancel()
         searchJob = null
         searchGeneration++
@@ -368,6 +384,80 @@ class JellyfinViewModel(
         loadLibrary(
             request = { src, currentSession -> src.getRandomAlbums(currentSession.userId, currentSession.accessToken) },
             success = { albums -> _state.value.copy(isLoading = false, discoverAlbums = albums) }
+        )
+    }
+
+    // ── 发现页个人化聚合（工单 02） ────────────────────────────────────
+    // 三节各自独立加载：发现页一屏里任一节失败只是那一节不显示（降级），
+    // 不影响其余 section，也不把整页变成错误态。
+
+    fun loadRecentlyPlayed() {
+        if (_state.value.recentlyPlayed != null) return
+        recentlyPlayedJob?.cancel()
+        loadSection(
+            request = { src, s -> src.getRecentlyPlayed(s.userId, s.accessToken) },
+            success = { tracks -> _state.value.copy(recentlyPlayed = tracks) }
+        ) { recentlyPlayedJob = it }
+    }
+
+    fun loadMostPlayed() {
+        if (_state.value.mostPlayed != null) return
+        mostPlayedJob?.cancel()
+        loadSection(
+            request = { src, s -> src.getMostPlayed(s.userId, s.accessToken) },
+            success = { tracks -> _state.value.copy(mostPlayed = tracks) }
+        ) { mostPlayedJob = it }
+    }
+
+    fun loadRecentlyAdded() {
+        if (_state.value.recentlyAdded != null) return
+        recentlyAddedJob?.cancel()
+        loadSection(
+            request = { src, s -> src.getRecentlyAdded(s.userId, s.accessToken) },
+            success = { albums -> _state.value.copy(recentlyAdded = albums) }
+        ) { recentlyAddedJob = it }
+    }
+
+    /**
+     * 发现页单节加载。失败只是这一节没内容（其余 section 照常），**不**升级成整页错误。
+     * 失败时字段保持 null：幂等守卫据此允许下次进发现页重试——写成空列表会把
+     * 「一次网络抖动」永久固化成「已加载且没有数据」。
+     * 只有 Unauthorized 例外，它意味着会话失效，走统一的过期流程。
+     * 同节重复调用会取消上一次请求（同 [loadLibrary] 的幂等模式）。
+     */
+    private fun <T> loadSection(
+        request: suspend (JellyfinApi, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<List<T>>,
+        success: (List<T>) -> JellyfinUiState,
+        assignJob: (Job) -> Unit
+    ) {
+        val src = dataSource ?: return
+        val currentSession = session ?: return
+        val generation = historyGeneration
+        assignJob(
+            viewModelScope.launch(dispatcher) {
+                val result = try {
+                    request(src, currentSession)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Result.failure(error)
+                }
+                if (!coroutineContext.isActive || generation != historyGeneration) return@launch
+                result.fold(
+                    onSuccess = { items ->
+                        markOnline()
+                        _state.value = success(items)
+                    },
+                    onFailure = { error ->
+                        when (error) {
+                            is JellyfinError.Unauthorized -> expireSession()
+                            // 断网照旧进离线态（探活/标灰全 App 共用），不是这一节自己的事
+                            is JellyfinError.Network -> goOffline(needsNetwork = false)
+                            else -> Unit
+                        }
+                    }
+                )
+            }
         )
     }
 
@@ -579,7 +669,7 @@ class JellyfinViewModel(
         )
     }
 
-    /** 从所有本地列表（曲库/专辑详情/播放列表详情/搜索）与播放队列镜像里摘掉这首歌。 */
+    /** 从所有本地列表（曲库/专辑详情/播放列表详情/搜索/播放历史）与播放队列镜像里摘掉这首歌。 */
     private fun removeTrackEverywhere(trackId: String) {
         fun List<Track>.without() = filterNot { it.id == trackId }
         _state.value = _state.value.let { s ->
@@ -587,7 +677,9 @@ class JellyfinViewModel(
                 tracks = s.tracks?.without(),
                 albumTracks = s.albumTracks?.without(),
                 playlistTracks = s.playlistTracks?.without(),
-                searchResults = s.searchResults?.let { it.copy(tracks = it.tracks.without()) }
+                searchResults = s.searchResults?.let { it.copy(tracks = it.tracks.without()) },
+                recentlyPlayed = s.recentlyPlayed?.without(),
+                mostPlayed = s.mostPlayed?.without()
             )
         }
         _playbackTracks.value = _playbackTracks.value - trackId
@@ -957,6 +1049,9 @@ class JellyfinViewModel(
             tracks = tracks,
             albums = null,
             discoverAlbums = null,
+            recentlyPlayed = null,
+            mostPlayed = null,
+            recentlyAdded = null,
             albumTracks = null
         )
         persistSnapshot()
@@ -981,6 +1076,9 @@ class JellyfinViewModel(
                 isOfflineSearch = false,
                 albums = null,
                 discoverAlbums = null,
+                recentlyPlayed = null,
+                mostPlayed = null,
+                recentlyAdded = null,
                 albumTracks = null
             )
         }
@@ -1171,6 +1269,9 @@ class JellyfinViewModel(
             errorMessage = "登录已失效，请重新登录",
             tracks = null,
             discoverAlbums = null,
+            recentlyPlayed = null,
+            mostPlayed = null,
+            recentlyAdded = null,
             albums = null,
             albumTracks = null,
             selectedAlbum = null,
@@ -1206,6 +1307,9 @@ class JellyfinViewModel(
     override fun onCleared() {
         loginJob?.cancel()
         albumsJob?.cancel()
+        recentlyPlayedJob?.cancel()
+        mostPlayedJob?.cancel()
+        recentlyAddedJob?.cancel()
         searchJob?.cancel()
         lyricsJob?.cancel()
         stopOfflineRetry()

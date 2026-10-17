@@ -235,6 +235,140 @@ class JellyfinDataSourceTest {
     }
 
     @Test
+    fun `recently played asks for played audio sorted by DatePlayed`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(
+                content = "{\"Items\":[{\"Id\":\"track-1\",\"Name\":\"Track One\",\"Type\":\"Audio\"}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getRecentlyPlayed("user-1", "token-1", limit = 20)
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Users/user-1/Items", request.url.encodedPath)
+        assertEquals("Audio", request.url.parameters["IncludeItemTypes"])
+        assertEquals("true", request.url.parameters["Recursive"])
+        // 只看真正播放过的：没播过的歌 DatePlayed 为空，会被排到最前/最后，语义不对
+        assertEquals("IsPlayed", request.url.parameters["Filters"])
+        assertEquals("DatePlayed", request.url.parameters["SortBy"])
+        assertEquals("Descending", request.url.parameters["SortOrder"])
+        assertEquals("20", request.url.parameters["Limit"])
+        assertEquals(
+            "MediaBrowser Client=\"Pulsar\", Device=\"Android\", " +
+                "DeviceId=\"$deviceId\", Version=\"0.1.0\", Token=\"token-1\"",
+            request.headers[HttpHeaders.Authorization]
+        )
+        assertFalse(request.url.toString().contains("token-1"))
+        assertEquals(
+            listOf(Track("track-1", "Track One", "Unknown artist", "", null, null)),
+            result.getOrThrow()
+        )
+        client.close()
+    }
+
+    @Test
+    fun `most played asks for played audio sorted by PlayCount`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(
+                content = "{\"Items\":[{\"Id\":\"track-1\",\"Name\":\"Track One\",\"Type\":\"Audio\"}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getMostPlayed("user-1", "token-1", limit = 20)
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Users/user-1/Items", request.url.encodedPath)
+        assertEquals("Audio", request.url.parameters["IncludeItemTypes"])
+        assertEquals("true", request.url.parameters["Recursive"])
+        assertEquals("IsPlayed", request.url.parameters["Filters"])
+        assertEquals("PlayCount", request.url.parameters["SortBy"])
+        assertEquals("Descending", request.url.parameters["SortOrder"])
+        assertEquals("20", request.url.parameters["Limit"])
+        assertEquals(
+            listOf(Track("track-1", "Track One", "Unknown artist", "", null, null)),
+            result.getOrThrow()
+        )
+        client.close()
+    }
+
+    @Test
+    fun `recently added asks for albums sorted by DateCreated`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(
+                content = "{\"Items\":[{\"Id\":\"album-1\",\"Name\":\"Great Album\"," +
+                    "\"AlbumArtist\":\"Album Artist\",\"ChildCount\":10,\"Type\":\"MusicAlbum\"}]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).getRecentlyAdded("user-1", "token-1", limit = 12)
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Users/user-1/Items", request.url.encodedPath)
+        assertEquals("MusicAlbum", request.url.parameters["IncludeItemTypes"])
+        assertEquals("true", request.url.parameters["Recursive"])
+        assertEquals("ChildCount", request.url.parameters["Fields"])
+        assertEquals("DateCreated", request.url.parameters["SortBy"])
+        assertEquals("Descending", request.url.parameters["SortOrder"])
+        assertEquals("12", request.url.parameters["Limit"])
+        assertEquals(
+            listOf(Album("album-1", "Great Album", "Album Artist", 10, null)),
+            result.getOrThrow()
+        )
+        client.close()
+    }
+
+    @Test
+    fun `playback history queries map 401 to Unauthorized`() = runTest {
+        val client = HttpClient(MockEngine {
+            respond(content = "", status = HttpStatusCode.Unauthorized)
+        })
+        val dataSource = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        )
+
+        val results = listOf(
+            dataSource.getRecentlyPlayed("user-1", "expired", limit = 20),
+            dataSource.getMostPlayed("user-1", "expired", limit = 20),
+            dataSource.getRecentlyAdded("user-1", "expired", limit = 12)
+        )
+
+        results.forEach { result ->
+            assertTrue(result.isFailure)
+            assertTrue(result.exceptionOrNull() is JellyfinError.Unauthorized)
+        }
+        client.close()
+    }
+
+    @Test
     fun `albums list keeps MusicAlbum items that are marked as folders`() = runTest {
         val client = HttpClient(MockEngine { request ->
             respond(

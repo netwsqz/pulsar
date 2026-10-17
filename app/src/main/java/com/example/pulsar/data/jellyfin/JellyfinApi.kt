@@ -7,6 +7,12 @@ interface JellyfinApi {
     suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>>
     suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>>
     suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int = 12): Result<List<Album>>
+    /** 最近播放（服务端播放历史，按 DatePlayed 倒序）。 */
+    suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int = 20): Result<List<Track>>
+    /** 最常播放（服务端播放次数，按 PlayCount 倒序）。 */
+    suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int = 20): Result<List<Track>>
+    /** 最近添加的专辑（按 DateCreated 倒序）。 */
+    suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int = 12): Result<List<Album>>
     suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String): Result<List<Track>>
     suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>>
     suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String): Result<List<Track>>

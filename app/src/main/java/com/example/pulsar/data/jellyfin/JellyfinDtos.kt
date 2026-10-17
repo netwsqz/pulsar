@@ -1,5 +1,6 @@
 package com.example.pulsar.data.jellyfin
 
+import com.example.pulsar.domain.model.UNKNOWN_ARTIST
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -55,7 +56,7 @@ data class JellyfinItemDto(
 fun JellyfinItemDto.toTrack(): com.example.pulsar.domain.model.Track {
     val artist = artists.firstOrNull { it.isNotBlank() }
         ?: albumArtist?.takeIf { it.isNotBlank() }
-        ?: "Unknown artist"
+        ?: UNKNOWN_ARTIST
     return com.example.pulsar.domain.model.Track(
         id = id,
         title = name,
@@ -71,7 +72,7 @@ fun JellyfinItemDto.toTrack(): com.example.pulsar.domain.model.Track {
 fun JellyfinItemDto.toAlbum(): com.example.pulsar.domain.model.Album {
     val artist = albumArtist?.takeIf { it.isNotBlank() }
         ?: artists.firstOrNull { it.isNotBlank() }
-        ?: "Unknown artist"
+        ?: UNKNOWN_ARTIST
     return com.example.pulsar.domain.model.Album(
         id = id,
         name = name,

@@ -409,19 +409,18 @@ private fun LibraryGroupsContent(
             when {
                 albums == null && state.isLoading -> TrackListSkeleton(count = 8)
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                groups.isEmpty() -> EmptyState(if (isGenre) "暂无流派" else "暂无艺术家")
+                groups.isEmpty() -> EmptyState(if (byGenre) "暂无流派" else "暂无艺术家")
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                 ) {
                     itemsIndexed(groups, key = { _, g -> g.name }) { index, group ->
-                        val coverAlbum = group.albums.firstOrNull()
                         SearchResultRow(
-                            cover = coverAlbum?.let(coverFor),
+                            cover = group.albums.firstOrNull()?.let(coverFor),
                             title = group.name,
                             subtitle = "${group.albums.size} 张专辑",
-                            onClick = { onOpenGroup(group) },
+                            onClick = { onOpenGroup(group.name) },
                             showDivider = index != groups.lastIndex,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -446,9 +445,9 @@ private fun LibraryGroupDetailContent(
     val albums = state.albums
     // 组名来自导航状态，专辑列表可能还在加载/刷新：按组名重新分组，找不到就显示空态。
     val group = remember(albums, groupName, isGenre) {
-        val loaded = albums.orEmpty()
-        val groups = if (isGenre) groupAlbumsByGenre(loaded) else groupAlbumsByArtist(loaded)
-        groups.firstOrNull { it.name == groupName }
+        // 组名按大小写不敏感匹配：显示名取「首次出现的写法」，输入顺序一变精确匹配就会失手。
+        libraryGroups(albums.orEmpty(), isGenre)
+            .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
     }
     Column(
         modifier.fillMaxSize().statusBarsPadding()
@@ -811,7 +810,7 @@ private fun MusicLibraryScreen(
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
     BackHandler(section != LibrarySection.Discover) {
-        when (section) {
+        when (val s = section) {
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
                 section = detailOrigin
@@ -825,8 +824,9 @@ private fun MusicLibraryScreen(
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.GroupDetail -> {
-                // 组详情没有可清的服务端状态（专辑列表还在用），直接退回来源页。
-                section = detailOrigin
+                // 组详情没有可清的服务端状态（专辑列表还在用）。来源固定是艺术家/流派页，
+                // 由 isGenre 直接推出——不借 detailOrigin：它可能被「组详情 → 专辑详情」覆盖过。
+                section = if (s.isGenre) LibrarySection.Genres else LibrarySection.Artists
                 detailOrigin = LibrarySection.Discover
             }
             LibrarySection.Settings -> {
@@ -974,10 +974,11 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Artists, LibrarySection.Genres -> LibraryGroupsContent(
                         state = state,
-                        isGenre = s == LibrarySection.Genres,
-                        onOpenGroup = { group ->
+                        title = s.navLabel().orEmpty(),
+                        byGenre = s == LibrarySection.Genres,
+                        onOpenGroup = { name ->
                             detailOrigin = section
-                            section = LibrarySection.GroupDetail(group.name, isGenre = s == LibrarySection.Genres)
+                            section = LibrarySection.GroupDetail(name, isGenre = s == LibrarySection.Genres)
                         },
                         coverFor = viewModel::albumCover,
                         onRetry = viewModel::loadAlbums,
@@ -2420,14 +2421,14 @@ private fun AlbumsContent(
             val albums = state.albums
             when {
                 albums == null && state.isLoading -> {
-                    // 骨架屏：2列网格，每个卡片显示占位方块
+                    // 骨架屏：2列网格，每个卡片显示占位方块（圆角/间距与 AlbumGridCard 一致，切换不跳变）
                     val shimmer = rememberSkeletonShimmer()
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 96.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                     ) {
                         items(6) { // 显示6个骨架占位
                             Card(
@@ -2436,18 +2437,19 @@ private fun AlbumsContent(
                                     .border(
                                         width = 1.dp,
                                         color = cardBorderColor(),
-                                        shape = RoundedCornerShape(12.dp)
+                                        shape = RoundedCornerShape(Dimens.CornerLarge)
                                     ),
-                                shape = RoundedCornerShape(12.dp)
+                                shape = RoundedCornerShape(Dimens.CornerLarge)
                             ) {
                                 Column {
                                     SkeletonBox(
                                         Modifier
                                             .fillMaxWidth()
                                             .aspectRatio(1f),
-                                        progress = shimmer
+                                        progress = shimmer,
+                                        shape = RoundedCornerShape(Dimens.CornerLarge)
                                     )
-                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Column(Modifier.padding(Dimens.SpaceMidMedium), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
                                         SkeletonBox(
                                             Modifier
                                                 .fillMaxWidth(0.7f)
@@ -2476,8 +2478,8 @@ private fun AlbumsContent(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 96.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                     ) {
                         items(albumList, key = { it.id }) { album ->
                             AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })

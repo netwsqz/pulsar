@@ -66,6 +66,19 @@ class LibraryGroupsTest {
     }
 
     @Test
+    fun `没有艺术家的占位专辑不产生分组`() {
+        // DTO 层会把缺字段的专辑填成 "Unknown artist"；艺术家页不该凭空多一个假艺术家。
+        val groups = groupAlbumsByArtist(
+            listOf(
+                album("a1", "One", "Unknown artist"),
+                album("a2", "Two", "Real Artist")
+            )
+        )
+
+        assertEquals(listOf("Real Artist"), groups.map { it.name })
+    }
+
+    @Test
     fun `一张专辑可以属于多个流派`() {
         val groups = groupAlbumsByGenre(
             listOf(album("a1", "One", "Artist", genres = listOf("Rock", "Pop")))

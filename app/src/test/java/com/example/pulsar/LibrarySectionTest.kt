@@ -2,6 +2,7 @@ package com.example.pulsar
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** 顶层导航契约（工单 04）：顺序、文案、非顶层页的哨兵值。纯函数，无 Compose 依赖。 */
@@ -39,7 +40,7 @@ class LibrarySectionTest {
         val group = LibrarySection.GroupDetail(name = "Rock", isGenre = true)
         assertEquals(-1, group.navIndex())
         assertNull(group.navLabel())
-        assertEquals(true, group.isDetail())
+        assertTrue(group.isDetail())
     }
 
     @Test

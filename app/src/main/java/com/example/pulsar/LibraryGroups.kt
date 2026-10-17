@@ -1,6 +1,7 @@
 package com.example.pulsar
 
 import com.example.pulsar.domain.model.Album
+import com.example.pulsar.domain.model.UNKNOWN_ARTIST
 
 /** 艺术家/流派列表的一行：组名 + 它下面的专辑（已按专辑名排序）。 */
 internal data class LibraryGroup(val name: String, val albums: List<Album>)
@@ -23,6 +24,10 @@ internal fun groupAlbumsByArtist(albums: List<Album>): List<LibraryGroup> =
 internal fun groupAlbumsByGenre(albums: List<Album>): List<LibraryGroup> =
     groupAlbums(albums) { it.genres }
 
+/** UI 用的统一入口：按页面类型选分组维度，列表页和详情页共用，避免两处各写一遍 if。 */
+internal fun libraryGroups(albums: List<Album>, byGenre: Boolean): List<LibraryGroup> =
+    if (byGenre) groupAlbumsByGenre(albums) else groupAlbumsByArtist(albums)
+
 private fun groupAlbums(
     albums: List<Album>,
     keysOf: (Album) -> List<String>
@@ -33,7 +38,7 @@ private fun groupAlbums(
         val seen = HashSet<String>()
         keysOf(album)
             .map { it.trim() }
-            .filter { it.isNotEmpty() && seen.add(it.lowercase()) }
+            .filter { it.isNotEmpty() && it != UNKNOWN_ARTIST && seen.add(it.lowercase()) }
             .forEach { name ->
                 groups.getOrPut(name.lowercase()) { name to mutableListOf() }.second += album
             }

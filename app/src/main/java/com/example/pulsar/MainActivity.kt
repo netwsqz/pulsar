@@ -382,18 +382,15 @@ private fun EmptyState(
 @Composable
 private fun LibraryGroupsContent(
     state: JellyfinUiState,
-    isGenre: Boolean,
-    onOpenGroup: (LibraryGroup) -> Unit,
+    title: String,
+    byGenre: Boolean,
+    onOpenGroup: (String) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val title = if (isGenre) "流派" else "艺术家"
     val albums = state.albums
-    val groups = remember(albums, isGenre) {
-        val loaded = albums.orEmpty()
-        if (isGenre) groupAlbumsByGenre(loaded) else groupAlbumsByArtist(loaded)
-    }
+    val groups = remember(albums, byGenre) { libraryGroups(albums.orEmpty(), byGenre) }
     Column(
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)

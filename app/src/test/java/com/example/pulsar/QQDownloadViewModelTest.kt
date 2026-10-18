@@ -265,27 +265,6 @@ class QQDownloadViewModelTest {
     }
 
     @Test
-    fun `connect service validates scheme and persists`() = runTest {
-        val preferences = FakePreferences()
-        val api = FakeQQApi(health = QQHealthResponse(ok = true, ffmpegReady = true))
-        val viewModel = createViewModel(preferences, api)
-        advanceUntilIdle()
-
-        viewModel.updateServiceUrlInput("192.168.1.10:8900")
-        viewModel.connectService()
-        advanceUntilIdle()
-        assertTrue(viewModel.state.value.errorMessage!!.contains("http://"))
-
-        viewModel.updateServiceUrlInput("http://192.168.1.10:8900/")
-        viewModel.connectService()
-        advanceUntilIdle()
-
-        assertEquals("http://192.168.1.10:8900", preferences.savedUrl)
-        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
-        assertTrue(viewModel.state.value.serviceReachable)
-    }
-
-    @Test
     fun `open album picker loads tracks with nothing selected`() = runTest {
         val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
         val api = FakeQQApi(albumTracks = albumTracks)
@@ -784,6 +763,46 @@ class QQDownloadViewModelTest {
 
         assertEquals("new-key", preferences.savedKey)
         assertEquals("new-key", viewModel.state.value.fileOpsKey)
+    }
+
+    // ===== 服务地址自动填充（来自 Jellyfin 服务器地址，端口固定 8900）=====
+
+    @Test
+    fun `自动填充取 Jellyfin 主机加 8900 端口`() = runTest {
+        val preferences = FakePreferences()
+        val viewModel = createViewModel(preferences, FakeQQApi())
+
+        viewModel.autoFillServiceUrl("http://192.168.1.5:8096")
+        advanceUntilIdle()
+
+        assertEquals("http://192.168.1.5:8900", preferences.savedUrl)
+        assertEquals("http://192.168.1.5:8900", viewModel.state.value.serviceUrl)
+    }
+
+    @Test
+    fun `自动填充同时连接服务并探活`() = runTest {
+        val preferences = FakePreferences()
+        val api = FakeQQApi(health = QQHealthResponse(ok = true, ffmpegReady = true))
+        val viewModel = createViewModel(preferences, api)
+
+        viewModel.autoFillServiceUrl("http://192.168.1.5:8096")
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.serviceReachable)
+        assertEquals(1, api.healthCalls)
+    }
+
+    @Test
+    fun `自动填充空白地址不动现有配置`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val viewModel = createViewModel(preferences, FakeQQApi())
+        advanceUntilIdle()
+
+        viewModel.autoFillServiceUrl("   ")
+        advanceUntilIdle()
+
+        assertEquals("http://192.168.1.10:8900", preferences.savedUrl)
+        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
     }
 
     private fun TestScope.createViewModel(

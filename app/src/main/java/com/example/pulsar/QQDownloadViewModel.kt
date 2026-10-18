@@ -65,25 +65,19 @@ class QQDownloadViewModel(
         }
     }
 
-    /** 服务地址编辑：只在用户明确点「连接」时生效，避免打字过程中狂发请求。 */
-    fun updateServiceUrlInput(value: String) {
-        _state.value = _state.value.copy(serviceUrlInput = value, errorMessage = null)
-    }
-
-    fun connectService() {
-        val input = _state.value.serviceUrlInput.trim().trimEnd('/')
-        if (input.isBlank()) {
-            _state.value = _state.value.copy(errorMessage = "请输入服务地址，例如 http://192.168.1.10:8900")
-            return
-        }
-        if (!input.startsWith("http://") && !input.startsWith("https://")) {
-            _state.value = _state.value.copy(errorMessage = "地址需以 http:// 开头")
-            return
-        }
+    /**
+     * 服务地址自动填充：取 Jellyfin 服务器的主机名、端口固定 8900。
+     * 登录成功时由界面调用，用户完全不感知地址这回事（不提供手动入口）。
+     */
+    fun autoFillServiceUrl(jellyfinServerUrl: String) {
+        val host = runCatching { java.net.URI(jellyfinServerUrl.trim()).host }.getOrNull()
+        if (host.isNullOrBlank()) return
+        val url = "http://$host:8900"
+        if (url == _state.value.serviceUrl) return
         viewModelScope.launch(dispatcher) {
-            preferences.saveServiceUrl(input)
-            applyServiceUrl(input)
-            _state.value = _state.value.copy(serviceUrl = input)
+            preferences.saveServiceUrl(url)
+            applyServiceUrl(url)
+            _state.value = _state.value.copy(serviceUrl = url)
             checkHealth()
         }
     }
@@ -568,7 +562,6 @@ interface QQDownloadApiFactory {
 
 data class QQDownloadUiState(
     val serviceUrl: String = "",
-    val serviceUrlInput: String = "",
     val serviceReachable: Boolean = false,
     val credentialExpired: Boolean = false,
     val quality: String = QQDownloadSettings.DEFAULT_QUALITY,

@@ -124,7 +124,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -307,6 +310,12 @@ private fun PulsarApp(
     )
     val state by viewModel.state.collectAsStateWithLifecycle()
     val qqState by qqViewModel.state.collectAsStateWithLifecycle()
+    // QQ 下载服务与 Jellyfin 同机、端口固定 8900：登录成功后自动填地址，用户不用管。
+    LaunchedEffect(state.tracks != null, state.serverUrl) {
+        if (state.tracks != null && state.serverUrl.isNotBlank()) {
+            qqViewModel.autoFillServiceUrl(state.serverUrl)
+        }
+    }
     PulsarTheme(darkTheme = isSystemInDarkTheme()) {
         // 启动直接进主页面：恢复会话期间曲库页用灰色波浪骨架占位（页面框架、玻璃岛、
         // 迷你播放条都立刻可用），不另起一屏加载页。只有"确实没有可用会话"——本地没存
@@ -618,7 +627,35 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
             Text("连接 Jellyfin", style = MaterialTheme.typography.headlineSmall)
-            OutlinedTextField(state.serverUrl, viewModel::updateServerUrl, Modifier.fillMaxWidth(), label = { Text("服务器地址") }, placeholder = { Text("https://example.com 或 http://192.168.1.2:8096") }, singleLine = true)
+            // 地址历史下拉：输过的地址点一下回填。没历史时就是个普通输入框。
+            var historyExpanded by remember { mutableStateOf(false) }
+            ExposedDropdownMenuBox(
+                expanded = historyExpanded && state.serverUrlHistory.isNotEmpty(),
+                onExpandedChange = { historyExpanded = it }
+            ) {
+                OutlinedTextField(
+                    state.serverUrl,
+                    viewModel::updateServerUrl,
+                    Modifier.fillMaxWidth().menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
+                    label = { Text("服务器地址") },
+                    placeholder = { Text("https://example.com 或 http://192.168.1.2:8096") },
+                    singleLine = true
+                )
+                ExposedDropdownMenu(
+                    expanded = historyExpanded && state.serverUrlHistory.isNotEmpty(),
+                    onDismissRequest = { historyExpanded = false }
+                ) {
+                    state.serverUrlHistory.forEach { url ->
+                        DropdownMenuItem(
+                            text = { Text(url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            onClick = {
+                                viewModel.updateServerUrl(url)
+                                historyExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
             OutlinedTextField(state.username, viewModel::updateUsername, Modifier.fillMaxWidth(), label = { Text("用户名") }, singleLine = true)
             OutlinedTextField(state.password, viewModel::updatePassword, Modifier.fillMaxWidth(), label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
             state.errorMessage?.let { ErrorState(it) }

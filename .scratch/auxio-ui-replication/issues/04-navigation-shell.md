@@ -4,7 +4,7 @@
 
 **Blocked by:** 01（设计 token 底座）
 
-**Status:** ready-for-human（代码完成，真机肉眼验证待做）
+**Status:** done（代码完成，真机验收通过 2026-10-18）
 
 - [x] 顶层入口变为：发现 / Songs / Albums / Artists / Genres / Playlists
 - [x] 玻璃岛视觉保留（用户仍一眼认出 Pulsar）
@@ -12,7 +12,7 @@
 - [x] 搜索/设置/退出入口仍可到达（保留在右侧图标或另行安置）
 - [x] 详情页（专辑/播放列表等）仍能正确返回
 - [x] 不做 Auxio 的 tab 可配置/可拖拽（属操作逻辑，本次 out of scope）
-- [ ] 真机肉眼验证
+- [x] 真机肉眼验证
 
 ## Comments
 

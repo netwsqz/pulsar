@@ -18,7 +18,8 @@ class JellyfinViewModelFactory(private val application: Application) : ViewModel
             dispatcher = Dispatchers.Main.immediate,
             libraryFilesFactory = application.libraryFilesFactory(),
             mediaCache = application.mediaCache(),
-            snapshotRepository = application.librarySnapshotRepository()
+            snapshotRepository = application.librarySnapshotRepository(),
+            serverUrlHistory = application.serverUrlHistory()
         ) as T
     }
 }

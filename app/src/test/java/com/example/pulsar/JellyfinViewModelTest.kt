@@ -841,6 +841,77 @@ class JellyfinViewModelTest {
         assertEquals(listOf(track), snapshotRepo.stored?.tracks)
     }
 
+    // ===== 服务器地址历史 =====
+
+    @Test
+    fun `登录成功把地址记进历史并刷新状态`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        val history = FakeServerUrlHistory()
+        val viewModel = createViewModel(
+            FakeSessionRepository(null), api, serverUrlHistory = history
+        )
+        advanceUntilIdle()
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+
+        assertEquals(listOf("https://server.test"), history.recorded)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+    }
+
+    @Test
+    fun `登录失败不记录地址历史`() = runTest {
+        val history = FakeServerUrlHistory()
+        val viewModel = createViewModel(
+            FakeSessionRepository(null), FakeJellyfinApi(), serverUrlHistory = history
+        )
+        advanceUntilIdle()
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+
+        assertTrue(history.recorded.isEmpty())
+    }
+
+    @Test
+    fun `启动时载入地址历史到状态`() = runTest {
+        val history = FakeServerUrlHistory()
+        val viewModel = createViewModel(
+            FakeSessionRepository(null), FakeJellyfinApi(), serverUrlHistory = history
+        )
+        history.record("https://old.test")
+        advanceUntilIdle()
+
+        assertEquals(listOf("https://old.test"), viewModel.state.value.serverUrlHistory)
+    }
+
+    @Test
+    fun `退出登录保留地址历史（本地数据，与账号无关）`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        val history = FakeServerUrlHistory()
+        val viewModel = createViewModel(
+            FakeSessionRepository(null), api, serverUrlHistory = history
+        )
+        advanceUntilIdle()
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+
+        viewModel.signOut()
+        advanceUntilIdle()
+
+        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+    }
+
     @Test
     fun `探活撞上 token 失效走会话过期，不空转到上限`() = runTest {
         val api = FakeJellyfinApi()
@@ -1436,11 +1507,24 @@ class JellyfinViewModelTest {
         authorization: FakeAuthorizationSink = FakeAuthorizationSink(),
         libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
         mediaCache: FakeMediaCache? = null,
-        snapshotRepository: FakeSnapshotRepository? = null
+        snapshotRepository: FakeSnapshotRepository? = null,
+        serverUrlHistory: FakeServerUrlHistory? = null
     ): JellyfinViewModel = JellyfinViewModel(
         sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
-        libraryFilesFactory, mediaCache, snapshotRepository
+        libraryFilesFactory, mediaCache, snapshotRepository, serverUrlHistory
     )
+
+    /** 地址历史的内存 Fake：记录写入与读取，验证登录成功时的 record 调用。 */
+    private class FakeServerUrlHistory : ServerUrlHistory {
+        val recorded = mutableListOf<String>()
+        private val urls = mutableListOf<String>()
+        override suspend fun load(): List<String> = urls.toList()
+        override suspend fun record(url: String) {
+            recorded += url
+            urls.remove(url)
+            urls.add(0, url)
+        }
+    }
 
     private class FakeMediaCache : MediaCache {
         val completeKeys = mutableSetOf<String>()

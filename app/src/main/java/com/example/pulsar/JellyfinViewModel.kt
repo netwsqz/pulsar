@@ -45,7 +45,9 @@ class JellyfinViewModel(
     /** 手机本地音频副本（离线能听）。null = 没有缓存能力，一切照常走网络。 */
     private val mediaCache: MediaCache? = null,
     /** 曲库快照：断网时撑起界面。null = 没有离线兜底。 */
-    private val snapshotRepository: LibrarySnapshotRepository? = null
+    private val snapshotRepository: LibrarySnapshotRepository? = null,
+    /** 服务器地址历史：登录页下拉选 + 登录成功后记录。null = 无历史。 */
+    private val serverUrlHistory: ServerUrlHistory? = null
 ) : ViewModel() {
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
@@ -87,6 +89,10 @@ class JellyfinViewModel(
         // 闪一屏空白登录表单。
         _state.value = _state.value.copy(isRestoring = true)
         restoreSavedLogin()
+        // 地址历史只服务登录页：现在就拉，登录表单随时可显示下拉。
+        viewModelScope.launch(dispatcher) {
+            _state.value = _state.value.copy(serverUrlHistory = serverUrlHistory?.load().orEmpty())
+        }
     }
 
     fun updateServerUrl(value: String) { _state.value = _state.value.copy(serverUrl = value, errorMessage = null) }
@@ -150,6 +156,10 @@ class JellyfinViewModel(
                         source.authorizationHeader(signedIn.accessToken)
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
                     sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
+                    serverUrlHistory?.record(current.serverUrl)
+                    _state.value = _state.value.copy(
+                        serverUrlHistory = serverUrlHistory?.load() ?: _state.value.serverUrlHistory
+                    )
                     // 登录成功 = **整份替换**快照，不沿用旧的：快照里可能还躺着上一个账号的
                     // 专辑列表（token 过期不清快照是铁律 5），merge 进来就是跨账号串数据。
                     // 专辑/发现页之后随用户浏览逐屏补全。
@@ -279,7 +289,9 @@ class JellyfinViewModel(
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
         clearLyrics()
-        _state.value = JellyfinUiState()
+        // 退回登录表单：只清「这次会话」的东西。地址历史是本地数据、跟账号无关，留着——
+        // 否则 _state.value = JellyfinUiState() 会把它一起清空，登录页的地址下拉就没了。
+        _state.value = JellyfinUiState(serverUrlHistory = _state.value.serverUrlHistory)
         // 主动退出 = 清空手机上的副本与快照（换账号不串数据）。缓存层出问题也不能
         // 挡住退出登录本身（铁律 1、工单 06）——两个 clear 实现自己吞异常。
         // 正在播的那首保留：退出登录不该把正在听的歌拦腰打断。

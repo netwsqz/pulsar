@@ -71,6 +71,9 @@ class PulsarApplication : Application(), AuthorizationSink {
 
     fun sessionRepository(): SessionRepository = SessionStore(pulsarPreferencesDataStore)
 
+    /** 登录页的服务器地址历史（最近 5 条，省得重新手敲）。 */
+    fun serverUrlHistory(): ServerUrlHistory = DataStoreServerUrlHistory(pulsarPreferencesDataStore)
+
     fun jellyfinApiFactory(): JellyfinApiFactory = object : JellyfinApiFactory {
         override suspend fun create(serverUrl: String): JellyfinApi = jellyfinDataSource(serverUrl)
     }

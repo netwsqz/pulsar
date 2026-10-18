@@ -6,10 +6,10 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** done（代码已在 c557706 提交，QQ 下载页已验证使用 token）
 
-- [ ] 新增一套设计 token 常量（间距、圆角、触摸目标），集中定义、可全局引用
-- [ ] 至少一个现有页面改用这些 token，且该页面视觉与改造前一致（不追求变好看，只求不变）
-- [ ] 明暗两套主题下取值都正确
-- [ ] 不引入 Auxio 的任何源码（设计规格数值可用，代码不可用，见 ADR-0004）
-- [ ] 保留 Pulsar 现有字体（Righteous + Poppins），不换 Inter
+- [x] 新增一套设计 token 常量（间距、圆角、触摸目标），集中定义、可全局引用
+- [x] 至少一个现有页面改用这些 token，且该页面视觉与改造前一致（不追求变好看，只求不变）
+- [x] 明暗两套主题下取值都正确
+- [x] 不引入 Auxio 的任何源码（设计规格数值可用，代码不可用，见 ADR-0004）
+- [x] 保留 Pulsar 现有字体（Righteous + Poppins），不换 Inter

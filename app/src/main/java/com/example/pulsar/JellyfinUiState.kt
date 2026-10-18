@@ -7,6 +7,8 @@ import com.example.pulsar.domain.model.Track
 
 data class JellyfinUiState(
     val serverUrl: String = "",
+    /** 最近登录成功的服务器地址（最新在前）；登录页输入框获焦时下拉可选。 */
+    val serverUrlHistory: List<String> = emptyList(),
     val username: String = "",
     val password: String = "",
     /** 登录/手动加载中（按钮转圈）。 */

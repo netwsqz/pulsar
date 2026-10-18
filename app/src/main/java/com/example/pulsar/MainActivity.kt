@@ -1443,13 +1443,19 @@ private fun TracksContent(
         Modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = GlassIslandTopSpacing, bottom = 96.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
+        contentPadding = PaddingValues(start = Dimens.SpaceMedium, end = Dimens.SpaceMedium, top = GlassIslandTopSpacing, bottom = 96.dp),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
-        item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp)) }
-        item { Button(onClick = onLocalAudio, Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 8.dp), enabled = controllerState.controller != null) { Text("选择手机里的音频") } }
+        item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
+        item {
+            Button(
+                onClick = onLocalAudio,
+                Modifier.fillMaxWidth().padding(top = Dimens.SpaceTiny, bottom = Dimens.SpaceSmall),
+                enabled = controllerState.controller != null
+            ) { Text("选择手机里的音频") }
+        }
         // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
-        if (state.tracks == null) item { TrackListSkeleton(count = 7) } else if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
+        if (state.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             TrackRow(
                 track = track,
@@ -2639,7 +2645,8 @@ private fun PlaylistsContent(
         )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
-                playlists == null && state.isLoading -> TrackListSkeleton(count = 8)
+                // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
+                playlists == null && state.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
                 // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
                 // 已加载的照常显示——断网不该把现成的列表藏掉。
                 playlists == null && state.isOffline -> EmptyState("播放列表需要联网才能查看")

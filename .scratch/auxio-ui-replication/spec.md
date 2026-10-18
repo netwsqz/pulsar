@@ -77,6 +77,16 @@ Auxio 本身无法直接搬运（详见 ADR-0004）：它是 View/XML 架构、�
 38. 作为用户，我想要列表项圆角/间距与 Auxio 量纲一致，这样"神似"。
 39. 作为用户，我想要专属页（搜索/设置/已缓存/QQ下载）自动继承新视觉底座，这样全 App 不跳。
 
+### 主题色板（ADR-0005）
+
+45. 作为用户，我想要整个 App 的配色（按钮、chip、卡片、滑块、文字色阶）跟着当前专辑走，这样沉浸感不只是背景一条渐变。
+46. 作为用户，我想要没在播歌、或封面是黑白/无封面时，界面回落到一套稳妥的默认配色，这样不会突然变成灰色或残留上一首的颜色。
+47. 作为用户，我想要自己挑一套配色作为兜底，这样我可以在没有封面色时也看到喜欢的颜色。
+48. 作为用户，我想要设置页能看清当前生效的是「封面」「手动」还是「默认」，这样不会以为设置没生效。
+49. 作为用户，我想要切歌时配色平滑过渡，这样不会闪。
+50. 作为用户，我想要全屏播放页保持它现在的沉浸背景，但控件和玻璃跟着新配色走，这样两处不割裂。
+51. 作为用户，我想要系统状态栏/导航栏融入界面，这样不是一条突兀的色带。
+
 ### 数据
 
 40. 作为用户，我想要「最近播放」显示服务端的真实播放历史，这样换设备也一致。
@@ -118,6 +128,18 @@ Auxio 本身无法直接搬运（详见 ADR-0004）：它是 View/XML 架构、�
 - 排版：借鉴负 letterSpacing 让标题更紧凑
 - 字体：**保留 Pulsar 的 Righteous + Poppins**，不换 Inter
 
+### 主题色板（ADR-0005）
+
+- **种子色优先级**：当前播放曲目的封面鲜艳色（vibrant）→ 用户自选预设色 → 品牌靛蓝默认色板。
+- **推导算法**：手写，扩展现有 `CoverPalette.kt` 的 HSL 工具（`hslOf` / `hslColor`），按 Material3 角色明度档位生成整套色板。**不引入新依赖。**
+- **色源统一**：种子、强调色、全屏播放页兜底渐变取同一个种子，避免切页面跳色。`vibrantSwatch` 为 null 时回退到现有 `selectCoverSwatch`，再回退默认色板。
+- **背景归属**：主界面背景由色板决定（中性 tinted surface）；全屏播放页背景仍由封面决定（渐变 + 模糊 + scrim），文字恒白，系统栏图标恒亮。
+- **对比度**：`on*` 角色由明度档位结构保证，不做逐对事后校验。
+- **过渡**：实际被用到的十来个角色 800ms 同步动画，与现有背景渐变一致。
+- **预设色**：设置页「外观」一节，16 个（Auxio 强调色集合去掉 Dynamic），存 ARGB 而非序号。
+- **存储**：`ThemePreferences` 挂现有共享 `pulsarPreferencesDataStore`，与 `LoudnessPreferences` 同一套路。
+- **系统栏**：透明 + edge-to-edge；全屏播放页强制亮色图标，退出恢复。
+
 ## Testing Decisions
 
 **测试哲学**：只测外部行为，不测实现细节。手写 Fake 优先（不用 Mockito/MockK），沿用项目现有约定。
@@ -127,17 +149,19 @@ Auxio 本身无法直接搬运（详见 ADR-0004）：它是 View/XML 架构、�
 1. **数据层接缝**（已有）：新增的播放历史/艺术家/流派查询方法，用 `JellyfinDataSourceTest` + Ktor `MockEngine` 验证请求参数正确（`SortBy=DatePlayed` 等）与 DTO 映射。先例：现有 `JellyfinDataSourceTest`。
 2. **ViewModel 接缝**（已有）：新增的 `loadXxx()`，用 `JellyfinViewModelTest` + `FakeJellyfinApi` 验证幂等加载、generation 防过期、失败降级、会话切换清空。先例：现有 `JellyfinViewModelTest`。
 3. **纯函数接缝**（新增，仿 `DiscoverPicks`）：客户端艺术家/流派分组，做纯函数单测——无 IO、稳定排序、边界用例（空列表、缺失 artist/genre 字段、同名归并）。先例：`DiscoverPicksTest`。
+4. **色板推导接缝**（新增，仿 `CoverPaletteTest`）：种子色 → `ColorScheme` 的推导是纯函数，单测覆盖——色相保留、明度档位单调、`on*` 角色对比度结构、vibrant 为空时回退链、浅/深两套都成立。先例：`CoverPaletteTest`（`app/src/test/java/com/example/pulsar/ui/theme/`）。
 
-**不测的部分**：设计 token（纯常量，YAGNI）；Compose 布局（本项目 UI 一向真机肉眼验证，无 Compose UI 测试框架）。
+**不测的部分**：设计 token（纯常量，YAGNI）；Compose 布局（本项目 UI 一向真机肉眼验证，无 Compose UI 测试框架）；系统栏图标明暗（需要真实窗口，真机验收）。
 
 ## Out of Scope
 
 - **播放界面**（miniplayer + `NowPlayingScreen`）——本次不碰（Q4）。
 - **操作逻辑复刻**——长按多选、拖拽排序、tab 可配置、M3U 导入导出，全部不做（Q11）。
 - **Auxio 的 MediaStore 相关逻辑**——本地扫描、索引进度、文件夹选择、存储权限，全丢（Jellyfin 无此概念）。
-- **17 个强调色 + AMOLED 黑主题 + 动态取色**——不引入，Pulsar 保留自有配色 + 封面取色。
 - **艺术家/流派详情页的深度功能**——只做「点进去看其下专辑/曲目」，不做 Auxio 的完整详情页功能集。
 - 不改任何数据层已有的接口行为（只新增）。
+
+> **已被 ADR-0005 推翻的条目**：原 Out of Scope 写着「17 个强调色 + 动态取色——不引入，Pulsar 保留自有配色 + 封面取色」。现在**主题色板本身由封面推导**，并允许用户自选兜底预设色。见下方「主题色板」一节。
 
 ## Further Notes
 

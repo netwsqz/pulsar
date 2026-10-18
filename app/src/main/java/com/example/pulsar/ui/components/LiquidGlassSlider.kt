@@ -88,12 +88,16 @@ internal data class LiquidGlassSliderColors(
  * 深色沉浸页预设（全屏播放页）：玻璃里透出模糊封面，[accent] 是当前专辑主色。
  * 填充从半透明渐到实色、前端柔光同色 —— 读作「专辑色的液体涨上来」。
  *
- * [accent] 刻意不给默认值：漏传就会退回一个跟专辑无关的固定色，是本次功能最可能悄悄失效的地方，
- * 让它编译不过比让它静默变白强。
+ * [accent] 与 [trackSurface] 都刻意不给默认值：漏传就会退回一个跟主题无关的固定色，
+ * 是这类功能最可能悄悄失效的地方，让它编译不过比让它静默变白强。
  */
 @Composable
-internal fun immersiveSliderColors(accent: Color): LiquidGlassSliderColors = LiquidGlassSliderColors(
-    trackSurface = Color.White.copy(alpha = 0.16f),
+internal fun immersiveSliderColors(
+    accent: Color,
+    // 轨道玻璃表面色由调用方按色板给（全屏页恒深底，需要取色板亮端，见 NowPlayingScreen）。
+    trackSurface: Color
+): LiquidGlassSliderColors = LiquidGlassSliderColors(
+    trackSurface = trackSurface,
     fillStart = accent.copy(alpha = 0.6f),
     fillEnd = accent,
     glow = accent

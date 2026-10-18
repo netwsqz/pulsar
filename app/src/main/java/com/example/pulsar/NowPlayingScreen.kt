@@ -1,5 +1,6 @@
 package com.example.pulsar
 
+import android.content.res.Configuration
 import android.os.Build
 import android.view.HapticFeedbackConstants
 import androidx.compose.animation.AnimatedVisibility
@@ -63,6 +64,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,6 +84,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -96,6 +99,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.C
 import androidx.media3.session.MediaController
@@ -124,6 +128,8 @@ import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 
 // ===== 深色沉浸页白字体系（与系统主题无关，全屏页永远深底白字） =====
+// **刻意保留白色、不换 onSurface**（工单 15 的例外）：本页背景恒为深色封面渐变 + 黑纱，
+// 白字在任何封面下都有对比度；换成跟封面推导的 onSurface 反而会在浅色封面上糊掉。
 private val NpTextPrimary = Color.White
 private val NpTextSecondary = Color.White.copy(alpha = 0.7f)
 private val NpTextFaint = Color.White.copy(alpha = 0.5f)
@@ -225,6 +231,31 @@ internal fun NowPlayingScreen(
 ) {
     val controller = controllerState.controller
     val hasMedia = controller != null && controllerState.durationMs > 0
+    // 本页永远是深底白字，系统栏图标因此恒用亮色（不跟主题深浅走）。
+    // 退出时把「跟随系统深浅」还回去——主界面由工单 14 的 edge-to-edge 统一设置。
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = view.context.findActivity()?.window
+        val insetsController = window?.let { WindowCompat.getInsetsController(it, view) }
+        if (insetsController != null) {
+            insetsController.isAppearanceLightStatusBars = false
+            insetsController.isAppearanceLightNavigationBars = false
+        }
+        onDispose {
+            val dark = (view.context.resources.configuration.uiMode and
+                Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+            insetsController?.isAppearanceLightStatusBars = !dark
+            insetsController?.isAppearanceLightNavigationBars = !dark
+        }
+    }
+    // 全屏页的玻璃面取色板 surface（半透明），不再是写死的白膜；文字保持白色系。
+    // 本页恒为深底（封面 + 黑纱），所以玻璃膜必须**取色板里较亮的那一端**：
+    // 浅色色板的 surface 接近白，深色色板的 onSurface 接近白；反过来用会让深色模式的
+    // 玻璃变成一层几乎看不见的黑膜，按钮直接糊进背景。
+    val scheme = MaterialTheme.colorScheme
+    val glassBase = if (scheme.surface.luminance() > 0.5f) scheme.surface else scheme.onSurface
+    val glassSurface = glassBase.copy(alpha = 0.12f)
+    val trackSurface = glassBase.copy(alpha = 0.16f)
     // 三个控制按钮（上一首 / 播放暂停 / 下一首）共用的轻触觉反馈：整个页面取一次。
     val controlView = LocalView.current
     // 进度状态：拖动中显示拖动值，松手才 seek，避免边拖边跳。
@@ -543,7 +574,7 @@ internal fun NowPlayingScreen(
                             .size(44.dp)
                             .liquidGlass(
                                 backdrop = backdrop,
-                                surface = Color.White.copy(alpha = 0.12f),
+                                surface = glassSurface,
                                 shape = CircleShape,
                                 // 44dp 小圆：折射按自身半径收窄，面板级的 14/28dp 会把它整个拧歪。
                                 lensRefraction = 6.dp,
@@ -602,7 +633,7 @@ internal fun NowPlayingScreen(
                 backdrop = backdrop,
                 enabled = hasMedia,
                 // 填充与前端柔光都用当前专辑主色（无封面时回退品牌靛蓝）。
-                colors = immersiveSliderColors(gradientColors.accent),
+                colors = immersiveSliderColors(gradientColors.accent, trackSurface = trackSurface),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp)
@@ -656,7 +687,7 @@ internal fun NowPlayingScreen(
                         }
                         .liquidGlass(
                             backdrop = backdrop,
-                            surface = Color.White.copy(alpha = 0.12f),
+                            surface = glassSurface,
                             shape = CircleShape,
                             // 44dp 模式钮的折射比例（0.27R / 0.55R）按 72dp 放大，两个圆才是同一种凸起。
                             lensRefraction = 10.dp,
@@ -698,6 +729,13 @@ internal fun NowPlayingScreen(
             }
         }
     }
+}
+
+/** 从 Compose 的 Context 里取宿主 Activity：系统栏图标只能通过它的 window 设置。 */
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 /**
@@ -917,6 +955,9 @@ private fun QueuePage(
         }
         return
     }
+    // 队列行是深底页上的「面」：与玻璃面同源取色板亮端，跟切歌换色走。
+    val scheme = MaterialTheme.colorScheme
+    val rowSurface = if (scheme.surface.luminance() > 0.5f) scheme.surface else scheme.onSurface
     LazyColumn(
         state = lazyListState,
         modifier = modifier.fillMaxWidth()
@@ -927,8 +968,8 @@ private fun QueuePage(
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(
-                            // 拖拽中：白色半透明高亮（深色页适配）。
-                            if (dragging) Color.White.copy(alpha = 0.12f) else Color.Transparent,
+                            // 拖拽中：亮色半透明高亮（深色页适配）。
+                            if (dragging) rowSurface.copy(alpha = 0.12f) else Color.Transparent,
                             RoundedCornerShape(8.dp)
                         )
                         // 长按整行拖动排序；松手后把新顺序同步给播放器。
@@ -942,12 +983,12 @@ private fun QueuePage(
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 当前轮播行指示点：白色。
+                    // 当前轮播行指示点：白色（深底页恒亮）。
                     Box(
                         Modifier
                             .size(8.dp)
                             .background(
-                                if (item.isCurrent) NpTextPrimary else Color.White.copy(alpha = 0.3f),
+                                if (item.isCurrent) NpTextPrimary else NpTextPrimary.copy(alpha = 0.3f),
                                 CircleShape
                             )
                     )

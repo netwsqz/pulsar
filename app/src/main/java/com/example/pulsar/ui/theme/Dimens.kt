@@ -31,4 +31,10 @@ internal object Dimens {
     // 圆角（对应 m3_shape_corners_large 16，以及播放面板 / BottomSheet 特调的 20）
     val CornerLarge = 16.dp
     val CornerExtraLarge = 20.dp
+
+    // 设置页配色预设色块（工单 13）：一行最多 8 个，窄屏由 FlowRow 自动换行
+    val ThemeSwatch = 36.dp
+    val ThemeSwatchBorder = 1.dp
+    val ThemeSwatchBorderSelected = 2.dp
+    val ThemeSwatchCheck = 20.dp
 }

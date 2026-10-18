@@ -120,6 +120,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 - `ui/components/LiquidGlass.kt`：**液态玻璃材质的唯一出处**（`liquidGlass` Modifier：模糊 + 透镜 + 高光）。全 App 的玻璃面都走它，别再各写各的模糊/透镜数字。
 - `ui/components/`：`LiquidGlassSlider`、`SurfaceCard`、`VolumeFeedback` / `VolumeFeedbackOverlay` 等可复用组件。
 - `ui/theme/CoverPalette.kt` + `CoverTheme.kt`：**按专辑封面取色**染主题（Pulsar 的特色，不是 Auxio 的做法）。取色失败回退默认渐变。
+- `ui/theme/ThemePalette.kt`（工单 10 起）：**种子色 → 完整 M3 ColorScheme** 的纯函数推导。主题色板由当前播放封面的鲜艳色推导，手动预设色只做兜底（见 ADR-0005）。**不要引入 `material-color-utilities` 系依赖**——material3 1.4.0 没有公开的种子色 API，第三方坐标要么要求 Gradle 9.8、要么是 JVM 21 变体。
 - `domain/model/`：`Track` / `Album` / `Playlist` / `SearchResults`，与网络 DTO 解耦。
 
 **导航（工单 04，对齐 Auxio tab 语义）**：**不引入导航库**。`LibrarySection` sealed interface 作本地导航状态，`TopLevelSections`（`LibrarySection.kt`）定义顶层顺序与文案：

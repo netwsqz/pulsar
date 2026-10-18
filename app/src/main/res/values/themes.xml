@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 系统栏透明（工单 14）：edge-to-edge 下颜色由内容透上来，不再是一条色带。
+         图标明暗由 MainActivity 的 enableEdgeToEdge 按深浅模式设置。 -->
     <style name="Theme.Pulsar" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:colorAccent">#6750A4</item>
-        <item name="android:navigationBarColor">#FFFBFE</item>
-        <item name="android:statusBarColor">#FFFBFE</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

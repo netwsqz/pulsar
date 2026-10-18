@@ -8,6 +8,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.palette.graphics.Palette
 import coil.imageLoader
@@ -23,15 +25,16 @@ data class CoverTheme(val gradient: CoverGradient, val seed: ThemeSeed)
 /**
  * 跟随当前封面取色：封面请求变化时用 Coil 加载 96px 小图（与界面封面共用
  * ImageLoader 缓存，不重复下载），androidx.palette 提取色板后同时产出
- * 主题种子色（vibrant → dominant → 品牌靛蓝；用户预设色等工单 13 再接）
+ * 主题种子色（vibrant → dominant → 用户预设色 [preset] → 品牌靛蓝）
  * 和三色渐变。渐变与强调色都从**同一个种子**推导，保证一张封面只有一个主色。
  * 取色期间沿用上一次的结果（切歌直接旧色过渡到新色，不闪回默认色）；
- * 失败 / 无封面回退默认色板。darkTheme 只影响柔化方向，切换深浅模式不会重新取色。
+ * 失败 / 无封面回退预设色或默认色板。darkTheme 只影响柔化方向，切换深浅模式不会重新取色。
  */
 @Composable
 fun rememberCoverGradient(
     coverRequest: JellyfinRequest?,
-    darkTheme: Boolean
+    darkTheme: Boolean,
+    preset: Color? = null
 ): CoverTheme {
     var swatches by remember { mutableStateOf<CoverSwatches?>(null) }
     val context = LocalContext.current
@@ -44,16 +47,31 @@ fun rememberCoverGradient(
             swatches = withContext(Dispatchers.IO) { extractCoverSwatches(context, request) }
         }
     }
+    // 渐变与种子必须取**同一个** swatch：palette 有饱和色但没有 vibrantSwatch 时，
+    // 渐变若直接落到 fallback（预设/默认），种子却取了 dominant，控件与背景就会两个色。
+    val dominant = swatches?.vibrant ?: swatches?.all?.let(::selectCoverSwatch)
     return CoverTheme(
-        // 回退渐变用固定默认色，不读 MaterialTheme——本函数在主题之外调用，读不到动态色板。
+        // 回退渐变用固定默认色（或用户预设色），不读 MaterialTheme——本函数在主题之外调用，读不到动态色板。
         gradient = coverGradient(
             swatches = swatches?.all,
             darkTheme = darkTheme,
-            fallback = defaultCoverGradient(darkTheme),
+            fallback = presetGradient(preset, darkTheme),
             // ADR-0005：种子、强调色、渐变必须取同一个主色，否则切页面会跳色。
-            dominant = swatches?.vibrant
+            dominant = dominant
         ),
-        seed = selectThemeSeed(swatches?.vibrant, swatches?.all, preset = null)
+        seed = selectThemeSeed(swatches?.vibrant, swatches?.all, preset = preset)
+    )
+}
+
+/** 无封面时的兜底渐变：用户选过预设色就按它推导（与主界面兜底一致），否则品牌靛蓝。
+ * 预设色（含灰色）显式当 dominant 传，绕开 `selectCoverSwatch` 的饱和度筛选——
+ * 用户自己选的颜色，灰也得认。 */
+internal fun presetGradient(preset: Color?, darkTheme: Boolean): CoverGradient {
+    val swatch = preset?.let { CoverSwatch(it.toArgb(), 1) }
+    return coverGradient(
+        swatches = swatch?.let { listOf(it) },
+        darkTheme = darkTheme,
+        dominant = swatch
     )
 }
 

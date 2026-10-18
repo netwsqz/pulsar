@@ -16,6 +16,7 @@ import com.example.pulsar.ui.theme.CoverTheme
 import com.example.pulsar.ui.theme.Dimens
 import com.example.pulsar.ui.theme.PulsarTheme
 import com.example.pulsar.ui.theme.THEME_TRANSITION_MS
+import com.example.pulsar.ui.theme.ThemePresets
 import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
@@ -24,6 +25,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -100,11 +103,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
@@ -171,6 +177,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -178,6 +185,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.ColorPainter
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -266,6 +274,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // edge-to-edge（工单 14）：内容绘制到系统栏下方，状态栏/导航栏透明。
+        // targetSdk 35 在 Android 15+ 上本来就强制，这里显式打开让低版本行为一致。
+        // 两个 style 都显式给透明 scrim：默认的导航栏 scrim 会在 API 26–28 上画出一条色带。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
         val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
         setContent { PulsarApp(controllerFuture = controllerFuture, volumeKeys = volumeKeys) }
@@ -322,9 +343,15 @@ private fun PulsarApp(
         }
     }
     val darkTheme = isSystemInDarkTheme()
+    // 手动配色（工单 13）：预设色只是**没有封面时的兜底种子**，有封面色时仍以封面为准。
+    val themeContext = LocalContext.current
+    val themePreferences = remember { ThemePreferences(themeContext.pulsarPreferencesDataStore) }
+    val presetArgb by themePreferences.preset.collectAsStateWithLifecycle(initialValue = null)
+    val preset = presetArgb?.let(::Color)
     val coverTheme = rememberCoverGradient(
         coverRequest = currentTrack?.let(viewModel::trackCover),
-        darkTheme = darkTheme
+        darkTheme = darkTheme,
+        preset = preset
     )
     // 无封面 / 全灰封面 → 不传种子，沿用改造前的固定靛蓝色板（工单 11 的回退要求）。
     val seed = coverTheme.seed.color.takeIf { coverTheme.seed.source != ThemeSeedSource.Default }
@@ -343,7 +370,8 @@ private fun PulsarApp(
                 qqState = qqState,
                 qqViewModel = qqViewModel,
                 currentTrack = currentTrack,
-                coverTheme = coverTheme
+                coverTheme = coverTheme,
+                themePreferences = themePreferences
             )
         }
     }
@@ -553,9 +581,10 @@ private fun SkeletonBox(
     progress: State<Float> = rememberSkeletonShimmer(),
     shape: Shape? = null
 ) {
-    val darkTheme = isSystemInDarkTheme()
-    val shimmerColor = if (darkTheme) Color.White else Color(0xFF0F172A)
-    val shimmerPeakAlpha = if (darkTheme) 0.15f else 0.09f
+    // 扫光色跟随色板：浅色下底色接近白，用 onSurface 压暗；深色下用 onSurface 提亮。
+    // 不再写死白 / 0xFF0F172A——色板换成封面推导色后，写死的颜色不会跟着走。
+    val shimmerColor = MaterialTheme.colorScheme.onSurface
+    val shimmerPeakAlpha = if (isSystemInDarkTheme()) 0.15f else 0.09f
     Box(
         modifier
             .background(MaterialTheme.colorScheme.surfaceVariant, shape ?: RectangleShape)
@@ -581,10 +610,11 @@ private fun SkeletonBox(
     )
 }
 
-/** 专辑/播放列表卡片的 1dp 描边色：浅色主题用深色低透明细线（白描边在浅底上不可见），
- * 深色主题用白色低透明细线——两个主题下都是「比表面深/浅一点」的层次。 */
+/** 专辑/播放列表卡片的 1dp 描边色：取色板 onSurface 的低透明度——
+ * 浅色下是比表面深一点的细线，深色下是比表面浅一点的细线，跟着封面换色走。 */
 @Composable
-private fun cardBorderColor(): Color = if (isSystemInDarkTheme()) Color(0x1AFFFFFF) else Color(0x14888888)
+private fun cardBorderColor(): Color =
+    MaterialTheme.colorScheme.onSurface.copy(alpha = if (isSystemInDarkTheme()) 0.10f else 0.08f)
 
 /** 曲目列表的灰色波浪骨架：与 [TrackRow] 同款排布（48dp 圆角封面 + 标题/作者两条灰条
  * + 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
@@ -637,7 +667,12 @@ private fun TrackListSkeleton(
 @Composable
 private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
     Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
+        // edge-to-edge 后登录页同样要躲开状态栏 / 导航栏（工单 14）。
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
             Text("连接 Jellyfin", style = MaterialTheme.typography.headlineSmall)
@@ -696,7 +731,8 @@ private fun MusicLibraryScreen(
     qqState: QQDownloadUiState = QQDownloadUiState(),
     qqViewModel: QQDownloadViewModel? = null,
     currentTrack: Track?,
-    coverTheme: CoverTheme
+    coverTheme: CoverTheme,
+    themePreferences: ThemePreferences
 ) {
     val controllerState = rememberMediaController(controllerFuture, volumeKeys)
     // 播放模式：顺序循环 → 单曲循环 → 随机播放，点按钮循环切换。
@@ -1121,6 +1157,8 @@ private fun MusicLibraryScreen(
                         viewModel = viewModel,
                         controllerState = controllerState,
                         onOpenCachedCopies = { section = LibrarySection.CachedCopies },
+                        themePreferences = themePreferences,
+                        seedSource = coverTheme.seed.source,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -1744,7 +1782,8 @@ private fun PlayingIndicatorOverlay(
     fun barHeight(progress: Float): Dp = (4 + progress * 10).dp
     Box(
         modifier
-            .background(Color.Black.copy(alpha = 0.35f)),
+            // 均衡器底衬：用色板 scrim（恒黑），不写死黑色。
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.35f)),
         contentAlignment = Alignment.Center
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1833,6 +1872,8 @@ private fun AddToQueueMenu(
                     border = BorderStroke(
                         0.5.dp,
                         // 高光描边：浅色主题 0.6 营造玻璃质感；深色主题降到 0.25，避免过亮刺眼。
+                        // 保留白色（不换 onSurface）：这是**菜单玻璃的高光**，不是文字色，
+                        // 跟着封面换色会变成一层彩色描边，反而不像玻璃。
                         Color.White.copy(alpha = if (isSystemInDarkTheme()) 0.25f else 0.6f)
                     )
                 ) {
@@ -2970,6 +3011,8 @@ private fun SettingsContent(
     viewModel: JellyfinViewModel,
     controllerState: ControllerState,
     onOpenCachedCopies: () -> Unit,
+    themePreferences: ThemePreferences,
+    seedSource: ThemeSeedSource,
     modifier: Modifier = Modifier
 ) {
     val controller = controllerState.controller
@@ -2998,6 +3041,9 @@ private fun SettingsContent(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.padding(top = Dimens.SpaceSmall, bottom = Dimens.SpaceSmall)
         )
+        // 外观：手动兜底配色。永远显示（设置项不该忽隐忽现），有封面色时说明它只是兜底。
+        SettingsSectionHeader("外观")
+        AppearanceSection(themePreferences = themePreferences, seedSource = seedSource)
         // 播放相关开关收进一张卡：与 QQ 下载页的凭证/服务/密钥卡同一套卡片语言。
         SettingsSectionHeader("播放")
         SurfaceCard {
@@ -3148,6 +3194,90 @@ private fun SettingsContent(
         SurfaceCard {
             MediaCacheSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
         }
+    }
+}
+
+/** 设置页的「外观」区块（工单 13）：16 个预设色块 + 当前生效来源说明。
+ * 色块选中立刻写 DataStore，PulsarTheme 重新推导，不用重启。 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AppearanceSection(themePreferences: ThemePreferences, seedSource: ThemeSeedSource) {
+    val current by themePreferences.preset.collectAsStateWithLifecycle(initialValue = null)
+    val scope = rememberCoroutineScope()
+    SurfaceCard {
+        Text("配色", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "仅在没有封面时生效；播放有封面的歌时以封面颜色为准",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        // FlowRow 而不是固定 8 列：360dp 屏上 8 个 36dp 色块 + 间距会超出卡片宽度，
+        // 换行交给布局自己算，窄屏自然折成 7+7+2。
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
+            maxItemsInEachRow = 8
+        ) {
+            ThemePresets.forEach { preset ->
+                val selected = current == preset.color.toArgb()
+                Box(
+                    modifier = Modifier
+                        .size(Dimens.ThemeSwatch)
+                        .clip(CircleShape)
+                        .background(preset.color)
+                        .border(
+                            BorderStroke(
+                                // 选中项用主题主色描边：灰/黄这类浅色块也有明显指示。
+                                width = if (selected) Dimens.ThemeSwatchBorderSelected
+                                else Dimens.ThemeSwatchBorder,
+                                color = if (selected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            CircleShape
+                        )
+                        .clickable(
+                            // 色块本身没有文字：把预设名交给读屏。
+                            onClickLabel = preset.label
+                        ) {
+                            // 再点一次已选颜色 = 取消，回到「默认」。
+                            scope.launch {
+                                runCatching {
+                                    themePreferences.setPreset(
+                                        if (selected) null else preset.color.toArgb()
+                                    )
+                                }.onFailure { error ->
+                                    if (error is CancellationException) throw error
+                                    Log.w("MainActivity", "保存配色预设失败", error)
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (selected) {
+                        Icon(
+                            Icons.Filled.Check,
+                            contentDescription = null,
+                            // 勾必须压在任意预设色上：黑白按 WCAG 相对亮度的等对比点
+                            // （0.179）二选一，不是按 0.5 直觉分界——橙/绿/青在 0.5 以下
+                            // 但白勾仍然只有 2.x:1。
+                            tint = if (preset.color.luminance() > 0.179f) Color.Black else Color.White,
+                            modifier = Modifier.size(Dimens.ThemeSwatchCheck)
+                        )
+                    }
+                }
+            }
+        }
+        Text(
+            "当前生效：" + when {
+                seedSource == ThemeSeedSource.CoverVibrant ||
+                    seedSource == ThemeSeedSource.CoverDominant -> "封面"
+                seedSource == ThemeSeedSource.UserPreset -> "手动"
+                else -> "默认"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -3928,11 +4058,17 @@ internal fun AlbumCover(
 ) {
     val shape = RoundedCornerShape(cornerRadius)
     val placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant)
+    // 阴影用色板 scrim（恒黑）加透明度，不写死 0x1A000000 / 0x26000000。
+    val shadowColor = MaterialTheme.colorScheme.scrim
     if (request == null) {
         Box(
             modifier
                 .clip(shape)
-                .shadow(2.dp, shape, ambientColor = Color(0x1A000000), spotColor = Color(0x1A000000))
+                .shadow(
+                    2.dp, shape,
+                    ambientColor = shadowColor.copy(alpha = 0.10f),
+                    spotColor = shadowColor.copy(alpha = 0.10f)
+                )
                 .background(MaterialTheme.colorScheme.surfaceVariant)
         )
         return
@@ -3942,7 +4078,13 @@ internal fun AlbumCover(
         .addHeader("Authorization", request.headers["Authorization"].orEmpty())
         .crossfade(true)
         .build()
-    Box(modifier.clip(shape).shadow(3.dp, shape, ambientColor = Color(0x26000000), spotColor = Color(0x26000000))) {
+    Box(
+        modifier.clip(shape).shadow(
+            3.dp, shape,
+            ambientColor = shadowColor.copy(alpha = 0.15f),
+            spotColor = shadowColor.copy(alpha = 0.15f)
+        )
+    ) {
         AsyncImage(
             model = model,
             contentDescription = contentDescription,
@@ -3951,9 +4093,11 @@ internal fun AlbumCover(
             error = placeholder,
             modifier = Modifier.fillMaxSize()
         )
-        // 底部微渐变：营造封面嵌入感，提升视觉层次。
-        // 深色主题下背景更暗，同强度黑色几乎不可见，加强到约 20% 才有层次。
-        val scrimColor = if (isSystemInDarkTheme()) Color(0x33000000) else Color(0x08000000)
+        // 底部微渐变：营造封面嵌入感，提升视觉层次。用色板的 scrim（恒黑）而不是
+        // onSurface——onSurface 在深色模式下是浅色，压在封面上会变成一道白雾。
+        val scrimColor = MaterialTheme.colorScheme.scrim.copy(
+            alpha = if (isSystemInDarkTheme()) 0.20f else 0.03f
+        )
         Box(
             Modifier
                 .fillMaxWidth()

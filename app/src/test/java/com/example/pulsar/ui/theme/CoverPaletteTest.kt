@@ -35,6 +35,29 @@ class CoverPaletteTest {
     }
 
     @Test
+    fun `无封面但有预设色时按预设色推导兜底渐变`() {
+        val preset = Color(0xFF16A34A)
+        val g = presetGradient(preset, darkTheme = false)
+        // 主色相必须仍是预设色的绿（与默认靛蓝兜底明显不同）。
+        val hue = hslOf(g.accent.toArgb())[0]
+        assertTrue("hue=$hue", hue in 100f..150f)
+        // 与「完全没预设」的默认兜底不同，说明预设确实生效了。
+        assertTrue(g.top != defaultCoverGradient(false).top)
+    }
+
+    @Test
+    fun `灰色预设色也当兜底用（不被饱和度筛选吃掉）`() {
+        val g = presetGradient(Color(0xFF808080), darkTheme = false)
+        assertTrue(g.top != defaultCoverGradient(false).top)
+    }
+
+    @Test
+    fun `没有预设色时兜底渐变与默认一致`() {
+        assertEquals(defaultCoverGradient(false), presetGradient(null, darkTheme = false))
+        assertEquals(defaultCoverGradient(true), presetGradient(null, darkTheme = true))
+    }
+
+    @Test
     fun `空色板回退默认渐变`() {
         val g = coverGradient(swatches = emptyList(), darkTheme = false)
         assertEquals(Color(0xFFE0E7FF), g.top)

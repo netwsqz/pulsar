@@ -1,9 +1,14 @@
 package com.example.pulsar.ui.theme
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 
 /**
@@ -84,13 +89,62 @@ private val DarkColorScheme = darkColorScheme(
 @Composable
 fun PulsarTheme(
     darkTheme: Boolean = false, // 默认浅色模式
+    seed: Color? = null, // 封面推导种子；null = 旧的固定靛蓝色板
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+    val target = when {
+        seed != null -> remember(seed, darkTheme) { deriveColorScheme(seed, darkTheme) }
+        darkTheme -> DarkColorScheme
+        else -> LightColorScheme
+    }
 
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = animatedColorScheme(target),
         typography = PulsarTypography,
         content = content
+    )
+}
+
+/** 主题切换的过渡时长：与主界面背景渐变（`MainActivity` 的 800ms）同步。 */
+private const val THEME_TRANSITION_MS = 800
+
+/**
+ * 切歌换色时只动画实际用到的角色，800ms 平滑过渡；其余角色（container 系列、
+ * inverse 系列等）直接瞬切——界面没有在动画中途观察它们的需求。
+ * `animateColorAsState` 自带「从当前值出发」的行为，连续切歌不会跳回起点。
+ */
+@Composable
+private fun animatedColorScheme(target: ColorScheme): ColorScheme {
+    val spec = tween<Color>(THEME_TRANSITION_MS)
+    val primary by animateColorAsState(target.primary, spec, label = "themePrimary")
+    val onPrimary by animateColorAsState(target.onPrimary, spec, label = "themeOnPrimary")
+    val primaryContainer by animateColorAsState(target.primaryContainer, spec, label = "themePrimaryContainer")
+    val secondaryContainer by animateColorAsState(target.secondaryContainer, spec, label = "themeSecondaryContainer")
+    val tertiary by animateColorAsState(target.tertiary, spec, label = "themeTertiary")
+    val background by animateColorAsState(target.background, spec, label = "themeBackground")
+    val onBackground by animateColorAsState(target.onBackground, spec, label = "themeOnBackground")
+    val surface by animateColorAsState(target.surface, spec, label = "themeSurface")
+    val onSurface by animateColorAsState(target.onSurface, spec, label = "themeOnSurface")
+    val surfaceVariant by animateColorAsState(target.surfaceVariant, spec, label = "themeSurfaceVariant")
+    val onSurfaceVariant by animateColorAsState(target.onSurfaceVariant, spec, label = "themeOnSurfaceVariant")
+    val outline by animateColorAsState(target.outline, spec, label = "themeOutline")
+    val outlineVariant by animateColorAsState(target.outlineVariant, spec, label = "themeOutlineVariant")
+    val error by animateColorAsState(target.error, spec, label = "themeError")
+
+    return target.copy(
+        primary = primary,
+        onPrimary = onPrimary,
+        primaryContainer = primaryContainer,
+        secondaryContainer = secondaryContainer,
+        tertiary = tertiary,
+        background = background,
+        onBackground = onBackground,
+        surface = surface,
+        onSurface = onSurface,
+        surfaceVariant = surfaceVariant,
+        onSurfaceVariant = onSurfaceVariant,
+        outline = outline,
+        outlineVariant = outlineVariant,
+        error = error,
     )
 }

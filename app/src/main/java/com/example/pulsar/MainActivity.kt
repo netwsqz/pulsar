@@ -12,8 +12,10 @@ import com.example.pulsar.ui.components.glassBarSliderColors
 import com.example.pulsar.ui.components.liquidGlass
 import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
+import com.example.pulsar.ui.theme.CoverTheme
 import com.example.pulsar.ui.theme.Dimens
 import com.example.pulsar.ui.theme.PulsarTheme
+import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
 import android.os.Bundle
@@ -310,13 +312,22 @@ private fun PulsarApp(
     )
     val state by viewModel.state.collectAsStateWithLifecycle()
     val qqState by qqViewModel.state.collectAsStateWithLifecycle()
+    // 当前播放曲目提到主题之上取：色板要跟着它变，登录页和主页面都得在同一套主题里。
+    val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     // QQ 下载服务与 Jellyfin 同机、端口固定 8900：登录成功后自动填地址，用户不用管。
     LaunchedEffect(state.tracks != null, state.serverUrl) {
         if (state.tracks != null && state.serverUrl.isNotBlank()) {
             qqViewModel.autoFillServiceUrl(state.serverUrl)
         }
     }
-    PulsarTheme(darkTheme = isSystemInDarkTheme()) {
+    val darkTheme = isSystemInDarkTheme()
+    val coverTheme = rememberCoverGradient(
+        coverRequest = currentTrack?.let(viewModel::trackCover),
+        darkTheme = darkTheme
+    )
+    // 无封面 / 全灰封面 → 不传种子，沿用改造前的固定靛蓝色板（工单 11 的回退要求）。
+    val seed = coverTheme.seed.color.takeIf { coverTheme.seed.source != ThemeSeedSource.Default }
+    PulsarTheme(darkTheme = darkTheme, seed = seed) {
         // 启动直接进主页面：恢复会话期间曲库页用灰色波浪骨架占位（页面框架、玻璃岛、
         // 迷你播放条都立刻可用），不另起一屏加载页。只有"确实没有可用会话"——本地没存
         // 过、或恢复失败——才落到登录表单。
@@ -329,7 +340,9 @@ private fun PulsarApp(
                 controllerFuture = controllerFuture,
                 volumeKeys = volumeKeys,
                 qqState = qqState,
-                qqViewModel = qqViewModel
+                qqViewModel = qqViewModel,
+                currentTrack = currentTrack,
+                coverTheme = coverTheme
             )
         }
     }
@@ -680,7 +693,9 @@ private fun MusicLibraryScreen(
     controllerFuture: ListenableFuture<MediaController>?,
     volumeKeys: ForegroundVolumeKeys,
     qqState: QQDownloadUiState = QQDownloadUiState(),
-    qqViewModel: QQDownloadViewModel? = null
+    qqViewModel: QQDownloadViewModel? = null,
+    currentTrack: Track?,
+    coverTheme: CoverTheme
 ) {
     val controllerState = rememberMediaController(controllerFuture, volumeKeys)
     // 播放模式：顺序循环 → 单曲循环 → 随机播放，点按钮循环切换。
@@ -736,8 +751,6 @@ private fun MusicLibraryScreen(
         }
     }
     val tracks = state.tracks.orEmpty()
-    // 当前播放曲目：放 ViewModel，Activity 从后台回来被重建时信息不丢。
-    val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     // 音量浮窗的显示窗口：独占模式下音量键被 App 截获、系统音量条不会弹，靠它给唯一的视觉反馈。
@@ -904,30 +917,21 @@ private fun MusicLibraryScreen(
     if (showNowPlaying) {
         BackHandler { showNowPlaying = false }
     }
-    // 背景渐变：跟随当前播放封面主色的柔和渐变（无封面/黑白封面回主题默认色），切歌约 0.8s 平滑过渡。
-    // 动画期间 Brush 逐帧更新，玻璃条的模糊层（rememberLayerBackdrop 按其捕获的 brush 失效）同步重录。
-    val coverGradient = rememberCoverGradient(
-        coverRequest = currentTrack?.let(viewModel::trackCover),
-        darkTheme = isSystemInDarkTheme()
-    )
-    val gradientSpec = tween<Color>(800)
-    val coverTop by animateColorAsState(coverGradient.top, gradientSpec, label = "coverGradientTop")
-    val coverMiddle by animateColorAsState(coverGradient.middle, gradientSpec, label = "coverGradientMiddle")
-    val coverBottom by animateColorAsState(coverGradient.bottom, gradientSpec, label = "coverGradientBottom")
-    // 强调色（进度条填充）跟着一起过渡，切歌时不会「背景渐变过去了、进度条还是旧色」。
-    val coverAccentAnimated by animateColorAsState(coverGradient.accent, gradientSpec, label = "coverGradientAccent")
+    // 主界面背景：色板 surface 三档渐变（带封面色调的中性底），不再是高饱和封面渐变。
+    // 颜色由 PulsarTheme 统一做 800ms 过渡，这里直接读动画后的色板。
+    val scheme = MaterialTheme.colorScheme
     val backgroundBrush = Brush.verticalGradient(
-        0f to coverTop,
-        0.3f to coverMiddle,
-        1f to coverBottom
+        0f to scheme.surface,
+        0.3f to scheme.surfaceVariant,
+        1f to scheme.background
     )
-    // 全屏播放页同款背景：传动画后的三色 + 强调色，切歌时全屏背景与进度条一起 800ms 过渡。
-    val animatedCoverGradient = CoverGradient(
-        top = coverTop,
-        middle = coverMiddle,
-        bottom = coverBottom,
-        accent = coverAccentAnimated
-    )
+    // 全屏播放页背景保持原有的封面三色渐变（工单 12 再处理），三色 + 强调色一起 800ms 过渡。
+    val gradientSpec = tween<Color>(800)
+    val coverTop by animateColorAsState(coverTheme.gradient.top, gradientSpec, label = "coverGradientTop")
+    val coverMiddle by animateColorAsState(coverTheme.gradient.middle, gradientSpec, label = "coverGradientMiddle")
+    val coverBottom by animateColorAsState(coverTheme.gradient.bottom, gradientSpec, label = "coverGradientBottom")
+    val coverAccentAnimated by animateColorAsState(coverTheme.gradient.accent, gradientSpec, label = "coverGradientAccent")
+    val animatedCoverGradient = CoverGradient(coverTop, coverMiddle, coverBottom, coverAccentAnimated)
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
     // SharedTransitionLayout 包住整个悬浮布局：迷你条小封面 ↔ 全屏页大封面共用
     // 同一 key 做 morph（打开/收起全屏页时封面跨布局连续飞行动画）。

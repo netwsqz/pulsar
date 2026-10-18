@@ -15,6 +15,7 @@ import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.CoverTheme
 import com.example.pulsar.ui.theme.Dimens
 import com.example.pulsar.ui.theme.PulsarTheme
+import com.example.pulsar.ui.theme.THEME_TRANSITION_MS
 import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
@@ -926,7 +927,7 @@ private fun MusicLibraryScreen(
         1f to scheme.background
     )
     // 全屏播放页背景保持原有的封面三色渐变（工单 12 再处理），三色 + 强调色一起 800ms 过渡。
-    val gradientSpec = tween<Color>(800)
+    val gradientSpec = tween<Color>(THEME_TRANSITION_MS)
     val coverTop by animateColorAsState(coverTheme.gradient.top, gradientSpec, label = "coverGradientTop")
     val coverMiddle by animateColorAsState(coverTheme.gradient.middle, gradientSpec, label = "coverGradientMiddle")
     val coverBottom by animateColorAsState(coverTheme.gradient.bottom, gradientSpec, label = "coverGradientBottom")

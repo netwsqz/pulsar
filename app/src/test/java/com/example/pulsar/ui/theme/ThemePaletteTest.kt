@@ -92,6 +92,39 @@ class ThemePaletteTest {
     // ===== surface 系列明度单调 =====
 
     @Test
+    fun `surfaceContainer 系列按 Elevation 明度单调`() {
+        val light = deriveColorScheme(green, darkTheme = false)
+        val lightLevels = listOf(
+            light.surfaceContainerLowest,
+            light.surfaceContainerLow,
+            light.surfaceContainer,
+            light.surfaceContainerHigh,
+            light.surfaceContainerHighest
+        ).map { it.toThemeHsl().l }
+        assertTrue("light=$lightLevels", lightLevels.zipWithNext().all { (a, b) -> a >= b })
+
+        val dark = deriveColorScheme(green, darkTheme = true)
+        val darkLevels = listOf(
+            dark.surfaceContainerLowest,
+            dark.surfaceContainerLow,
+            dark.surfaceContainer,
+            dark.surfaceContainerHigh,
+            dark.surfaceContainerHighest
+        ).map { it.toThemeHsl().l }
+        assertTrue("dark=$darkLevels", darkLevels.zipWithNext().all { (a, b) -> a <= b })
+    }
+
+    @Test
+    fun `inverseSurface 与 onSurface 方向相反`() {
+        listOf(false, true).forEach { dark ->
+            val scheme = deriveColorScheme(blue, dark)
+            val inverse = scheme.inverseSurface.toThemeHsl().l
+            val normal = scheme.surface.toThemeHsl().l
+            assertTrue("dark=$dark inverse=$inverse surface=$normal", (inverse - normal).let { if (dark) it > 0.5f else it < -0.5f })
+        }
+    }
+
+    @Test
     fun `surface 系列明度不乱序`() {
         val light = deriveColorScheme(green, darkTheme = false)
         assertTrue(
@@ -194,6 +227,15 @@ private fun ColorScheme.roles(): List<Pair<String, Color>> = listOf(
     "onSurfaceVariant" to onSurfaceVariant,
     "outline" to outline,
     "outlineVariant" to outlineVariant,
+    // M3 组件内部用的容器角色：弹窗/菜单/Snackbar/开关，不推导会落回默认紫色。
+    "surfaceContainerLowest" to surfaceContainerLowest,
+    "surfaceContainerLow" to surfaceContainerLow,
+    "surfaceContainer" to surfaceContainer,
+    "surfaceContainerHigh" to surfaceContainerHigh,
+    "surfaceContainerHighest" to surfaceContainerHighest,
+    "inverseSurface" to inverseSurface,
+    "inverseOnSurface" to inverseOnSurface,
+    "inversePrimary" to inversePrimary,
     "error" to error,
     "onError" to onError,
 )

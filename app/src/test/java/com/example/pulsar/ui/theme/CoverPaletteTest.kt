@@ -194,6 +194,20 @@ class CoverPaletteTest {
     }
 
     @Test
+    fun `显式传入的 dominant 优先于人口规则（同一封面只有一个主色）`() {
+        // ADR-0005：种子取 vibrant，渐变与强调色必须跟同一个色，否则切页面会跳色。
+        val swatches = listOf(
+            CoverSwatch(0xFFDC2626.toInt(), 100), // 人口最高的红
+            CoverSwatch(0xFF16A34A.toInt(), 5)    // 人口很小的绿（vibrant）
+        )
+        val vibrant = swatches[1]
+        val g = coverGradient(swatches, darkTheme = false, dominant = vibrant)
+        val hue = g.top.toHsl().h
+        assertTrue("hue=$hue", hue in 100f..160f)
+        assertEquals(coverAccent(listOf(vibrant)), g.accent)
+    }
+
+    @Test
     fun `渐变结构里带上强调色`() {
         val swatches = listOf(CoverSwatch(0xFFDC2626.toInt(), 100))
         assertEquals(coverAccent(swatches), coverGradient(swatches, darkTheme = true).accent)

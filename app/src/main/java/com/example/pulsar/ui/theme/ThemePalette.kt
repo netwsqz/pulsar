@@ -90,6 +90,16 @@ fun deriveColorScheme(seed: Color, darkTheme: Boolean): ColorScheme {
             surfaceVariant = surfaceVariant,
             onSurfaceVariant = onColor(h, neutralSat(0.20f), surfaceVariant),
 
+            // M3 组件内部会用到这些角色（弹窗/菜单/Snackbar/开关），不推导就会落回默认紫色。
+            surfaceContainerLowest = hslColor(h, neutralSat(0.20f), 0.05f),
+            surfaceContainerLow = hslColor(h, neutralSat(0.20f), 0.10f),
+            surfaceContainer = hslColor(h, neutralSat(0.20f), 0.12f),
+            surfaceContainerHigh = hslColor(h, neutralSat(0.20f), 0.14f),
+            surfaceContainerHighest = hslColor(h, neutralSat(0.20f), 0.17f),
+            inverseSurface = hslColor(h, neutralSat(0.20f), 0.92f),
+            inverseOnSurface = hslColor(h, neutralSat(0.20f), 0.12f),
+            inversePrimary = hslColor(h, primarySat, 0.45f),
+
             outline = hslColor(h, neutralSat(0.20f), 0.52f),
             outlineVariant = hslColor(h, neutralSat(0.20f), 0.28f),
 
@@ -131,6 +141,16 @@ fun deriveColorScheme(seed: Color, darkTheme: Boolean): ColorScheme {
             onSurface = onColor(h, neutralSat(0.20f), surface),
             surfaceVariant = surfaceVariant,
             onSurfaceVariant = onColor(h, neutralSat(0.20f), surfaceVariant),
+
+            // M3 组件内部会用到这些角色（弹窗/菜单/Snackbar/开关），不推导就会落回默认紫色。
+            surfaceContainerLowest = hslColor(h, neutralSat(0.20f), 1.00f),
+            surfaceContainerLow = hslColor(h, neutralSat(0.20f), 0.97f),
+            surfaceContainer = hslColor(h, neutralSat(0.20f), 0.95f),
+            surfaceContainerHigh = hslColor(h, neutralSat(0.20f), 0.92f),
+            surfaceContainerHighest = hslColor(h, neutralSat(0.20f), 0.90f),
+            inverseSurface = hslColor(h, neutralSat(0.20f), 0.16f),
+            inverseOnSurface = hslColor(h, neutralSat(0.20f), 0.96f),
+            inversePrimary = hslColor(h, primarySat, 0.75f),
 
             outline = hslColor(h, neutralSat(0.20f), 0.60f),
             outlineVariant = hslColor(h, neutralSat(0.20f), 0.80f),

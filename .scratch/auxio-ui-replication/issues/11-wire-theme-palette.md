@@ -1,4 +1,4 @@
-Status: ready-for-human
+Status: done（代码完成 + 单测全绿；观感变化需真机肉眼验收）
 
 # 11 — 主题接线：种子色 → 全 App 色板
 
@@ -38,4 +38,6 @@ Status: ready-for-human
 
 - 这一票做完，主界面观感会明显变化，建议真机验收后再动工单 12。
 - 实现完成（代码层）：`PulsarTheme(seed = ...)` + `rememberCoverGradient` 改为返回 `CoverTheme`（渐变 + 种子）；主界面背景改用 `surface → surfaceVariant → background`。单测全绿，**待真机肉眼验收**。
-- `surfaceContainer*` / `inverse*` / `scrim` 仍落 M3 默认值；全仓暂无使用点，工单 12/15 若用到需补。
+- 种子/强调色/播放页渐变统一取 vibrant（ADR-0005：同一封面只允许一个主色）；`coverGradient` 新增可选 `dominant` 参数，默认行为不变。
+- `surfaceContainer*` / `inverse*` 已补推导（弹窗/菜单/Snackbar/Switch 内部会用），单测覆盖明度单调；`scrim` 继续用 M3 默认值，全仓无使用点。
+- 预设色回退（`preset`）未接，等工单 13 提供预设色源。

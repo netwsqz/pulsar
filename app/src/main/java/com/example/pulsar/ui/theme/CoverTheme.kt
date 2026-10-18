@@ -23,7 +23,8 @@ data class CoverTheme(val gradient: CoverGradient, val seed: ThemeSeed)
 /**
  * 跟随当前封面取色：封面请求变化时用 Coil 加载 96px 小图（与界面封面共用
  * ImageLoader 缓存，不重复下载），androidx.palette 提取色板后同时产出
- * 主题种子色（vibrant → dominant → 预设色 → 品牌靛蓝）和三色渐变。
+ * 主题种子色（vibrant → dominant → 品牌靛蓝；用户预设色等工单 13 再接）
+ * 和三色渐变。渐变与强调色都从**同一个种子**推导，保证一张封面只有一个主色。
  * 取色期间沿用上一次的结果（切歌直接旧色过渡到新色，不闪回默认色）；
  * 失败 / 无封面回退默认色板。darkTheme 只影响柔化方向，切换深浅模式不会重新取色。
  */
@@ -45,7 +46,13 @@ fun rememberCoverGradient(
     }
     return CoverTheme(
         // 回退渐变用固定默认色，不读 MaterialTheme——本函数在主题之外调用，读不到动态色板。
-        gradient = coverGradient(swatches?.all, darkTheme, defaultCoverGradient(darkTheme)),
+        gradient = coverGradient(
+            swatches = swatches?.all,
+            darkTheme = darkTheme,
+            fallback = defaultCoverGradient(darkTheme),
+            // ADR-0005：种子、强调色、渐变必须取同一个主色，否则切页面会跳色。
+            dominant = swatches?.vibrant
+        ),
         seed = selectThemeSeed(swatches?.vibrant, swatches?.all, preset = null)
     )
 }

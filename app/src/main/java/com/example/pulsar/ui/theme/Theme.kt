@@ -105,8 +105,8 @@ fun PulsarTheme(
     )
 }
 
-/** 主题切换的过渡时长：与主界面背景渐变（`MainActivity` 的 800ms）同步。 */
-private const val THEME_TRANSITION_MS = 800
+/** 主题切换的过渡时长：与主界面背景渐变同步（`MainActivity` 也用这个值）。 */
+internal const val THEME_TRANSITION_MS = 800
 
 /**
  * 切歌换色时只动画实际用到的角色，800ms 平滑过渡；其余角色（container 系列、
@@ -120,6 +120,7 @@ private fun animatedColorScheme(target: ColorScheme): ColorScheme {
     val onPrimary by animateColorAsState(target.onPrimary, spec, label = "themeOnPrimary")
     val primaryContainer by animateColorAsState(target.primaryContainer, spec, label = "themePrimaryContainer")
     val secondaryContainer by animateColorAsState(target.secondaryContainer, spec, label = "themeSecondaryContainer")
+    val onSecondaryContainer by animateColorAsState(target.onSecondaryContainer, spec, label = "themeOnSecondaryContainer")
     val tertiary by animateColorAsState(target.tertiary, spec, label = "themeTertiary")
     val background by animateColorAsState(target.background, spec, label = "themeBackground")
     val onBackground by animateColorAsState(target.onBackground, spec, label = "themeOnBackground")
@@ -136,6 +137,7 @@ private fun animatedColorScheme(target: ColorScheme): ColorScheme {
         onPrimary = onPrimary,
         primaryContainer = primaryContainer,
         secondaryContainer = secondaryContainer,
+        onSecondaryContainer = onSecondaryContainer,
         tertiary = tertiary,
         background = background,
         onBackground = onBackground,

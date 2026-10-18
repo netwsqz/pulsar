@@ -62,18 +62,21 @@ fun selectCoverSwatch(swatches: List<CoverSwatch>): CoverSwatch? =
 /**
  * 封面色板 → 背景渐变：保留封面主色的色相，把亮度/饱和度压进液态玻璃风格的柔和区间——
  * 浅色模式整体提亮（顶段浅 tint，向下渐白），深色模式整体压暗（顶段暗色，向下渐黑）。
+ *
+ * [dominant] 允许调用方指定主色（[rememberCoverGradient] 传 vibrant），保证同一张封面
+ * 的种子、强调色、渐变是同一个色相；不传时按 [selectCoverSwatch] 的人口规则现选。
  */
 fun coverGradient(
     swatches: List<CoverSwatch>?,
     darkTheme: Boolean,
-    fallback: CoverGradient = defaultCoverGradient(darkTheme)
+    fallback: CoverGradient = defaultCoverGradient(darkTheme),
+    dominant: CoverSwatch? = selectCoverSwatch(swatches.orEmpty())
 ): CoverGradient {
-    val dominant = swatches?.takeIf { it.isNotEmpty() }?.let(::selectCoverSwatch)
-        ?: return fallback
-    val hsl = hslOf(dominant.rgb)
+    val swatch = dominant ?: return fallback
+    val hsl = hslOf(swatch.rgb)
     val h = hsl[0]
     val s = hsl[1]
-    val accent = accentOf(dominant)
+    val accent = accentOf(swatch)
     return if (darkTheme) {
         CoverGradient(
             top = hslColor(h, s * 0.80f, 0.40f),

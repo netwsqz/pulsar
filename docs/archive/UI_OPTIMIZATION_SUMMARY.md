@@ -93,7 +93,7 @@
 
 ### 必需（阻塞构建）
 - ⚠️ **下载字体文件** - 当前缺少字体导致主题无法完全生效
-  - 参考：`E:\nsmic\FONT_DOWNLOAD_GUIDE.md`
+  - 参考：`docs/archive/FONT_DOWNLOAD_GUIDE.md`
   - 需要：`righteous.ttf` + Poppins 系列 5 个字体文件
 
 ### 可选（用户体验提升）
@@ -107,7 +107,7 @@
 ## 🚀 安装验证步骤
 
 ```bash
-# 1. 下载字体文件（参考 FONT_DOWNLOAD_GUIDE.md）
+# 1. 下载字体文件（参考 `FONT_DOWNLOAD_GUIDE.md`（同目录））
 
 # 2. 重新构建（字体下载后必需）
 export ANDROID_HOME="$LOCALAPPDATA/Android/Sdk"
@@ -180,8 +180,8 @@ LazyVerticalGrid(columns = GridCells.Fixed(2)) {
 
 ## 📚 相关文档
 
-- `DESIGN_SYSTEM.md` - 完整设计系统文档
-- `FONT_DOWNLOAD_GUIDE.md` - 字体下载指南
+- `DESIGN_SYSTEM.md` - 完整设计系统文档（同目录）
+- `FONT_DOWNLOAD_GUIDE.md` - 字体下载指南（同目录）
 - `ui/theme/Color.kt` - 配色方案
 - `ui/theme/Type.kt` - 字体系统
 - `ui/theme/Theme.kt` - 主题配置

@@ -2,7 +2,7 @@
 
 > 状态：调研完成，进入实现阶段
 > 日期：2026-08-04
-> 关联：[CLAUDE.md](../CLAUDE.md)、[MVP_PLAN.md](../MVP_PLAN.md)
+> 关联：[CLAUDE.md](../CLAUDE.md)、[MVP_PLAN.md](../archive/MVP_PLAN.md)
 
 ## 一句话结论
 

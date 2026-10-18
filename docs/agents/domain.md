@@ -55,5 +55,5 @@
 ## 本仓库补充
 
 - **语言**：代码注释、`CLAUDE.md`、`docs/` 下的文档一律中文；与用户沟通也默认中文。
-- **已有的长文档别重复造**：`docs/superpowers/`（旧 skill 流程留下的 `plans/` `specs/` `handover/`）、`docs/usb-exclusive-research.md`、`docs/ui-improvement-suggestions.md`、`docs/usb-volume-key-interception.md`、根目录 `DESIGN_SYSTEM.md`。动手前先扫一眼有没有现成结论，避免重复调研。
+- **已有的长文档别重复造**：`docs/superpowers/`（旧 skill 流程留下的 `plans/` `specs/` `handover/`）、`docs/usb-exclusive-research.md`、`docs/archive/ui-improvement-suggestions.md`、`docs/usb-volume-key-interception.md`、`docs/archive/DESIGN_SYSTEM.md`。动手前先扫一眼有没有现成结论，避免重复调研。**`docs/archive/` 是已过时的阶段性文档，只作历史参考，不要当成当前事实。**
 - **`CLAUDE.md` 是本仓库事实上的架构地图**（数据层 / 播放 / USB 子系统 / UI 分层，以及一堆踩坑红线）。它比 `CONTEXT.md` 更全，优先读它。

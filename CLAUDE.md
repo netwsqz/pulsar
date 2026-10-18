@@ -37,7 +37,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 ## 架构总览
 
-单 `app` 模块，按层组织，但没有强制分层包；UI 全部集中在 `MainActivity.kt` 一个文件。
+单 `app` 模块，按层组织，但没有强制分层包。**页面级 Composable 仍集中在 `MainActivity.kt`（约 4400 行）**，播放页与 QQ 下载页是独立文件；主题/通用组件/领域模型已分到各自目录。
 
 ### 数据层 `data/jellyfin/`
 
@@ -73,6 +73,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
   拷贝方案里上游永远只读、下游没吃完就把上游 position 退回去重投，源数据不变 ⇒ 每个样本恰好乘一次。
 - `PlayerRebuildState.kt`：跟踪播放器重建状态（USB 模式切换时需要销毁/重建 ExoPlayer）。
 - `PlaybackDiagnostics.kt`：诊断单例，采样率/设备状态等供 UI 展示。
+- `PlaybackReporter.kt`：**把播放行为上报给 Jellyfin**（`POST /Sessions/Playing` + `/Stopped`），服务端的 `UserData` 才会记录 `PlayCount` / `LastPlayedDate`——发现页的「最近播放 / 最常播放」完全依赖它。三条铁律：①异步、绝不拖慢播放；②失败静默（未登录/断网只记日志，**不触发 `goOffline()`**）；③同一首歌只报一次开始、没报过开始的不报停止。上报串行（`Mutex`），保证「停上一首」排在「开始下一首」之前。**若发现历史是空的，先查这里有没有断。**
 - `UsbAudioOutput.kt`：USB 音频设备插拔监听与路由（插 DAC 强制 `setPreferredAudioDevice`，拔掉回系统默认）。
 - **USB 独占下的音量键**（`RemoteVolumePlayer.kt` + `ForegroundVolumeKeys.kt`，详见 `docs/usb-volume-key-interception.md`）：独占模式绕过 AudioFlinger，系统音量对输出无效，音量真源是 `UsbExclusivePreferences.volumePercent`。两条接管路径——
   - **标准路**：`RemoteVolumePlayer`（`ForwardingPlayer` 子类）让 Media3 自动注册 `VolumeProvider`，系统把音量键交给 App。给 AOSP 设备用；**MIUI 上整条失效**（ROM 保留了 `setPlaybackToRemote` 的 API 却删掉了音量键派发，App 侧绕不过去）。
@@ -96,16 +97,44 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 **USB 驱动约定**：libusb 等时泵跑在专用线程，不在 Main/IO dispatcher 上。格式协商失败时回退系统输出，不抛异常。暂停用静音门而非 stopStream，避免 EBUSY。
 
+### 离线与本地缓存
+
+两个**不同**的东西，别混（术语定义见 `CONTEXT.md`）：
+
+- **曲库快照 `LibrarySnapshot.kt`**：手机上的「曲库里有哪些歌」清单（JSON，`filesDir/library-snapshot.json`）。**只在线下兜底，不在线上抢活**——能连上 Jellyfin 时一律以服务器为准，请求失败才顶上。覆盖发现 / 全部音乐 / 专辑 + 离线搜索；**播放列表不在快照里**。
+- **音频缓存 `MediaCache.kt`**：播放时自动留下的原文件副本（`SimpleCache`，目录 `filesDir/media_cache`，**不是 `cacheDir`**——后者会被系统清掉）。上限 5 GB，超了自动淘汰最久没听的。**只有完整副本才算数**（`isCompleteCopy`：听到一半切走的按「没缓存」处理）。
+
+关键约定：
+
+- `JellyfinUiState.isOffline` 是全局离线态；`goOffline()` 由**任意**网络请求的 `Network` 错误触发（探活/标灰全 App 共用），不是某一节自己的事。
+- 离线时没完整副本的曲目**标灰不可播**（`cachedTrackIds` 为 `null` = 还不知道，别标灰）。离线搜索会置 `isOfflineSearch`，界面必须标明「离线搜索」。
+- `PulsarApplication.mediaCacheStore` 是**进程级单例**：`SimpleCache` 对同一目录只允许一个实例，且界面（查副本/报占用）与播放服务共用它。**服务销毁时不能释放它**。
+- 主动退出登录清空缓存；只是 token 过期（会话失效）不清。
+- **Media3 `SimpleCache` 三个坑**：①残条目调 `isCached(-1)` 会抛 `IllegalArgumentException`；②构造失败不会立刻崩溃而是延迟；③清空时必须跳过正在播放的 key。
+
 ### UI 层
 
-UI Composable 集中在 `MainActivity.kt` 一个文件（约 2500 行）；ViewModel/状态已拆成独立文件（`JellyfinViewModel.kt`、`JellyfinUiState.kt`、`JellyfinViewModelFactory.kt`、`QQDownloadViewModel.kt`、`QQDownloadScreen.kt`）。改动 UI 前先读相关文件。
+**页面级 Composable 集中在 `MainActivity.kt`（约 4400 行）**；`NowPlayingScreen.kt`（播放页）与 `QQDownloadScreen.kt` 是独立文件。**主题、设计 token、通用组件、领域模型已拆分**：
+
+- `ui/theme/Dimens.kt`：**全局设计 token 的唯一出处**（间距 4/8/12/16/20/24、触摸目标 48/56/64、圆角 16/20）。新 UI 一律取这里的常量，不写魔法 dp。数值量纲参考 Auxio，但**不是抄代码**（见 ADR-0004）。
+- `ui/components/LiquidGlass.kt`：**液态玻璃材质的唯一出处**（`liquidGlass` Modifier：模糊 + 透镜 + 高光）。全 App 的玻璃面都走它，别再各写各的模糊/透镜数字。
+- `ui/components/`：`LiquidGlassSlider`、`SurfaceCard`、`VolumeFeedback` / `VolumeFeedbackOverlay` 等可复用组件。
+- `ui/theme/CoverPalette.kt` + `CoverTheme.kt`：**按专辑封面取色**染主题（Pulsar 的特色，不是 Auxio 的做法）。取色失败回退默认渐变。
+- `domain/model/`：`Track` / `Album` / `Playlist` / `SearchResults`，与网络 DTO 解耦。
+
+**导航（工单 04，对齐 Auxio tab 语义）**：**不引入导航库**。`LibrarySection` sealed interface 作本地导航状态，`TopLevelSections`（`LibrarySection.kt`）定义顶层顺序与文案：
+
+> 发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表 / QQ 下载
+
+搜索、设置、已缓存、详情页（专辑 / 播放列表 / 艺术家组 / 流派组）**不在顶层**，从别处进入。`navIndex()` 决定左右切换方向，`isDetail()` 判断是否详情层。改导航顺序时**只改 `TopLevelSections`**，chip 和占位页标题都从它取。
 
 - **`JellyfinViewModel`**（AndroidViewModel）：单一 `StateFlow<JellyfinUiState>`，通过 `JellyfinViewModelFactory` 注入 `SessionRepository`、`JellyfinApiFactory`、`AuthorizationSink`。向 UI 暴露纯函数式的请求构造器：`streamUrl(track)`、`albumCover(album)`、`trackCover(track)`（未登录/无封面返回 null，UI 据此显示占位）。错误文案集中在 `friendlyError()`。
-- **导航**：**不引入导航库**。`LibrarySection` sealed interface（`Discover` / `Tracks` / `Albums` / `Playlists` / `Search` / `QQDownload` / `Settings` / `AlbumDetail(album)` / `PlaylistDetail`）作本地导航状态，`when` 分支切换内容。
 - **幂等加载模式**：`albumsJob` + `albumsGeneration` 防止重复请求、过期响应失效。`loadAlbums()` 已加载则不重发；库函数通过"字段非空"判断是否已加载，**因此切换账号时必须清空所有缓存字段**。
+- **发现页个人化聚合**：`recentlyPlayed` / `mostPlayed` / `recentlyAdded` 来自 Jellyfin 服务端（`SortBy=DatePlayed/PlayCount/DateCreated` + `Filters=IsPlayed`），**不来自本地存储**。三节独立降级：某节失败时字段保持 `null` 并记入 `discoverFailedSections`（界面不再为它显示骨架），其余节照常；三节全失败才给错误+重试。`null` 与空列表语义不同——**`null` = 没拉到（会重试），空列表 = 拉到了但服务端没数据**。
 - **搜索防抖**：`updateSearchQuery()` 内置 300ms debounce，空字符串立即清除结果不发请求。
 - **`AlbumCover`**：Coil `AsyncImage`，`ImageRequest.Builder` 手动 `addHeader("Authorization", ...)`（从 `JellyfinRequest.headers` 取），`ColorPainter` 做 placeholder/error。
 - **`PlayerControls`** / `rememberMediaController`：播放控制与控制器状态轮询（500ms）。
+- **多选**：`JellyfinUiState.multiSelectIds`（空 = 非多选）。非空时 `TrackRow` 点击 = 勾选、顶部出现批量操作条。多选模式下隐藏行尾「更多」按钮。
 
 ### QQ 音乐下载集成 `server/` + `data/qqdownload/`
 
@@ -114,7 +143,7 @@ UI Composable 集中在 `MainActivity.kt` 一个文件（约 2500 行）；ViewM
 - **PC 侧 `E:\nsmic\server\qqmusic_service.py`**（FastAPI，端口 8900，`start.bat` 手动启动）：包装 `E:\music` 的 `qmc2`/`qqmusic_downloader` 现成函数（**只调用不修改**）。单工作线程 + `queue.Queue` 串行下载，每首 sleep 1s 防风控；`process_song` 的 print 噪音用 `redirect_stdout` 捕获存 job，最终路径从 `-> ...` 行解析；连续 3 次「拿不到下载链接」→ `credential_expired`，等 App 端触发 `/api/credential/retry` 重提（需 QQ 音乐客户端运行中）。**落盘 `E:\file\Te_Music`**（Jellyfin 音乐库目录，实时监控开启，落盘即入库）。
 - **Android `data/qqdownload/`**：`QQDownloadApi`（接口）/ `QQDownloadDataSource`（Ktor 实现，错误映射 `QQDownloadError`：`ServiceUnreachable`/`CredentialExpired`/`Http`/`InvalidResponse`）；`QQDownloadSettings`（接口）/ `QQDownloadPreferences`（DataStore：服务地址 + 默认音质）。
 - **`QQDownloadViewModel`**：与 `JellyfinViewModel` 完全独立（服务地址单独持久化，不参与 Jellyfin 会话生命周期）。搜索 300ms 防抖；任务轮询（有活跃任务时 2s 间隔，出错即停）；`pollGeneration`/`searchGeneration` 防过期协程。
-- **UI `QQDownloadScreen.kt`**（独立文件）：导航 `LibrarySection.QQDownload`，顶部玻璃岛有「QQ 下载」chip。未连接显示服务地址设置卡；凭证过期显示横幅 + 重试按钮。专辑行两个图标按钮：选曲（弹窗勾选部分曲目，默认全不选，`song_mids` 走 `/api/download/album`）和整张下载。
+- **UI `QQDownloadScreen.kt`**（独立文件）：导航 `LibrarySection.QQDownload`，顶部玻璃岛有「QQ 下载」chip。未连接显示服务地址设置卡；凭证过期显示横幅 + 重试按钮。专辑行两个图标按钮：选曲（弹窗勾选部分曲目，默认全不选，`song_mids` 走 `/api/download/album`）和整张下载。**服务地址会从 Jellyfin 地址自动推导**（同机、端口 8900），用户一般不用手填；`ServerUrlHistory` 记录登录过的服务器地址供登录页下拉回填。
 - 凭证（QQ cookie）只在 PC 侧内存与 `E:\music\qqmusic_cred.json`，**App 不接触 cookie**，接口不回传。
 - **整专下载任务必须带歌名**：`qmc2.get_album_songs()` 只返回 mid 不带歌名（且 `E:\music` 不许改），所以服务里用自写的 `_album_song_details()`（同一底层接口、多取 `songInfo.name`）入队带 `title`，否则 App 任务列表回退显示内部 mid。
 
@@ -125,8 +154,11 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 - **手写 Fake 优先**（不用 Mockito/MockK）：`FakeJellyfinApi`、`FakeSessionRepository`、`FakeAuthorizationSink` 等在测试文件内定义。
 - 数据层测试覆盖 URL 格式、Authorization 头、**断言 URL 不含 token**、错误映射。
 - `JellyfinViewModelTest`：覆盖会话恢复、Unauthorized 清会话、网络错误保留会话、库请求过期、搜索防抖、会话过期后缓存全部清空等场景。
-- `QQDownloadViewModelTest` / `QQDownloadDataSourceTest`：QQ 下载的搜索防抖、音质降级、轮询启停、凭证过期恢复、503→CredentialExpired 映射等。**注意：测试任务一直 running 时轮询无限继续，必须用有界 `advanceTimeBy` 而非 `advanceUntilIdle`**（否则虚拟时间死循环卡死测试进程）。
+- `QQDownloadViewModelTest` / `QQDownloadDataSourceTest`：QQ 下载的搜索防抖、音质降级、轮询启停、凭证过期恢复、503→CredentialExpired 映射等。**注意：测试任务一直 running 时轮询无限继续，必须用有界 `advanceTimeBy` 而非 `advanceUntilIdle`**（否则虚拟时间死循环卡死测试进程）。同理，`viewModelScope` 里的无限 `delay` 循环配 `runTest` 虚拟时间会活锁卡死 gradle daemon——**周期循环必须有上限**。
+- **纯函数优先拆出来单测**：`DiscoverPicks`（每日推荐选曲）、`LibraryGroups`（按艺术家/流派分组）、`PlaybackLogic`、`PlaybackReporter.positionTicks` 等都不碰 IO，直接喂数据断言。分组规则有明确边界：大小写不敏感归并、空白/`UNKNOWN_ARTIST` 不建组、排序稳定。
+- `PlaybackReporterTest`：上报开始/停止的时机、去重、失败静默、`content://` 本地文件不参与上报。
 - USB/播放逻辑均有独立测试类（`playback/` 和 `playback/usb/` 目录下）。
+- **UI 没有 Compose 测试设施**：布局改动靠真机肉眼验证，不要为样式写 UI 测试。
 
 ## 关键约定与红线
 
@@ -135,7 +167,8 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 - **不删除用户数据**（DataStore 存储、配置、历史）。
 - **不擅自执行** git push、部署、发布、破坏性迁移。
 - 命令失败先看报错信息，不硬猜；工具反复报错时停止并询问用户。
-- 根目录的 `qq-music-api-v2/`、`node_modules/`、`qrcode*.png`、`qrresp*.json` 是历史实验产物，已 gitignore，**不是项目代码**，不要动它们。`server/_smoke.log`、根目录 `_smoke.log` 是服务运行日志，同理。
+- 根目录的 `qq-music-api-v2/`、`node_modules/`、`qrcode*.png`、`qrresp*.json` 是历史实验产物，已 gitignore，**不是项目代码**，不要动它们。`server/_smoke.log`、根目录 `_smoke.log` 是服务运行日志，同理。根目录的 `{var`（0 字节）、`Poppins,Righteous` 目录也是误产物。
+- **`docs/archive/` 是归档区**——里面全是写于项目早期、**内容已过时**的阶段性文档（`DESIGN_SYSTEM.md`、`UI_OPTIMIZATION_SUMMARY.md`、`MVP_PLAN.md`、`FONT_DOWNLOAD_GUIDE.md`、`ui-improvement-suggestions.md`），仍提到「UI 全在 MainActivity」这类旧结论。**只作历史参考，不要当成当前事实**，以代码和本文件为准。新的阶段性总结也直接放进这里，不要在根目录另起一份。
 
 ## Agent skills
 
@@ -150,3 +183,10 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 ### Domain docs
 
 单上下文（single-context）—— 仓库根 `CONTEXT.md` + `docs/adr/`。见 `docs/agents/domain.md`。
+
+已接受的 ADR：
+
+- `0001` 文件管理走 PC 伴生服务，不走 Jellyfin API（改文件内嵌标签才是真改）
+- `0002` 删除 = 移到回收站，可恢复
+- `0003` 缓存是副本，可以自动淘汰，不受「不删用户数据」约束
+- `0004` UI 参考 Auxio，但**只取设计规格、不取代码**（Auxio 是 GPL-3.0 + View/XML，Pulsar 是 Compose）

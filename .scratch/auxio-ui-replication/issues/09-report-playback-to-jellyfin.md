@@ -12,7 +12,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-human（代码完成，真机验收待做）
+**Status:** ready-for-human（代码完成 + 573 项单测全绿；真机验收待做：听一首歌后核对 Jellyfin PlayCount 与「最近播放」）
 
 ## 要做的
 

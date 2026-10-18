@@ -709,8 +709,10 @@ private fun MusicLibraryScreen(
     // 跑一次，否则发现页/专辑页会永远停在骨架屏上。
     // `isOffline` 也作为 key：探活回在线时 ViewModel 会清掉快照来源的那几屏
     // （albums/discoverAlbums/albumTracks），靠 key 变化重新触发加载，拉服务器的新值。
+    // `recentlyPlayed` / `mostPlayed` 作 key：切歌后 ViewModel 把这两份历史清空
+    // （工单 09 上报改了服务端数据），停在同一页也要重新拉一次。
     val sessionReady = state.tracks != null
-    LaunchedEffect(section, sessionReady, state.isOffline) {
+    LaunchedEffect(section, sessionReady, state.isOffline, state.recentlyPlayed, state.mostPlayed) {
         when (val s = section) {
             LibrarySection.Discover -> if (sessionReady) {
                 viewModel.loadDiscoverAlbums()

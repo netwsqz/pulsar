@@ -23,6 +23,10 @@ interface JellyfinApi {
      */
     suspend fun getLyrics(accessToken: String, trackId: String): Result<Lyrics>
     fun streamUrl(mediaId: String, accessToken: String): String
+    /** 开始播放上报（POST /Sessions/Playing）。失败只返回 Result，不抛异常。 */
+    suspend fun reportPlaybackStarted(accessToken: String, itemId: String, positionTicks: Long): Result<Unit>
+    /** 停止播放上报（POST /Sessions/Playing/Stopped），带实际播放位置。 */
+    suspend fun reportPlaybackStopped(accessToken: String, itemId: String, positionTicks: Long): Result<Unit>
     fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest
     fun authorizationHeader(accessToken: String): String
 }

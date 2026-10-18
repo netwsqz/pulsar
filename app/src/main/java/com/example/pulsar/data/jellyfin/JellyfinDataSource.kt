@@ -242,6 +242,43 @@ class JellyfinDataSource(
             json.decodeFromString<LyricResponseDto>(response.body()).toLyrics()
         }
 
+    /**
+     * 播放上报（POST /Sessions/Playing 与 /Sessions/Playing/Stopped）。
+     * 调用方（[com.example.pulsar.playback.PlaybackReporter]）要求失败静默：这里照常把
+     * 错误映射成 Result，不抛给调用方。
+     */
+    override suspend fun reportPlaybackStarted(
+        accessToken: String,
+        itemId: String,
+        positionTicks: Long
+    ): Result<Unit> = reportPlayback(urlBuilder.playbackStartUrl(), accessToken, itemId, positionTicks)
+
+    override suspend fun reportPlaybackStopped(
+        accessToken: String,
+        itemId: String,
+        positionTicks: Long
+    ): Result<Unit> = reportPlayback(urlBuilder.playbackStoppedUrl(), accessToken, itemId, positionTicks)
+
+    private suspend fun reportPlayback(
+        url: String,
+        accessToken: String,
+        itemId: String,
+        positionTicks: Long
+    ): Result<Unit> = execute {
+        require(accessToken.isNotBlank()) { "Access token must not be blank" }
+        require(itemId.isNotBlank()) { "Item ID must not be blank" }
+        val response = client.post(url) {
+            header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId, accessToken))
+            contentType(ContentType.Application.Json)
+            accept(ContentType.Application.Json)
+            setBody(json.encodeToString(JellyfinPlaybackReport(itemId, positionTicks)))
+        }
+        if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+            throw JellyfinError.Unauthorized()
+        }
+        ensureSuccess(response.status)
+    }
+
     override fun streamUrl(mediaId: String, accessToken: String): String {
         require(accessToken.isNotBlank()) { "Access token must not be blank" }
         return urlBuilder.mediaStreamRequest(mediaId, accessToken, deviceId).url

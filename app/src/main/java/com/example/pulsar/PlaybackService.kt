@@ -37,6 +37,7 @@ import com.example.pulsar.playback.DeviceVolumeSource
 import com.example.pulsar.playback.LoudnessGainAudioSink
 import com.example.pulsar.playback.LoudnessGainProvider
 import com.example.pulsar.playback.PlaybackDiagnostics
+import com.example.pulsar.playback.PlaybackReporter
 import com.example.pulsar.playback.PlayerRebuildState
 import com.example.pulsar.playback.RemoteVolumePlayer
 import com.example.pulsar.playback.SilenceLevelMonitor
@@ -119,6 +120,19 @@ class PlaybackService : MediaSessionService() {
 
     // 播放服务自身的协程作用域：监听 USB 音频设备插拔与采样率采集。
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * 播放行为上报（工单 09）。用进程级作用域（见 [PulsarApplication.playbackReportScope]）
+     * 而不是 [serviceScope]：服务销毁时最后一条「停止」上报必须能发出去，不能被 cancel 掐掉。
+     */
+    private val playbackReporter by lazy {
+        val app = application as PulsarApplication
+        PlaybackReporter(
+            sessions = app.sessionRepository(),
+            apiFactory = app.jellyfinApiFactory(),
+            scope = app.playbackReportScope,
+        )
+    }
 
     private val audioManager: AudioManager
         get() = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -488,7 +502,52 @@ class PlaybackService : MediaSessionService() {
             .also {
                 observeOutputDiagnostics(it)
                 observeLoudnessGain(it)
+                observePlaybackReporting(it)
             }
+    }
+
+    /**
+     * 播放行为上报（工单 09）：开始/停止都由播放器的真实状态驱动，失败在
+     * [PlaybackReporter] 内部静默，不影响播放。
+     *
+     * 用 [Player.Listener.onPositionDiscontinuity] 而不是 onMediaItemTransition：
+     * 它同时给出**上一首的播放位置**（停止上报要带实际播放时长），并且覆盖自动切歌、
+     * 手动下一首、队列变更等所有换歌路径。
+     */
+    private fun observePlaybackReporting(exoPlayer: ExoPlayer) {
+        exoPlayer.addListener(object : Player.Listener {
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                val oldId = oldPosition.mediaItem?.mediaId
+                val newId = newPosition.mediaItem?.mediaId
+                // 同一首歌内 seek 不算切歌；单曲循环保持同一 id，也不重复计数
+                if (oldId != null && oldId != newId) {
+                    playbackReporter.onPlaybackStopped(oldPosition.positionMs)
+                }
+                // 这里只收尾，不报开始：真正开播统一由 onIsPlayingChanged 触发，
+                // 避免「只是加入队列 / 还在缓冲」被算成听过。
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    // 首次 setMediaItems 时的 transition 早于 play()，这条才是真正的开播信号
+                    // （重复调用会被 PlaybackReporter 去重）。
+                    exoPlayer.currentMediaItem?.mediaId?.let { id ->
+                        playbackReporter.onTrackStarted(id, exoPlayer.currentPosition)
+                    }
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                // 队列放完停在最后一首：没有下一次 transition，得在这里收尾
+                if (playbackState == Player.STATE_ENDED) {
+                    playbackReporter.onPlaybackStopped(exoPlayer.currentPosition)
+                }
+            }
+        })
     }
 
     /**
@@ -700,6 +759,8 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        // 服务销毁 = 播放结束：先报停止（用自己的进程级作用域，不受下面的 cancel 影响）
+        player?.let { playbackReporter.onPlaybackStopped(it.currentPosition) }
         serviceScope.cancel()
         // 清空定时回调，避免服务销毁后仍持有对播放器的引用；定时器倒计时照常（到点无播放器可暂停）。
         SleepTimer.onTimeout = null

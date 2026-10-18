@@ -49,6 +49,12 @@ class JellyfinUrlBuilder(baseUrl: String) {
         )
     }
 
+    /** 开始播放上报：POST /Sessions/Playing。 */
+    fun playbackStartUrl(): String = appendPath("Sessions", "Playing")
+
+    /** 停止播放上报：POST /Sessions/Playing/Stopped。 */
+    fun playbackStoppedUrl(): String = appendPath("Sessions", "Playing", "Stopped")
+
     private fun headersWithToken(deviceId: String, token: String): Map<String, String> = mapOf(
         "Authorization" to
             "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", " +

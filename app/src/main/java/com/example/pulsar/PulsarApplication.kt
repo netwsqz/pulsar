@@ -36,6 +36,14 @@ class PulsarApplication : Application(), AuthorizationSink {
     @Volatile
     override var activeAuthorization: String? = null
 
+    /**
+     * 播放上报专用的进程级作用域。播放服务销毁时最后一条「停止」上报还得发出去，
+     * 所以不能用服务的 serviceScope（会被 cancel）；放这里也避免每次建服务漏一个作用域。
+     */
+    val playbackReportScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
     private val jellyfinClient: HttpClient by lazy {
         HttpClient(Android) {
             followRedirects = false

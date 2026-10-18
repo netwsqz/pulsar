@@ -10,6 +10,13 @@ data class JellyfinLoginRequest(
     @SerialName("Pw") val password: String
 )
 
+/** 播放上报的请求体（/Sessions/Playing 与 /Sessions/Playing/Stopped 共用）。 */
+@Serializable
+data class JellyfinPlaybackReport(
+    @SerialName("ItemId") val itemId: String,
+    @SerialName("PositionTicks") val positionTicks: Long
+)
+
 @Serializable
 data class JellyfinLoginResponse(
     @SerialName("User") val user: JellyfinUserDto? = null,

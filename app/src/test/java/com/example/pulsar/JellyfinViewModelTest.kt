@@ -1,6 +1,7 @@
 package com.example.pulsar
 
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.MediaItem
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
@@ -1430,6 +1431,36 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `切歌后播放历史缓存作废，下次进发现页重新拉取`() = runTest {
+        // 工单 09：播放上报会改服务端的 UserData，「最近播放」不能一直用旧缓存。
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(track))
+            mostPlayedResult = Result.success(listOf(track))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        viewModel.onMediaItemTransition(
+            MediaItem.Builder().setMediaId("track-1").build()
+        )
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.mostPlayed)
+
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+        assertEquals(2, api.recentlyPlayedCalls)
+        assertEquals(2, api.mostPlayedCalls)
+    }
+
+    @Test
     fun `下拉刷新期间刷新标记为真，全部落地后复位`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(
@@ -1651,6 +1682,8 @@ class JellyfinViewModelTest {
         }
         // 缓存键 = streamUrl，Fake 按 id 生成唯一 URL，两首歌才是两个不同的键
         override fun streamUrl(mediaId: String, accessToken: String) = "stream/$mediaId"
+        override suspend fun reportPlaybackStarted(accessToken: String, itemId: String, positionTicks: Long) = Result.success(Unit)
+        override suspend fun reportPlaybackStopped(accessToken: String, itemId: String, positionTicks: Long) = Result.success(Unit)
         override fun imageRequest(itemId: String, imageTag: String?, accessToken: String) = JellyfinRequest("image", emptyMap())
         override fun authorizationHeader(accessToken: String) = "auth-header"
     }

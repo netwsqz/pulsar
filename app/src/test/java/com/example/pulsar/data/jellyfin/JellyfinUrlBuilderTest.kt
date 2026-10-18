@@ -116,6 +116,20 @@ class JellyfinUrlBuilderTest {
         assertFalse(request.url.contains("secret-token"))
     }
 
+    @Test
+    fun `builds playback reporting URLs under Sessions`() {
+        val builder = JellyfinUrlBuilder("https://media.example.com/jellyfin/")
+
+        assertEquals(
+            "https://media.example.com/jellyfin/Sessions/Playing",
+            builder.playbackStartUrl()
+        )
+        assertEquals(
+            "https://media.example.com/jellyfin/Sessions/Playing/Stopped",
+            builder.playbackStoppedUrl()
+        )
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `rejects blank media ID`() {
         JellyfinUrlBuilder("https://media.example.com").mediaStreamRequest("  ", "token", "device-abc")

@@ -348,6 +348,14 @@ class JellyfinViewModel(
         _currentTrack.value = mediaItem?.let { item ->
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
+        // 播过的歌服务端 UserData 会变（工单 09）：本地那两份历史缓存作废，回到发现页时
+        // 重新拉。「最近播放」的幂等守卫靠 null 放行，所以这里清成 null 而不是留旧值。
+        // 代次一并递增：界面在后台时不收集状态、LaunchedEffect 不会重跑，在途的旧响应
+        // 回来仍会写回清空前的结果（loadSection 的代次检查会把它丢掉）。
+        if (_state.value.recentlyPlayed != null || _state.value.mostPlayed != null) {
+            historyGeneration++
+            _state.value = _state.value.copy(recentlyPlayed = null, mostPlayed = null)
+        }
     }
 
     /**

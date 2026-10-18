@@ -650,6 +650,114 @@ class JellyfinDataSourceTest {
         client.close()
     }
 
+    // ===== 播放上报（POST /Sessions/Playing 与 /Sessions/Playing/Stopped） =====
+
+    @Test
+    fun `playback start posts item id and position ticks with token in header`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(content = "", status = HttpStatusCode.NoContent)
+        })
+        val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = deviceId
+        ).reportPlaybackStarted("token-1", "track-9", positionTicks = 0)
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Sessions/Playing", request.url.encodedPath)
+        assertEquals("POST", request.method.value)
+        assertEquals(
+            "MediaBrowser Client=\"Pulsar\", Device=\"Android\", " +
+                "DeviceId=\"$deviceId\", Version=\"0.1.0\", Token=\"token-1\"",
+            request.headers[HttpHeaders.Authorization]
+        )
+        assertFalse(request.url.toString().contains("token-1"))
+        val payload = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+        assertEquals("track-9", payload.getValue("ItemId").jsonPrimitive.content)
+        assertEquals("0", payload.getValue("PositionTicks").jsonPrimitive.content)
+        client.close()
+    }
+
+    @Test
+    fun `playback stop posts actual position ticks`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(content = "", status = HttpStatusCode.NoContent)
+        })
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        ).reportPlaybackStopped("token-1", "track-9", positionTicks = 900_000_000L)
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Sessions/Playing/Stopped", request.url.encodedPath)
+        assertEquals("POST", request.method.value)
+        val payload = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+        assertEquals("track-9", payload.getValue("ItemId").jsonPrimitive.content)
+        assertEquals("900000000", payload.getValue("PositionTicks").jsonPrimitive.content)
+        client.close()
+    }
+
+    @Test
+    fun `playback reporting maps 401 to Unauthorized without throwing`() = runTest {
+        val client = HttpClient(MockEngine {
+            respond(content = "", status = HttpStatusCode.Unauthorized)
+        })
+        val dataSource = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        )
+
+        val started = dataSource.reportPlaybackStarted("expired", "track-9", 0)
+        val stopped = dataSource.reportPlaybackStopped("expired", "track-9", 10_000)
+
+        assertTrue(started.exceptionOrNull() is JellyfinError.Unauthorized)
+        assertTrue(stopped.exceptionOrNull() is JellyfinError.Unauthorized)
+        client.close()
+    }
+
+    @Test
+    fun `playback reporting surfaces network failure as Result failure`() = runTest {
+        val client = HttpClient(MockEngine { throw java.io.IOException("offline") })
+        val dataSource = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        )
+
+        val result = dataSource.reportPlaybackStarted("token-1", "track-9", 0)
+
+        assertTrue(result.exceptionOrNull() is JellyfinError.Network)
+        client.close()
+    }
+
+    @Test
+    fun `playback reporting with blank item id fails without sending`() = runTest {
+        var requests = 0
+        val client = HttpClient(MockEngine {
+            requests++
+            respond("{}", HttpStatusCode.OK)
+        })
+        val dataSource = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+            deviceId = "device-1"
+        )
+
+        assertTrue(dataSource.reportPlaybackStarted("token-1", "  ", 0).isFailure)
+        assertTrue(dataSource.reportPlaybackStopped("token-1", "  ", 0).isFailure)
+        assertEquals(0, requests)
+        client.close()
+    }
+
     // ===== 歌词接口（GET /Audio/{itemId}/Lyrics，Jellyfin 10.9+） =====
 
     @Test

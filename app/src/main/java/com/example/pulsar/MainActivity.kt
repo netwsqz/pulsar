@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import com.example.pulsar.ui.components.LiquidGlassSlider
+import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.components.VolumeFeedback
 import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.glassBarSliderColors
@@ -110,6 +111,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
@@ -563,23 +565,27 @@ private fun cardBorderColor(): Color = if (isSystemInDarkTheme()) Color(0x1AFFFF
 
 /** 曲目列表的灰色波浪骨架：与 [TrackRow] 同款排布（48dp 圆角封面 + 标题/作者两条灰条
  * + 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
- * "这个页面正在加载"，而不是一片空白或"暂无内容"的空态文案。 */
+ * "这个页面正在加载"，而不是一片空白或"暂无内容"的空态文案。
+ * [trailingSpace] 为 true 时给行尾「更多」按钮留出同样的 48dp 位——歌曲页 / 发现页的
+ * 真实行有该按钮，不留位加载完文字列会突然变窄；播放列表等无按钮的列表传 false。 */
 @Composable
 private fun TrackListSkeleton(
     count: Int = 6,
+    trailingSpace: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val shimmer = rememberSkeletonShimmer()
-    val coverShape = RoundedCornerShape(8.dp) // 与 AlbumCover 默认圆角一致
+    // 8dp / 4dp 是组件自身尺寸（与 AlbumCover 默认圆角、灰条圆角一致），按工单 01 约定不进 Dimens。
+    val coverShape = RoundedCornerShape(8.dp)
     Column(modifier) {
         repeat(count) { index ->
             Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                modifier = Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                SkeletonBox(Modifier.size(48.dp).clip(coverShape), progress = shimmer)
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SkeletonBox(Modifier.size(Dimens.TouchTargetSmall).clip(coverShape), progress = shimmer)
+                Spacer(Modifier.width(Dimens.SpaceMidMedium))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
                     SkeletonBox(
                         Modifier.fillMaxWidth(0.55f).height(14.dp),
                         progress = shimmer,
@@ -591,10 +597,11 @@ private fun TrackListSkeleton(
                         shape = RoundedCornerShape(4.dp)
                     )
                 }
+                if (trailingSpace) Spacer(Modifier.width(Dimens.TouchTargetSmall))
             }
             if (index != count - 1) {
                 HorizontalDivider(
-                    modifier = Modifier.padding(start = 60.dp),
+                    modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
                     color = MaterialTheme.colorScheme.outlineVariant
                 )
             }
@@ -603,6 +610,7 @@ private fun TrackListSkeleton(
 }
 
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
     Column(
@@ -1513,12 +1521,18 @@ private fun TrackRow(
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var rowWindowOffset by remember { mutableStateOf(Offset.Zero) }
+    var rowSize by remember { mutableStateOf(IntSize.Zero) }
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     val multiSelect = LocalMultiSelect.current
     // 离线且这首歌没有完整副本 → 整行标灰；点击改为弹「没缓存」提示，不发起播放。
     val offline = LocalOfflineState.current
     val dimmed = offline?.active == true && offline.cachedTrackIds?.contains(track.id) != true
+    // 长按与「更多」按钮共用同一个菜单，锚点不同而已。
+    fun openMenuAt(point: IntOffset) {
+        menuOffset = point
+        showMenu = true
+    }
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -1537,8 +1551,7 @@ private fun TrackRow(
                     onLongClick = {
                         // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
                         val windowOffset = rowWindowOffset + lastDownOffset
-                        menuOffset = IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt())
-                        showMenu = true
+                        openMenuAt(IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt()))
                     }
                 )
                 // 轻量触点观察：只记下最近一次按下的局部坐标，不消费事件，不干扰 combinedClickable 的手势判定。
@@ -1550,6 +1563,7 @@ private fun TrackRow(
                 }
                 .onGloballyPositioned { coordinates ->
                     rowWindowOffset = coordinates.positionInWindow()
+                    rowSize = coordinates.size
                 }
                 .padding(vertical = Dimens.SpaceSmall),
             verticalAlignment = Alignment.CenterVertically
@@ -1601,6 +1615,27 @@ private fun TrackRow(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+            // Auxio 列表项的「更多」按钮：与长按弹同一个菜单（工单 05）。
+            // 锚点取行右端中部，菜单照样贴着按钮弹；多选模式下整行是勾选语义，不显示。
+            if (onAddToQueue != null && multiSelect?.active != true) {
+                IconButton(
+                    onClick = {
+                        openMenuAt(
+                            IntOffset(
+                                rowWindowOffset.x.toInt() + rowSize.width,
+                                rowWindowOffset.y.toInt() + rowSize.height / 2
+                            )
+                        )
+                    },
+                    modifier = Modifier.size(Dimens.TouchTargetSmall)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "更多操作：${track.title}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
         // 分隔线从封面右缘开始：封面下方不画线，行之间更干净。
@@ -2044,7 +2079,7 @@ private fun DiscoverContent(
             // 会话还没恢复完：灰色波浪占位。不能走下面的"登录后这里会推荐…"空态文案——
             // 那是"确实没有内容"，而这里是"还在连"，两者语义完全不同。
             item(key = "dailySkeleton") {
-                TrackListSkeleton(count = 3, modifier = Modifier.padding(top = Dimens.SpaceTiny))
+                TrackListSkeleton(count = 3, trailingSpace = true, modifier = Modifier.padding(top = Dimens.SpaceTiny))
             }
         } else if (dailyPicks.isEmpty() && tracks.isEmpty()) {
             item(key = "dailyEmpty") {
@@ -2405,14 +2440,14 @@ private fun AlbumsContent(
         // grid 滚动时专辑卡仍能滚到玻璃岛底下透过去（和底部播放条同款行为）。
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = Dimens.SpaceMedium),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         // 标题行：与发现页同款层级；专辑页没有「换一批」语义，只放标题。
         Text(
             "专辑",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - 8.dp)
+            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val albums = state.albums
@@ -2579,6 +2614,8 @@ private fun AlbumDetailContent(
     }
 }
 
+/** 播放列表页（工单 05）：按 Auxio 的列表语言呈现，与歌曲页 / 搜索页同构——
+ * 封面位 + 名称 + 「N 首」+ 分隔线，不再用卡片网格（封面网格只留给专辑）。 */
 @Composable
 private fun PlaylistsContent(
     state: JellyfinUiState,
@@ -2587,109 +2624,42 @@ private fun PlaylistsContent(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val playlists = state.playlists
+    val playlistList = playlists.orEmpty()
     Column(
-        // 顶部只让出状态栏；标题行自己给玻璃岛让位（padding top），
-        // grid 滚动时播放列表卡仍能滚到玻璃岛底下透过去（和底部播放条同款行为）。
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .padding(horizontal = Dimens.SpaceMedium),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
-        // 标题行：与发现页同款层级；播放列表页没有「换一批」语义，只放标题。
         Text(
             "播放列表",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - 8.dp)
+            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val playlists = state.playlists
             when {
-                playlists == null && state.isLoading -> {
-                    // 骨架屏：2列网格
-                    val shimmer = rememberSkeletonShimmer()
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        items(6) {
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = cardBorderColor(),
-                                        shape = RoundedCornerShape(12.dp)
-                                    ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column {
-                                    SkeletonBox(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(1f),
-                                        progress = shimmer
-                                    )
-                                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        SkeletonBox(
-                                            Modifier
-                                                .fillMaxWidth(0.7f)
-                                                .height(16.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                        SkeletonBox(
-                                            Modifier
-                                                .fillMaxWidth(0.5f)
-                                                .height(14.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                playlists == null && state.isLoading -> TrackListSkeleton(count = 8)
                 // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
                 // 已加载的照常显示——断网不该把现成的列表藏掉。
                 playlists == null && state.isOffline -> EmptyState("播放列表需要联网才能查看")
                 playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                playlists.orEmpty().isEmpty() -> EmptyState("暂无播放列表")
+                playlistList.isEmpty() -> EmptyState("暂无播放列表")
                 else -> {
-                    val playlistList = playlists.orEmpty()
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
+                    LazyColumn(
+                        Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 96.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
-                        items(playlistList, key = { it.id }) { playlist ->
-                            Card(
+                        itemsIndexed(playlistList, key = { _, p -> p.id }) { index, playlist ->
+                            SearchResultRow(
+                                cover = coverFor(playlist),
+                                title = playlist.name,
+                                subtitle = playlist.trackCount?.let { "$it 首" } ?: "播放列表",
                                 onClick = { onOpenPlaylist(playlist) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = cardBorderColor(),
-                                        shape = RoundedCornerShape(12.dp)
-                                    ),
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Column {
-                                    AlbumCover(coverFor(playlist), playlist.name, Modifier.fillMaxWidth().aspectRatio(1f))
-                                    Column(Modifier.padding(12.dp)) {
-                                        Text(playlist.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        Text(
-                                            playlist.trackCount?.let { "$it 首" } ?: "播放列表",
-                                            style = MaterialTheme.typography.bodyMedium
-                                        )
-                                    }
-                                }
-                            }
+                                showDivider = index != playlistList.lastIndex,
+                                modifier = Modifier.fillMaxWidth()
+                            )
                         }
                     }
                 }

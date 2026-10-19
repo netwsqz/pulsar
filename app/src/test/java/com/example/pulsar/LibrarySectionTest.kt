@@ -9,7 +9,7 @@ import org.junit.Test
 class LibrarySectionTest {
 
     @Test
-    fun `top level tabs follow the Auxio order with QQ download last`() {
+    fun `top level tabs are library browsing dimensions only`() {
         assertEquals(
             listOf(
                 LibrarySection.Discover,
@@ -17,11 +17,12 @@ class LibrarySectionTest {
                 LibrarySection.Albums,
                 LibrarySection.Artists,
                 LibrarySection.Genres,
-                LibrarySection.Playlists,
-                LibrarySection.QQDownload
+                LibrarySection.Playlists
             ),
             TopLevelSections.map { it.first }
         )
+        // QQ 下载退出顶层导航（ADR-0006）：它是「往曲库里加东西」的工具，不是曲库的一个维度。
+        assertTrue(TopLevelSections.none { it.first == LibrarySection.DownloadService })
     }
 
     @Test
@@ -29,10 +30,16 @@ class LibrarySectionTest {
         assertEquals(0, LibrarySection.Discover.navIndex())
         assertEquals(1, LibrarySection.Tracks.navIndex())
         assertEquals(3, LibrarySection.Artists.navIndex())
-        assertEquals(6, LibrarySection.QQDownload.navIndex())
+        assertEquals(-1, LibrarySection.DownloadService.navIndex())
         assertEquals(-1, LibrarySection.Search.navIndex())
         assertEquals(-1, LibrarySection.Settings.navIndex())
         assertEquals(-1, LibrarySection.CachedCopies.navIndex())
+    }
+
+    @Test
+    fun `download service is a detail page reached from settings`() {
+        assertTrue(LibrarySection.DownloadService.isDetail())
+        assertNull(LibrarySection.DownloadService.navLabel())
     }
 
     @Test
@@ -49,7 +56,7 @@ class LibrarySectionTest {
         assertEquals("歌曲", LibrarySection.Tracks.navLabel())
         assertEquals("艺术家", LibrarySection.Artists.navLabel())
         assertEquals("流派", LibrarySection.Genres.navLabel())
-        assertEquals("QQ 下载", LibrarySection.QQDownload.navLabel())
+        assertNull(LibrarySection.DownloadService.navLabel())
         assertNull(LibrarySection.Search.navLabel())
         assertNull(LibrarySection.Settings.navLabel())
     }

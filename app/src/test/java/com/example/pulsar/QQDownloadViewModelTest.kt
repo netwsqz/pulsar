@@ -101,7 +101,9 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.searchQueries.isEmpty())
-        assertNotNull(viewModel.state.value.errorMessage)
+        assertNotNull(viewModel.state.value.searchError)
+        // 搜索期失败只进分区内小字，不能同时弹一条动作反馈。
+        assertNull(viewModel.state.value.actionMessage)
     }
 
     @Test
@@ -163,7 +165,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(viewModel.state.value.credentialExpired)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("凭证"))
+        assertTrue(viewModel.state.value.searchError!!.contains("凭证"))
 
         viewModel.retryCredential()
         advanceUntilIdle()
@@ -203,7 +205,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertFalse(viewModel.state.value.credentialExpired)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("QQ 音乐客户端"))
+        assertTrue(viewModel.state.value.actionMessage!!.contains("QQ 音乐客户端"))
     }
 
     @Test
@@ -214,7 +216,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertFalse(viewModel.state.value.serviceReachable)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("连不上"))
+        assertTrue(viewModel.state.value.searchError!!.contains("连不上"))
     }
 
     @Test
@@ -357,7 +359,7 @@ class QQDownloadViewModelTest {
         val picker = viewModel.state.value.albumPicker!!
         assertEquals(setOf("000trackB2"), picker.selectedMids)
         assertFalse(viewModel.state.value.isEnqueuingAlbum)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("凭证"))
+        assertTrue(picker.errorMessage!!.contains("凭证"))
     }
 
     @Test
@@ -390,14 +392,14 @@ class QQDownloadViewModelTest {
 
         assertFalse(viewModel.state.value.albumPicker!!.isLoading)
         assertTrue(viewModel.state.value.albumPicker!!.tracks.isEmpty())
-        assertTrue(viewModel.state.value.errorMessage!!.contains("连不上"))
+        assertTrue(viewModel.state.value.albumPicker!!.errorMessage!!.contains("连不上"))
 
         api.albumSongsError = null
         viewModel.retryAlbumTracks()
         advanceUntilIdle()
 
         assertEquals(albumTracks, viewModel.state.value.albumPicker!!.tracks)
-        assertNull(viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.albumPicker!!.errorMessage)
     }
 
     @Test
@@ -430,7 +432,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertNull(viewModel.state.value.albumPicker)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("1 首"))
+        assertTrue(viewModel.state.value.actionMessage!!.contains("1 首"))
     }
 
     @Test
@@ -447,7 +449,7 @@ class QQDownloadViewModelTest {
         viewModel.confirmAlbumDownload()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.actionMessage)
     }
 
     @Test
@@ -580,7 +582,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(viewModel.state.value.inLibraryMids.contains(song.songMid))
-        assertNull(viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.actionMessage)
         assertEquals(0, api.jobsCalls)
     }
 
@@ -731,7 +733,7 @@ class QQDownloadViewModelTest {
         viewModel.downloadAlbum(album)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.errorMessage!!.contains("已跳过 8 首"))
+        assertTrue(viewModel.state.value.actionMessage!!.contains("已跳过 8 首"))
         assertTrue(api.jobsCalls >= 1)
     }
 
@@ -745,7 +747,7 @@ class QQDownloadViewModelTest {
         viewModel.downloadAlbum(album)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.errorMessage!!.contains("11"))
+        assertTrue(viewModel.state.value.actionMessage!!.contains("11"))
         assertFalse(viewModel.state.value.isEnqueuingAlbum)
     }
 
@@ -803,6 +805,134 @@ class QQDownloadViewModelTest {
 
         assertEquals("http://192.168.1.10:8900", preferences.savedUrl)
         assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
+    }
+
+    // ── 工单 01：搜索期失败与动作反馈分开 ──────────────────────────
+
+    @Test
+    fun `search failure writes search field only and leaves action feedback empty`() = runTest {
+        // 搜索页把曲库结果和 QQ 分区画在一起：QQ 搜挂了只能降级成分区内小字，
+        // 绝不能写进动作反馈（那是 Snackbar 的路子），更不能盖住曲库结果。
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            songs = listOf(song),
+            searchError = QQDownloadError.ServiceUnreachable(IllegalStateException())
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.searchError!!.contains("连不上"))
+        assertNull(viewModel.state.value.actionMessage)
+        assertFalse(viewModel.state.value.serviceReachable)
+        assertFalse(viewModel.state.value.isSearching)
+    }
+
+    @Test
+    fun `download action failure writes action feedback not search field`() = runTest {
+        // 下载动作的失败（这里：音质不可用）走 Snackbar，不能赖在搜索结果里。
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(health = QQHealthResponse(ok = true, ffmpegReady = true))
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.downloadSong(song.copy(availableQualities = emptyList()))
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.actionMessage!!.contains("音质"))
+        assertNull(viewModel.state.value.searchError)
+    }
+
+    @Test
+    fun `new search clears the previous search failure`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            songs = listOf(song),
+            searchError = QQDownloadError.ServiceUnreachable(IllegalStateException())
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        assertNotNull(viewModel.state.value.searchError)
+
+        api.searchError = null
+        viewModel.updateSearchQuery("七里香")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.searchError)
+    }
+
+    @Test
+    fun `retry search re-runs the query and clears the error`() = runTest {
+        // 分区里那行「连不上 + 重试」：重试要真的重搜，不能只是把错误文案清掉。
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            songs = listOf(song),
+            searchError = QQDownloadError.ServiceUnreachable(IllegalStateException())
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        assertEquals(listOf("晴天"), api.searchQueries)
+        assertNotNull(viewModel.state.value.searchError)
+
+        api.searchError = null
+        viewModel.retrySearch()
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        assertEquals(listOf("晴天", "晴天"), api.searchQueries)
+        assertNull(viewModel.state.value.searchError)
+        assertEquals(listOf(song), viewModel.state.value.songs)
+    }
+
+    @Test
+    fun `credential retry clears the search error and re-runs the search`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            songs = listOf(song),
+            searchError = QQDownloadError.CredentialExpired("过期")
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.credentialExpired)
+        val queriesBefore = api.searchQueries.toList()
+
+        viewModel.retryCredential()
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        assertFalse(viewModel.state.value.credentialExpired)
+        assertNull(viewModel.state.value.searchError)
+        assertEquals(queriesBefore + "晴天", api.searchQueries)
+    }
+
+    @Test
+    fun `dismissing action feedback clears it`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val viewModel = createViewModel(preferences, FakeQQApi())
+        advanceUntilIdle()
+
+        viewModel.downloadSong(song.copy(availableQualities = emptyList()))
+        advanceUntilIdle()
+        assertNotNull(viewModel.state.value.actionMessage)
+
+        viewModel.dismissActionMessage()
+        assertNull(viewModel.state.value.actionMessage)
     }
 
     private fun TestScope.createViewModel(

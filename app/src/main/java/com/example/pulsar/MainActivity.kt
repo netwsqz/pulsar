@@ -18,6 +18,7 @@ import com.example.pulsar.ui.theme.PulsarTheme
 import com.example.pulsar.ui.theme.THEME_TRANSITION_MS
 import com.example.pulsar.ui.theme.ThemePresets
 import com.example.pulsar.ui.theme.ThemeSeedSource
+import com.example.pulsar.ui.theme.deepened
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import android.content.ComponentName
 import android.os.Bundle
@@ -109,6 +110,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -227,6 +229,8 @@ import com.example.pulsar.data.jellyfin.JellyfinDataSource
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.JellyfinUrlBuilder
+import com.example.pulsar.data.qqdownload.QQAlbumDto
+import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -728,8 +732,8 @@ private fun MusicLibraryScreen(
     viewModel: JellyfinViewModel,
     controllerFuture: ListenableFuture<MediaController>?,
     volumeKeys: ForegroundVolumeKeys,
-    qqState: QQDownloadUiState = QQDownloadUiState(),
-    qqViewModel: QQDownloadViewModel? = null,
+    qqState: QQDownloadUiState,
+    qqViewModel: QQDownloadViewModel,
     currentTrack: Track?,
     coverTheme: CoverTheme,
     themePreferences: ThemePreferences
@@ -761,10 +765,10 @@ private fun MusicLibraryScreen(
     // 跑一次，否则发现页/专辑页会永远停在骨架屏上。
     // `isOffline` 也作为 key：探活回在线时 ViewModel 会清掉快照来源的那几屏
     // （albums/discoverAlbums/albumTracks），靠 key 变化重新触发加载，拉服务器的新值。
-    // `recentlyPlayed` / `mostPlayed` 作 key：切歌后 ViewModel 把这两份历史清空
-    // （工单 09 上报改了服务端数据），停在同一页也要重新拉一次。
+    // `historyEpoch` 作 key：切歌后 ViewModel 只递增版本号、不清数据（工单 09），
+    // 这里据此静默重拉；旧列表留在屏幕上，不闪骨架。
     val sessionReady = state.tracks != null
-    LaunchedEffect(section, sessionReady, state.isOffline, state.recentlyPlayed, state.mostPlayed) {
+    LaunchedEffect(section, sessionReady, state.isOffline, state.historyEpoch) {
         when (val s = section) {
             LibrarySection.Discover -> if (sessionReady) {
                 viewModel.loadDiscoverAlbums()
@@ -780,7 +784,8 @@ private fun MusicLibraryScreen(
             is LibrarySection.GroupDetail -> if (sessionReady) viewModel.loadAlbums()
             LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
-            LibrarySection.QQDownload -> qqViewModel?.refreshJobs()
+            // 下载服务页（设置 → 下载）：进来时刷新一次任务列表，和原来挂在顶层 QQ 页时一致。
+            LibrarySection.DownloadService -> qqViewModel.refreshJobs()
             LibrarySection.Settings -> Unit
             LibrarySection.CachedCopies -> viewModel.loadCachedAlbums()
             is LibrarySection.AlbumDetail -> if (sessionReady) viewModel.loadAlbumTracks(s.album)
@@ -808,6 +813,13 @@ private fun MusicLibraryScreen(
     // 离线时 playTracks 内部会跳过没缓存的歌（队列里混着能放/不能放时按工单 03 口径处理）。
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
+    // QQ 下载动作反馈（音质不可用 / 入队失败 / 整专跳过 N 首）走 Snackbar——那是动作反馈。
+    // 搜索期失败（服务不可用 / 凭证过期）不走这里，它在搜索页 QQ 分区里常驻（ADR-0006）。
+    LaunchedEffect(qqState.actionMessage) {
+        val message = qqState.actionMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        qqViewModel.dismissActionMessage()
+    }
     // 离线没缓存的歌的统一话术（文案只此一处，经 ViewModel 的 unplayableReason 出口）。
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
         val controller = controllerState.controller
@@ -928,6 +940,8 @@ private fun MusicLibraryScreen(
                 detailOrigin = LibrarySection.Discover
             }
             LibrarySection.CachedCopies -> section = LibrarySection.Settings
+            // 下载服务是设置里的二级页：返回键回设置，不是回默认的发现页。
+            LibrarySection.DownloadService -> section = LibrarySection.Settings
             else -> section = LibrarySection.Discover
         }
     }
@@ -956,11 +970,14 @@ private fun MusicLibraryScreen(
     }
     // 主界面背景：色板 surface 三档渐变（带封面色调的中性底），不再是高饱和封面渐变。
     // 颜色由 PulsarTheme 统一做 800ms 过渡，这里直接读动画后的色板。
+    // 色板本身接近白（浅色 surface l≈0.99），铺满全屏会发飘，所以只对**背景渐变**压深；
+    // 色板角色本身不动——按钮/文字的对比度靠它保证，深色模式已足够深，压得更少。
     val scheme = MaterialTheme.colorScheme
+    val depth = if (isSystemInDarkTheme()) 0.90f else 0.86f
     val backgroundBrush = Brush.verticalGradient(
-        0f to scheme.surface,
-        0.3f to scheme.surfaceVariant,
-        1f to scheme.background
+        0f to scheme.surface.deepened(depth),
+        0.3f to scheme.surfaceVariant.deepened(depth),
+        1f to scheme.background.deepened(depth)
     )
     // 全屏播放页背景保持原有的封面三色渐变（工单 12 再处理），三色 + 强调色一起 800ms 过渡。
     val gradientSpec = tween<Color>(THEME_TRANSITION_MS)
@@ -1071,47 +1088,48 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Search -> SearchContent(
                         state = state,
+                        qqState = qqState,
+                        // 一次输入同时问两边：两个 ViewModel 各跑各的 300ms 防抖，同时到期 = 一次防抖。
+                        onSearchQueryChange = { query ->
+                            viewModel.updateSearchQuery(query)
+                            qqViewModel.updateSearchQuery(query)
+                        },
                         trackCoverFor = viewModel::trackCover,
                         albumCoverFor = viewModel::albumCover,
                         playlistCoverFor = viewModel::playlistCover,
-                        onSearchQueryChange = viewModel::updateSearchQuery,
                         onRetry = { viewModel.updateSearchQuery(state.searchQuery) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         onOpenAlbum = openAlbum,
                         onOpenPlaylist = openPlaylist,
+                        onDownloadSong = { qqViewModel.downloadSong(it) },
+                        onRequestRedownload = qqViewModel::requestRedownload,
+                        onConfirmRedownload = qqViewModel::confirmRedownload,
+                        onDismissRedownload = qqViewModel::dismissRedownload,
+                        onDownloadAlbum = qqViewModel::downloadAlbum,
+                        onSelectAlbumTracks = qqViewModel::openAlbumPicker,
+                        onToggleAlbumTrack = qqViewModel::toggleAlbumTrack,
+                        onSelectAllAlbumTracks = qqViewModel::selectAllAlbumTracks,
+                        onClearAlbumSelection = qqViewModel::clearAlbumSelection,
+                        onConfirmAlbumDownload = qqViewModel::confirmAlbumDownload,
+                        onRetryAlbumTracks = qqViewModel::retryAlbumTracks,
+                        onDismissAlbumPicker = qqViewModel::dismissAlbumPicker,
+                        onRetryCredential = qqViewModel::retryCredential,
+                        onRetryQqSearch = qqViewModel::retrySearch,
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
-                    LibrarySection.QQDownload -> {
-                        val qq = qqViewModel
-                        if (qq != null) {
-                            QQDownloadScreen(
-                                state = qqState,
-                                onQualityChange = qq::updateQuality,
-                                onSearchQueryChange = qq::updateSearchQuery,
-                                onDownloadSong = { qq.downloadSong(it) },
-                                onRequestRedownload = qq::requestRedownload,
-                                onConfirmRedownload = qq::confirmRedownload,
-                                onDismissRedownload = qq::dismissRedownload,
-                                onDownloadAlbum = qq::downloadAlbum,
-                                onSelectAlbumTracks = qq::openAlbumPicker,
-                                onToggleAlbumTrack = qq::toggleAlbumTrack,
-                                onSelectAllAlbumTracks = qq::selectAllAlbumTracks,
-                                onClearAlbumSelection = qq::clearAlbumSelection,
-                                onConfirmAlbumDownload = qq::confirmAlbumDownload,
-                                onRetryAlbumTracks = qq::retryAlbumTracks,
-                                onDismissAlbumPicker = qq::dismissAlbumPicker,
-                                onRetryCredential = qq::retryCredential,
-                                onRefreshCredential = qq::refreshCredential,
-                                onRefreshJobs = qq::refreshJobs,
-                                onFileOpsKeyInput = qq::updateFileOpsKeyInput,
-                                onSaveFileOpsKey = qq::saveFileOpsKey,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                    }
+                    LibrarySection.DownloadService -> DownloadServiceScreen(
+                        state = qqState,
+                        onQualityChange = qqViewModel::updateQuality,
+                        onRetryCredential = qqViewModel::retryCredential,
+                        onRefreshCredential = qqViewModel::refreshCredential,
+                        onRefreshJobs = qqViewModel::refreshJobs,
+                        onFileOpsKeyInput = qqViewModel::updateFileOpsKeyInput,
+                        onSaveFileOpsKey = qqViewModel::saveFileOpsKey,
+                        modifier = Modifier.fillMaxSize()
+                    )
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         state = state,
                         album = s.album,
@@ -1157,6 +1175,7 @@ private fun MusicLibraryScreen(
                         viewModel = viewModel,
                         controllerState = controllerState,
                         onOpenCachedCopies = { section = LibrarySection.CachedCopies },
+                        onOpenDownloadService = { section = LibrarySection.DownloadService },
                         themePreferences = themePreferences,
                         seedSource = coverTheme.seed.source,
                         modifier = Modifier.fillMaxSize()
@@ -1368,7 +1387,7 @@ private fun MusicLibraryScreen(
 
 /**
  * 顶部玻璃岛：悬浮的液态玻璃面板（与播放条同款：四角圆角 + 模糊 + 透镜 + 高光），
- * 装「发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表 / QQ 下载」与搜索 / 设置 / 退出按钮。
+ * 装「发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表」与搜索 / 设置 / 退出按钮。
  * chip 分组可横向滑动（分区多了会挤不下），滑动区域两侧有渐变提示，选中项切换时自动滚入可见区。
  */
 @Composable
@@ -2156,8 +2175,11 @@ private fun DiscoverContent(
                 coverFor = coverFor
             )
         }
-        // 三节历史全部失败：单节失败是静默缺席（不打扰），全挂了才给一次错误 + 重试。
-        if (state.discoverFailedSections.size == 3) {
+        // 三节历史全部失败、且确实没东西可显示：单节失败是静默缺席（不打扰），全挂了才给一次错误 + 重试。
+        // 有旧数据时（后台静默刷新失败）不弹错误——屏幕上还好好的，弹错误反而吓人。
+        if (state.discoverFailedSections.size == 3 &&
+            state.recentlyPlayed == null && state.mostPlayed == null && state.recentlyAdded == null
+        ) {
             item(key = "historyError") {
                 ErrorState("推荐内容暂时加载失败", onRetry = onRefresh)
             }
@@ -2254,7 +2276,7 @@ private fun DiscoverContent(
             state.discoverAlbums.orEmpty().isNotEmpty()
         if (state.tracks != null && !hasAnySection && !state.isLoading) {
             item(key = "discoverEmpty") {
-                EmptyState("曲库还是空的——去 QQ 下载页搜歌，或在设置里刷新曲库")
+                EmptyState("曲库还是空的——去搜索页搜歌并下载，或在设置里刷新曲库")
             }
         }
     }
@@ -2760,19 +2782,39 @@ private fun PlaylistsContent(
     }
 }
 
-/** 搜索结果页：顶部固定搜索框，下方按「歌曲 / 专辑 / 播放列表」分组展示结果；歌曲点播、专辑 / 播放列表进详情。 */
+/**
+ * 合并搜索页（ADR-0006）：一个输入框，一次输入同时问曲库和 QQ 音乐。
+ *
+ * 结果固定顺序：曲库歌曲 → 曲库专辑 → 曲库播放列表 → 「QQ 音乐」总标题 → QQ 歌曲 → QQ 专辑。
+ * QQ 分区永远排在曲库之后，不做位置漂移；QQ 侧失败只在分区内降级，绝不盖住曲库结果。
+ */
 @Composable
 private fun SearchContent(
     state: JellyfinUiState,
+    qqState: QQDownloadUiState,
+    onSearchQueryChange: (String) -> Unit,
     trackCoverFor: (Track) -> JellyfinRequest?,
     albumCoverFor: (Album) -> JellyfinRequest?,
     playlistCoverFor: (Playlist) -> JellyfinRequest?,
-    onSearchQueryChange: (String) -> Unit,
     onRetry: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit,
+    onDownloadSong: (QQSongDto) -> Unit,
+    onRequestRedownload: (QQSongDto) -> Unit,
+    onConfirmRedownload: () -> Unit,
+    onDismissRedownload: () -> Unit,
+    onDownloadAlbum: (QQAlbumDto) -> Unit,
+    onSelectAlbumTracks: (QQAlbumDto) -> Unit,
+    onToggleAlbumTrack: (String) -> Unit,
+    onSelectAllAlbumTracks: () -> Unit,
+    onClearAlbumSelection: () -> Unit,
+    onConfirmAlbumDownload: () -> Unit,
+    onRetryAlbumTracks: () -> Unit,
+    onDismissAlbumPicker: () -> Unit,
+    onRetryCredential: () -> Unit,
+    onRetryQqSearch: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
     modifier: Modifier = Modifier
@@ -2785,14 +2827,13 @@ private fun SearchContent(
             .padding(top = GlassIslandTopSpacing),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
-        // 搜索框固定顶部：输入时 ViewModel 防抖后请求；非空时显示清除按钮。
-        // 圆角与 QQ 下载页搜索框同档（CornerLarge），两页的搜索语言一致。
+        // 搜索框固定顶部：输入时两个 ViewModel 各自防抖后请求；非空时显示清除按钮。
         OutlinedTextField(
             value = state.searchQuery,
             onValueChange = onSearchQueryChange,
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
             shape = RoundedCornerShape(Dimens.CornerLarge),
-            placeholder = { Text("搜索歌曲、专辑、播放列表") },
+            placeholder = { Text("搜索歌曲、专辑、播放列表，也能搜 QQ 音乐") },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
             trailingIcon = if (state.searchQuery.isNotEmpty()) {
                 {
@@ -2808,19 +2849,26 @@ private fun SearchContent(
             },
             singleLine = true
         )
-        // 离线搜索标识（工单 04）：让用户知道这轮结果来自手机上的快照，
-        // 范围比在线搜索小——不是歌丢了。
+        // 离线搜索标识：这轮曲库结果来自手机上的快照。QQ 是另一个服务，不受影响。
         if (state.isOfflineSearch) {
             Text(
-                "离线搜索 · 只搜手机上的曲库快照",
+                "曲库离线 · 只搜手机上的快照；QQ 音乐不受影响",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             val results = state.searchResults
-            val isEmptyResult = results != null &&
+            // 「搜过了确实没有」= 结果非 null 且三类全空。null 是「还没拉到 / 拉失败」，
+            // 不能当成曲库没有——那会谎报「曲库中没找到」。
+            val librarySearchedEmpty = results != null &&
                 results.tracks.isEmpty() && results.albums.isEmpty() && results.playlists.isEmpty()
+            val libraryEmpty = results == null || librarySearchedEmpty
+            // 「全空」= 两边都没结果。曲库空但 QQ 有结果时不能报空——那正是要下载的时候。
+            val qqHasResults = qqState.songs.isNotEmpty() || qqState.albums.isNotEmpty()
+            // 只有两边都空时才允许整页空态/错误态；QQ 有结果时曲库侧的问题不能把它盖掉。
+            val bothEmpty = libraryEmpty && !qqHasResults
+            val qqStatus = qqState.searchStatus
             when {
                 state.searchQuery.isBlank() -> Text(
                     "输入关键词搜索音乐库",
@@ -2828,63 +2876,108 @@ private fun SearchContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 state.isSearching -> CircularProgressIndicator()
-                state.isOfflineSearch && isEmptyResult -> EmptyState("快照里没找到「${state.searchQuery}」\n联网后能搜全曲库")
-                state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                isEmptyResult -> EmptyState("未找到相关内容")
-                results == null -> EmptyState("未找到相关内容")
+                libraryEmpty && qqState.isSearching -> CircularProgressIndicator()
+                // 曲库侧的失败优先说：QQ 的错误不能让「曲库没搜成」看起来像「曲库没有」。
+                bothEmpty && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                bothEmpty && qqStatus != null -> Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
+                ) {
+                    Text(
+                        if (librarySearchedEmpty) "曲库中没找到「${state.searchQuery}」"
+                        else "曲库搜索未完成",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        qqStatus,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    TextButton(onClick = onRetryQqSearch) { Text("重试") }
+                }
+                bothEmpty && state.isOfflineSearch ->
+                    EmptyState("快照里没找到「${state.searchQuery}」\n联网后能搜全曲库")
+                bothEmpty && !qqState.isSearching -> EmptyState("未找到相关内容")
                 else -> {
-                    val searchResults = results
                     LazyColumn(
                         Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(bottom = 96.dp),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
-                        if (searchResults.tracks.isNotEmpty()) {
-                            item { SearchSectionHeader("歌曲") }
-                            itemsIndexed(searchResults.tracks, key = { _, t -> t.id }) { index, track ->
-                                TrackRow(
-                                    track = track,
-                                    cover = trackCoverFor(track),
-                                    onClick = { onPlayTrack(searchResults.tracks, track.id) },
-                                    onAddToQueue = { onAddToQueue(track) },
-                                    showDivider = index != searchResults.tracks.lastIndex,
-                                    isCurrent = currentTrackId == track.id,
-                                    isPlaying = isPlaying,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
+                        if (results != null) {
+                            if (results.tracks.isNotEmpty()) {
+                                item { SearchSectionHeader("歌曲") }
+                                itemsIndexed(results.tracks, key = { _, t -> t.id }) { index, track ->
+                                    TrackRow(
+                                        track = track,
+                                        cover = trackCoverFor(track),
+                                        onClick = { onPlayTrack(results.tracks, track.id) },
+                                        onAddToQueue = { onAddToQueue(track) },
+                                        showDivider = index != results.tracks.lastIndex,
+                                        isCurrent = currentTrackId == track.id,
+                                        isPlaying = isPlaying,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                            if (results.albums.isNotEmpty()) {
+                                item { SearchSectionHeader("专辑") }
+                                itemsIndexed(results.albums, key = { _, a -> a.id }) { index, album ->
+                                    SearchResultRow(
+                                        cover = albumCoverFor(album),
+                                        title = album.name,
+                                        subtitle = album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
+                                        onClick = { onOpenAlbum(album) },
+                                        showDivider = index != results.albums.lastIndex,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
+                            }
+                            if (results.playlists.isNotEmpty()) {
+                                item { SearchSectionHeader("播放列表") }
+                                itemsIndexed(results.playlists, key = { _, p -> p.id }) { index, playlist ->
+                                    SearchResultRow(
+                                        cover = playlistCoverFor(playlist),
+                                        title = playlist.name,
+                                        subtitle = playlist.trackCount?.let { "$it 首" } ?: "播放列表",
+                                        onClick = { onOpenPlaylist(playlist) },
+                                        showDivider = index != results.playlists.lastIndex,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                }
                             }
                         }
-                        if (searchResults.albums.isNotEmpty()) {
-                            item { SearchSectionHeader("专辑") }
-                            itemsIndexed(searchResults.albums, key = { _, a -> a.id }) { index, album ->
-                                SearchResultRow(
-                                    cover = albumCoverFor(album),
-                                    title = album.name,
-                                    subtitle = album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
-                                    onClick = { onOpenAlbum(album) },
-                                    showDivider = index != searchResults.albums.lastIndex,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-                        if (searchResults.playlists.isNotEmpty()) {
-                            item { SearchSectionHeader("播放列表") }
-                            itemsIndexed(searchResults.playlists, key = { _, p -> p.id }) { index, playlist ->
-                                SearchResultRow(
-                                    cover = playlistCoverFor(playlist),
-                                    title = playlist.name,
-                                    subtitle = playlist.trackCount?.let { "$it 首" } ?: "播放列表",
-                                    onClick = { onOpenPlaylist(playlist) },
-                                    showDivider = index != searchResults.playlists.lastIndex,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
+                        // QQ 分区永远在曲库之后。
+                        qqSearchSection(
+                            state = qqState,
+                            libraryEmpty = librarySearchedEmpty,
+                            onDownloadSong = onDownloadSong,
+                            onRequestRedownload = onRequestRedownload,
+                            onDownloadAlbum = onDownloadAlbum,
+                            onSelectAlbumTracks = onSelectAlbumTracks,
+                            onRetrySearch = onRetryQqSearch
+                        )
                     }
                 }
             }
         }
     }
+    // 两个弹窗挂搜索页：只有这里能发起下载。状态仍由 QQDownloadViewModel 持有。
+    QQSearchDialogs(
+        state = qqState,
+        onConfirmRedownload = onConfirmRedownload,
+        onDismissRedownload = onDismissRedownload,
+        onToggleAlbumTrack = onToggleAlbumTrack,
+        onSelectAllAlbumTracks = onSelectAllAlbumTracks,
+        onClearAlbumSelection = onClearAlbumSelection,
+        onConfirmAlbumDownload = onConfirmAlbumDownload,
+        onRetryAlbumTracks = onRetryAlbumTracks,
+        onDismissAlbumPicker = onDismissAlbumPicker,
+        onRetryCredential = onRetryCredential
+    )
 }
 
 /** 搜索结果分区标题（与 QQ 下载页的区块标题同语言：小号、半粗、次要色）。 */
@@ -3011,6 +3104,7 @@ private fun SettingsContent(
     viewModel: JellyfinViewModel,
     controllerState: ControllerState,
     onOpenCachedCopies: () -> Unit,
+    onOpenDownloadService: () -> Unit,
     themePreferences: ThemePreferences,
     seedSource: ThemeSeedSource,
     modifier: Modifier = Modifier
@@ -3184,6 +3278,25 @@ private fun SettingsContent(
                         else -> "未开启"
                     },
                     style = MaterialTheme.typography.labelMedium
+                )
+            }
+        }
+        // 下载服务（ADR-0006）：QQ 下载退出顶层导航后从这里进，二级页与「已缓存」同一套模式。
+        SettingsSectionHeader("下载")
+        SurfaceCard(onClick = onOpenDownloadService) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("下载服务", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "服务状态、音质、密钥与下载任务",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

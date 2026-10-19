@@ -61,6 +61,10 @@ class JellyfinViewModel(
     private var recentlyPlayedJob: Job? = null
     private var mostPlayedJob: Job? = null
     private var recentlyAddedJob: Job? = null
+    /** 每节已拉到的 [JellyfinUiState.historyEpoch]：相等且数据非空就不重复请求。 */
+    private var recentlyPlayedEpoch = -1
+    private var mostPlayedEpoch = -1
+    private var recentlyAddedEpoch = -1
     /** 会话代次：只随会话切换/过期递增，同会话内多次加载互不作废。 */
     private var historyGeneration = 0
     private var searchJob: Job? = null
@@ -349,12 +353,12 @@ class JellyfinViewModel(
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
         // 播过的歌服务端 UserData 会变（工单 09）：本地那两份历史缓存作废，回到发现页时
-        // 重新拉。「最近播放」的幂等守卫靠 null 放行，所以这里清成 null 而不是留旧值。
+        // 重新拉。**只递增版本号，不清数据**——清成 null 会让发现页两节先闪成骨架再弹回。
         // 代次一并递增：界面在后台时不收集状态、LaunchedEffect 不会重跑，在途的旧响应
         // 回来仍会写回清空前的结果（loadSection 的代次检查会把它丢掉）。
         if (_state.value.recentlyPlayed != null || _state.value.mostPlayed != null) {
             historyGeneration++
-            _state.value = _state.value.copy(recentlyPlayed = null, mostPlayed = null)
+            _state.value = _state.value.copy(historyEpoch = _state.value.historyEpoch + 1)
         }
     }
 
@@ -414,35 +418,50 @@ class JellyfinViewModel(
     // 三节各自独立加载：发现页一屏里任一节失败只是那一节不显示（降级），
     // 不影响其余 section，也不把整页变成错误态。
 
+    // 三节都走「数据在 + 版本号对得上」的幂等守卫：切歌/刷新只递增 [JellyfinUiState.historyEpoch]，
+    // 不清数据，界面据此静默重拉、原地替换（不闪骨架）。
+
     fun loadRecentlyPlayed() {
-        if (_state.value.recentlyPlayed != null) return
+        val epoch = _state.value.historyEpoch
+        if (_state.value.recentlyPlayed != null && recentlyPlayedEpoch == epoch) return
         recentlyPlayedJob?.cancel()
         markSectionLoading("recentlyPlayed")
         loadSection(
             request = { src, s -> src.getRecentlyPlayed(s.userId, s.accessToken) },
-            success = { tracks -> _state.value.copy(recentlyPlayed = tracks) },
+            success = { tracks ->
+                recentlyPlayedEpoch = epoch
+                _state.value.copy(recentlyPlayed = tracks)
+            },
             section = "recentlyPlayed"
         ) { recentlyPlayedJob = it }
     }
 
     fun loadMostPlayed() {
-        if (_state.value.mostPlayed != null) return
+        val epoch = _state.value.historyEpoch
+        if (_state.value.mostPlayed != null && mostPlayedEpoch == epoch) return
         mostPlayedJob?.cancel()
         markSectionLoading("mostPlayed")
         loadSection(
             request = { src, s -> src.getMostPlayed(s.userId, s.accessToken) },
-            success = { tracks -> _state.value.copy(mostPlayed = tracks) },
+            success = { tracks ->
+                mostPlayedEpoch = epoch
+                _state.value.copy(mostPlayed = tracks)
+            },
             section = "mostPlayed"
         ) { mostPlayedJob = it }
     }
 
     fun loadRecentlyAdded() {
-        if (_state.value.recentlyAdded != null) return
+        val epoch = _state.value.historyEpoch
+        if (_state.value.recentlyAdded != null && recentlyAddedEpoch == epoch) return
         recentlyAddedJob?.cancel()
         markSectionLoading("recentlyAdded")
         loadSection(
             request = { src, s -> src.getRecentlyAdded(s.userId, s.accessToken) },
-            success = { albums -> _state.value.copy(recentlyAdded = albums) },
+            success = { albums ->
+                recentlyAddedEpoch = epoch
+                _state.value.copy(recentlyAdded = albums)
+            },
             section = "recentlyAdded"
         ) { recentlyAddedJob = it }
     }
@@ -455,16 +474,15 @@ class JellyfinViewModel(
     }
 
     /**
-     * 发现页下拉刷新：随机专辑 + 三节历史全部重拉（幂等守卫靠先把字段清回 null 放行）。
+     * 发现页下拉刷新：随机专辑 + 三节历史全部重拉。
+     * 三节历史**不清数据、只递增版本号**：旧列表留在屏幕上，新结果回来原地替换，
+     * 界面不会先掉进骨架屏再弹回来（刷新进度由 [JellyfinUiState.isDiscoverRefreshing] 给反馈）。
      * 每日推荐是纯本地计算，界面自己换一批，不经过这里。
      */
     fun refreshDiscover() {
-        // 只清三节历史（幂等守卫靠 null 放行）；随机专辑**不清**——它本来就不幂等，
-        // 保留旧封面墙才能让界面按批次交叉淡入，而不是先掉进骨架屏再弹回来。
+        // 随机专辑也不清——它本来就保留旧封面墙，按批次交叉淡入。
         _state.value = _state.value.copy(
-            recentlyPlayed = null,
-            mostPlayed = null,
-            recentlyAdded = null,
+            historyEpoch = _state.value.historyEpoch + 1,
             discoverFailedSections = emptySet(),
             isDiscoverRefreshing = true
         )
@@ -972,7 +990,7 @@ class JellyfinViewModel(
     }
 
     private fun friendlyFileOpsError(error: Throwable): String = when (error) {
-        is LibraryFilesError.Unauthorized -> "文件操作密钥不对，去「QQ 下载」页检查密钥设置"
+        is LibraryFilesError.Unauthorized -> "文件操作密钥不对，去「设置 → 下载」检查密钥设置"
         is LibraryFilesError.ServiceUnreachable -> "电脑上的服务没开，或手机不在同一网络"
         is LibraryFilesError.Http -> "服务请求失败（${error.statusCode}）"
         is LibraryFilesError.InvalidResponse -> "服务返回了无法识别的数据"

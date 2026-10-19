@@ -10,16 +10,15 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -27,11 +26,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Checklist
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -70,28 +67,15 @@ import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.theme.Dimens
 
 /**
- * 「QQ 下载」区块：搜索 QQ 音乐 → 选音质下载（单曲/整专辑/专辑选曲）→ 看任务进度。
+ * 「设置 → 下载」二级页（ADR-0006）：下载服务的全部家当。
  *
- * 未连接服务时显示服务地址设置卡；连上后显示搜索 + 任务列表。
- * 凭证过期时顶部横幅提示，用户在电脑上打开 QQ 音乐客户端后点重试。
+ * 服务状态、凭证过期横幅与重试、默认音质、文件操作密钥、曲库索引信息、下载任务列表。
+ * 搜索已经搬进合并搜索页（[qqSearchSection]），这里不再有搜索框。
  */
 @Composable
-internal fun QQDownloadScreen(
+internal fun DownloadServiceScreen(
     state: QQDownloadUiState,
     onQualityChange: (String) -> Unit,
-    onSearchQueryChange: (String) -> Unit,
-    onDownloadSong: (QQSongDto) -> Unit,
-    onRequestRedownload: (QQSongDto) -> Unit,
-    onConfirmRedownload: () -> Unit,
-    onDismissRedownload: () -> Unit,
-    onDownloadAlbum: (QQAlbumDto) -> Unit,
-    onSelectAlbumTracks: (QQAlbumDto) -> Unit,
-    onToggleAlbumTrack: (String) -> Unit,
-    onSelectAllAlbumTracks: () -> Unit,
-    onClearAlbumSelection: () -> Unit,
-    onConfirmAlbumDownload: () -> Unit,
-    onRetryAlbumTracks: () -> Unit,
-    onDismissAlbumPicker: () -> Unit,
     onRetryCredential: () -> Unit,
     onRefreshCredential: () -> Unit,
     onRefreshJobs: () -> Unit,
@@ -102,12 +86,19 @@ internal fun QQDownloadScreen(
     LazyColumn(
         modifier
             .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
+            .statusBarsPadding()
             .padding(horizontal = Dimens.SpaceMedium)
-            .padding(top = GlassIslandTopSpacing),
+            .padding(top = Dimens.SpaceSmall),
         contentPadding = PaddingValues(bottom = 96.dp),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
+        item(key = "title") {
+            Text(
+                "下载服务",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(bottom = Dimens.SpaceSmall)
+            )
+        }
         if (state.credentialExpired) {
             item(key = "credentialExpired") {
                 SurfaceCard {
@@ -115,9 +106,8 @@ internal fun QQDownloadScreen(
                 }
             }
         }
-        // 错误反馈：ViewModel 几乎所有失败路径都写 errorMessage，这里统一展示
-        //（凭证过期已有专属卡片，跳过避免重复）。
-        val errorText = state.errorMessage?.takeIf { !state.credentialExpired }
+        // 服务级错误：这里展示的是「服务本身有问题」（凭证过期已有专属卡片，跳过避免重复）。
+        val errorText = state.searchError?.takeIf { !state.credentialExpired }
         if (errorText != null) {
             item(key = "errorText") {
                 Text(
@@ -130,30 +120,6 @@ internal fun QQDownloadScreen(
         }
         if (!state.serviceReachable || state.serviceUrl.isBlank()) {
             item(key = "serviceStatus") { SurfaceCard { ServiceStatusCard(state) } }
-        }
-        item(key = "searchField") {
-            OutlinedTextField(
-                value = state.searchQuery,
-                onValueChange = onSearchQueryChange,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(Dimens.CornerLarge),
-                placeholder = { Text("搜索 QQ 音乐歌曲、专辑") },
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
-                trailingIcon = if (state.searchQuery.isNotEmpty()) {
-                    {
-                        IconButton(
-                            onClick = { onSearchQueryChange("") },
-                            modifier = Modifier.size(Dimens.TouchTargetSmall)
-                        ) {
-                            Icon(Icons.Filled.Close, contentDescription = "清除搜索内容")
-                        }
-                    }
-                } else {
-                    null
-                },
-                singleLine = true,
-                enabled = state.serviceReachable
-            )
         }
         // 默认下载音质：下载时优先用这档，音源没有则自动降级。
         item(key = "quality") {
@@ -207,50 +173,6 @@ internal fun QQDownloadScreen(
         if (state.serviceReachable && !state.credentialExpired) {
             item(key = "credentialRefresh") { CredentialRefreshRow(state, onRefreshCredential) }
         }
-        if (state.isSearching) {
-            item(key = "searching") {
-                Box(Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-            }
-        }
-        if (state.songs.isNotEmpty()) {
-            item(key = "songsHeader") { QQSectionHeader("歌曲") }
-            items(state.songs, key = { song -> "song-${song.songMid}-${song.title}" }) { song ->
-                QQSongRow(
-                    song = song,
-                    downloading = song.songMid in state.activeDownloadingMids,
-                    inLibrary = song.songMid in state.inLibraryMids,
-                    onDownload = { onDownloadSong(song) },
-                    onRequestRedownload = { onRequestRedownload(song) }
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-            }
-        }
-        if (state.albums.isNotEmpty()) {
-            item(key = "albumsHeader") { QQSectionHeader("专辑") }
-            items(state.albums, key = { "album-${it.albumMid}" }) { album ->
-                QQAlbumRow(
-                    album = album,
-                    isEnqueuing = state.isEnqueuingAlbum && state.enqueuingAlbumMid == album.albumMid,
-                    onSelectTracks = { onSelectAlbumTracks(album) },
-                    onDownloadAll = { onDownloadAlbum(album) }
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-            }
-        }
-        if (state.searchQuery.isNotBlank() && !state.isSearching &&
-            state.songs.isEmpty() && state.albums.isEmpty()
-        ) {
-            item(key = "noResults") {
-                Text(
-                    "没有搜到相关内容（也可能是凭证或网络问题）",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(vertical = Dimens.SpaceSmall)
-                )
-            }
-        }
         if (state.jobs.isNotEmpty()) {
             item(key = "jobsHeader") {
                 Row(
@@ -268,14 +190,117 @@ internal fun QQDownloadScreen(
             }
         }
     }
-    // 选曲弹窗：AlertDialog 自带独立窗口，不占列表布局，直接跟在 LazyColumn 后面即可。
+}
+
+/**
+ * 合并搜索页的「QQ 音乐」分区（ADR-0006）：永远排在曲库结果之后。
+ *
+ * 失败只降级：分区内一行小字 + 重试，绝不变成整页错误——曲库明明搜到了，
+ * 不能被另一边的故障盖掉。下载动作的反馈不走这里（那是 Snackbar 的事）。
+ */
+internal fun LazyListScope.qqSearchSection(
+    state: QQDownloadUiState,
+    libraryEmpty: Boolean,
+    onDownloadSong: (QQSongDto) -> Unit,
+    onRequestRedownload: (QQSongDto) -> Unit,
+    onDownloadAlbum: (QQAlbumDto) -> Unit,
+    onSelectAlbumTracks: (QQAlbumDto) -> Unit,
+    onRetrySearch: () -> Unit
+) {
+    if (state.searchQuery.isBlank()) return
+    val hasResults = state.songs.isNotEmpty() || state.albums.isNotEmpty()
+    val statusText = state.searchStatus
+    // 什么都没有（没结果、没错误、没在搜）时连标题都不出：别在曲库结果下面留一个空分区。
+    if (!hasResults && statusText == null && !state.isSearching) return
+    // 「搜过了确实没有」说清楚：只在曲库为空、QQ 有结果时出现在 QQ 分区上方。
+    if (libraryEmpty && hasResults) {
+        item(key = "qqLibraryEmpty") {
+            Text(
+                "曲库中没找到「${state.searchQuery}」",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = Dimens.SpaceTiny, top = Dimens.SpaceTiny)
+            )
+        }
+    }
+    item(key = "qqHeader") { QQSectionHeader("QQ 音乐") }
+    // 搜索期失败的常驻小字（服务不可用 / 凭证过期）：只有这一格，不参与整页错误。
+    if (statusText != null) {
+        item(key = "qqError") {
+            Row(
+                Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceTiny),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    statusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = onRetrySearch) { Text("重试") }
+            }
+        }
+    }
+    if (state.isSearching) {
+        item(key = "qqSearching") {
+            Box(
+                Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge),
+                contentAlignment = Alignment.Center
+            ) { CircularProgressIndicator() }
+        }
+    }
+    if (state.songs.isNotEmpty()) {
+        item(key = "qqSongsHeader") { QQSectionHeader("歌曲") }
+        items(state.songs, key = { song -> "qq-song-${song.songMid}-${song.title}" }) { song ->
+            QQSongRow(
+                song = song,
+                downloading = song.songMid in state.activeDownloadingMids,
+                inLibrary = song.songMid in state.inLibraryMids,
+                onDownload = { onDownloadSong(song) },
+                onRequestRedownload = { onRequestRedownload(song) }
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        }
+    }
+    if (state.albums.isNotEmpty()) {
+        item(key = "qqAlbumsHeader") { QQSectionHeader("专辑") }
+        items(state.albums, key = { "qq-album-${it.albumMid}" }) { album ->
+            QQAlbumRow(
+                album = album,
+                isEnqueuing = state.isEnqueuingAlbum && state.enqueuingAlbumMid == album.albumMid,
+                onSelectTracks = { onSelectAlbumTracks(album) },
+                onDownloadAll = { onDownloadAlbum(album) }
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        }
+    }
+}
+
+/**
+ * 搜索页上的两个 QQ 弹窗：状态仍由 [QQDownloadViewModel] 持有，弹窗跟着搜索结果走。
+ * 不做全局弹窗——目前只有搜索页能发起下载。
+ */
+@Composable
+internal fun QQSearchDialogs(
+    state: QQDownloadUiState,
+    onConfirmRedownload: () -> Unit,
+    onDismissRedownload: () -> Unit,
+    onToggleAlbumTrack: (String) -> Unit,
+    onSelectAllAlbumTracks: () -> Unit,
+    onClearAlbumSelection: () -> Unit,
+    onConfirmAlbumDownload: () -> Unit,
+    onRetryAlbumTracks: () -> Unit,
+    onDismissAlbumPicker: () -> Unit,
+    onRetryCredential: () -> Unit
+) {
+    // 选曲弹窗：AlertDialog 自带独立窗口，不占列表布局。
     state.albumPicker?.let { picker ->
         AlbumPickerDialog(
             picker = picker,
             // 按专辑收窄（同专辑行的判法）：别的专辑正在入队时，不能把本弹窗一起冻住。
             isEnqueuing = state.isEnqueuingAlbum && state.enqueuingAlbumMid == picker.albumMid,
             // 凭证过期有专属卡片（同主列表的横幅），避免和 errorMessage 重复说同一件事。
-            errorMessage = state.errorMessage?.takeIf { !state.credentialExpired },
+            errorMessage = picker.errorMessage?.takeIf { !state.credentialExpired },
             credentialExpired = state.credentialExpired,
             isRetryingCredential = state.isRetryingCredential,
             onRetryCredential = onRetryCredential,

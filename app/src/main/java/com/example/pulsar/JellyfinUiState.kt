@@ -39,6 +39,14 @@ data class JellyfinUiState(
      * 下一次真正发起请求时把对应项移出（重试能看到骨架）。
      */
     val discoverFailedSections: Set<String> = emptySet(),
+    /**
+     * 播放历史「版本号」：切歌（服务端 UserData 变了）或下拉刷新时递增。
+     *
+     * **过期不等于清空**：数据仍留在 [recentlyPlayed] / [mostPlayed] / [recentlyAdded] 里
+     * 照常显示，后台静默重拉成功后原地替换。清成 null 会让发现页横滑先闪成骨架再弹回来。
+     * 界面把它当 LaunchedEffect 的 key 触发重拉；每节自己记住已拉到的版本，相等就不再请求。
+     */
+    val historyEpoch: Int = 0,
     /** 发现页下拉刷新进行中（指示器用）。与 [isLoading] 分开：进页时的常规加载不该弹刷新圈。 */
     val isDiscoverRefreshing: Boolean = false,
     val albums: List<Album>? = null,

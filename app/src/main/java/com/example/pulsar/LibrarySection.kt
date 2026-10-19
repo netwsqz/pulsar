@@ -11,7 +11,8 @@ internal sealed interface LibrarySection {
     data object Genres : LibrarySection
     data object Playlists : LibrarySection
     data object Search : LibrarySection
-    data object QQDownload : LibrarySection
+    /** 下载服务页（ADR-0006）：从「设置 → 下载」进入，不再占顶层 chip。 */
+    data object DownloadService : LibrarySection
     data object Settings : LibrarySection
     data object CachedCopies : LibrarySection
     data class AlbumDetail(val album: Album) : LibrarySection
@@ -27,9 +28,10 @@ internal sealed interface LibrarySection {
 
 /**
  * 顶层导航顺序与文案（工单 04）：对齐 Auxio 的 tab 语义——发现 + Songs / Albums / Artists /
- * Genres / Playlists；QQ 下载是 Pulsar 自有入口，排在最后。
+ * Genres / Playlists。
  *
- * 详情页 / 搜索 / 设置 / 已缓存不在此列：它们从别处进入，不是顶层页签。
+ * 只放「曲库的浏览维度」。QQ 下载是「往曲库里加东西」的工具，已降级为设置里的二级页
+ * （ADR-0006），不在此列。详情页 / 搜索 / 设置 / 已缓存同样从别处进入，不是顶层页签。
  * 文案跟着 [LibrarySection] 放这里，避免 chip 和占位页各写一份标题。
  */
 internal val TopLevelSections: List<Pair<LibrarySection, String>> = listOf(
@@ -38,8 +40,7 @@ internal val TopLevelSections: List<Pair<LibrarySection, String>> = listOf(
     LibrarySection.Albums to "专辑",
     LibrarySection.Artists to "艺术家",
     LibrarySection.Genres to "流派",
-    LibrarySection.Playlists to "播放列表",
-    LibrarySection.QQDownload to "QQ 下载"
+    LibrarySection.Playlists to "播放列表"
 )
 
 /** 顶层页签序号（决定左右切换方向）；非顶层页返回 -1。 */
@@ -55,4 +56,5 @@ internal fun LibrarySection.isDetail(): Boolean =
         this is LibrarySection.PlaylistDetail ||
         this is LibrarySection.GroupDetail ||
         this is LibrarySection.Settings ||
-        this is LibrarySection.CachedCopies
+        this is LibrarySection.CachedCopies ||
+        this is LibrarySection.DownloadService

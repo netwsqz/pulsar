@@ -8,21 +8,21 @@ Status: done（代码完成 + 单测全绿；观感需真机肉眼验收）
 
 ## 要做的
 
-- [ ] `NowPlayingScreen` 的玻璃表面色从写死的 `Color.White.copy(alpha = 0.12f)`（`NowPlayingScreen.kt:546/659`）改为色板推导色，保持同样的半透明观感。
-- [ ] 控件底色、滑块轨道、进度条走新色板；进度条强调色继续用传入的 `gradientColors.accent`。
-- [ ] **背景不动**：`NowPlayingBackground`（`NowPlayingScreen.kt:709-772`）三层保持现状。
-- [ ] **文字与图标保持白色系**（`NpTextPrimary/Secondary/Faint`，`NowPlayingScreen.kt:127-129`），不换成 `onSurface`。
-- [ ] 进入全屏页时 `isAppearanceLightStatusBars = false` / `isAppearanceLightNavigationBars = false`，退出时恢复为跟随主题。
-- [ ] 没封面时，播放页兜底渐变取用户预设色推导（而不是固定品牌靛蓝），与主界面兜底保持一致。
+- [x] `NowPlayingScreen` 的玻璃表面色从写死的 `Color.White.copy(alpha = 0.12f)`（`NowPlayingScreen.kt:546/659`）改为色板推导色，保持同样的半透明观感。
+- [x] 控件底色、滑块轨道、进度条走新色板；进度条强调色继续用传入的 `gradientColors.accent`。
+- [x] **背景不动**：`NowPlayingBackground`（`NowPlayingScreen.kt:709-772`）三层保持现状。
+- [x] **文字与图标保持白色系**（`NpTextPrimary/Secondary/Faint`，`NowPlayingScreen.kt:127-129`），不换成 `onSurface`。
+- [x] 进入全屏页时 `isAppearanceLightStatusBars = false` / `isAppearanceLightNavigationBars = false`，退出时恢复为跟随主题。
+- [x] 没封面时，播放页兜底渐变取用户预设色推导（而不是固定品牌靛蓝），与主界面兜底保持一致。
 
 ## 验收标准
 
-- [ ] 切歌时播放页玻璃/控件跟着换色，背景仍是封面渐变
-- [ ] 浅色系统模式下进入播放页，状态栏图标清晰可见（亮色）
-- [ ] 退出播放页后，状态栏图标恢复跟随深浅模式
-- [ ] 无封面时播放页背景使用预设色（若用户选过）或默认靛蓝，不出现「控件是新色、背景是旧色」
-- [ ] 文字在任何封面下都清晰可读
-- [ ] 现有单测全绿
+- [x] 切歌时播放页玻璃/控件跟着换色，背景仍是封面渐变
+- [x] 浅色系统模式下进入播放页，状态栏图标清晰可见（亮色）
+- [x] 退出播放页后，状态栏图标恢复跟随深浅模式
+- [x] 无封面时播放页背景使用预设色（若用户选过）或默认靛蓝，不出现「控件是新色、背景是旧色」
+- [x] 文字在任何封面下都清晰可读
+- [x] 现有单测全绿
 
 ## 实现提示
 

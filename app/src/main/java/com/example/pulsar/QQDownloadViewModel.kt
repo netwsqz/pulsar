@@ -25,6 +25,14 @@ import kotlinx.coroutines.launch
 private const val SEARCH_DEBOUNCE_MS = 300L
 private const val JOB_POLL_INTERVAL_MS = 2_000L
 
+/** 「连不上服务」的话术：搜索分区小字、动作 Snackbar、服务状态卡共用一句。 */
+private const val SERVICE_UNREACHABLE_MESSAGE =
+    "连不上下载服务：确认电脑上已启动（start.bat），且手机和电脑在同一网络"
+
+/** 「还没配服务」的话术（自动填地址之前/未登录）。 */
+private const val SERVICE_NOT_CONNECTED_MESSAGE =
+    "下载服务未连接：去「设置 → 下载」检查服务状态"
+
 /** 曲库索引没就绪时重查健康接口的间隔（冷扫 595 首约 17 秒）。 */
 private const val HEALTH_RECHECK_INTERVAL_MS = 3_000L
 
@@ -102,7 +110,7 @@ class QQDownloadViewModel(
     }
 
     fun updateSearchQuery(value: String) {
-        _state.value = _state.value.copy(searchQuery = value, errorMessage = null)
+        _state.value = _state.value.copy(searchQuery = value, searchError = null)
         searchJob?.cancel()
         val query = value.trim()
         val currentApi = api
@@ -112,7 +120,7 @@ class QQDownloadViewModel(
             return
         }
         if (currentApi == null) {
-            _state.value = _state.value.copy(errorMessage = "请先在下方设置并连接下载服务")
+            _state.value = _state.value.copy(searchError = SERVICE_NOT_CONNECTED_MESSAGE)
             return
         }
         val generation = ++searchGeneration
@@ -130,6 +138,8 @@ class QQDownloadViewModel(
                         _state.value = _state.value.copy(
                             isSearching = false,
                             songs = songs,
+                            // 搜索能成功就说明服务是通的：把之前那次「连不上」的常驻小字撤掉。
+                            serviceReachable = true,
                             searchHadResults = songs.isNotEmpty(),
                             inLibraryMids = _state.value.inLibraryMids + songs.filter { it.inLibrary }.map { it.songMid }.toSet(),
                             downloadingMids = songs.filter { it.downloading }.map { it.songMid }.toSet()
@@ -138,20 +148,22 @@ class QQDownloadViewModel(
                 },
                 onFailure = { error ->
                     searchFailed = true
-                    handleApiError(error)
+                    // 搜索期失败只写分区小字（toSearch = true），不弹 Snackbar：
+                    // 搜索页同时画着曲库结果，动作反馈那条路不能来抢。
+                    showSearchError(error)
                 }
             )
             if (!searchFailed && coroutineContext.isActive && generation == searchGeneration) {
                 currentApi.searchAlbums(query).fold(
                     onSuccess = { albums ->
                         // 代次已过期就悄悄丢弃：searchFailed 已在这一轮开头定好，
-                        // 这里再走 handleApiError 会把新一轮搜索的错误文案冲掉。
+                        // 这里再走 showSearchError 会把新一轮搜索的错误文案冲掉。
                         if (generation == searchGeneration) {
                             _state.value = _state.value.copy(albums = albums)
                         }
                     },
                     onFailure = { error ->
-                        if (generation == searchGeneration) handleApiError(error)
+                        if (generation == searchGeneration) showSearchError(error)
                     }
                 )
             }
@@ -164,12 +176,12 @@ class QQDownloadViewModel(
      */
     fun downloadSong(song: QQSongDto, force: Boolean = false) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(errorMessage = "请先连接下载服务")
+            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
             return
         }
         val quality = selectQuality(song.availableQualities)
         if (quality == null) {
-            _state.value = _state.value.copy(errorMessage = "该歌曲没有可下载的音质")
+            _state.value = _state.value.copy(actionMessage = "该歌曲没有可下载的音质")
             return
         }
         viewModelScope.launch(dispatcher) {
@@ -190,7 +202,7 @@ class QQDownloadViewModel(
                         startPolling()
                     }
                 },
-                onFailure = ::handleApiError
+                onFailure = ::showActionError
             )
         }
     }
@@ -212,24 +224,24 @@ class QQDownloadViewModel(
 
     fun downloadAlbum(album: QQAlbumDto) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(errorMessage = "请先连接下载服务")
+            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
             return
         }
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isEnqueuingAlbum = true, enqueuingAlbumMid = album.albumMid, errorMessage = null)
+            _state.value = _state.value.copy(isEnqueuingAlbum = true, enqueuingAlbumMid = album.albumMid, actionMessage = null)
             currentApi.enqueueAlbum(album.albumMid, _state.value.quality).fold(
                 onSuccess = { response ->
                     _state.value = _state.value.copy(
                         isEnqueuingAlbum = false,
                         enqueuingAlbumMid = null,
                         // 跳过了几首必须说出来：默默什么都不做会让人以为按钮坏了。
-                        errorMessage = albumSkipMessage(response)
+                        actionMessage = albumSkipMessage(response)
                     )
                     startPolling()
                 },
                 onFailure = { error ->
                     _state.value = _state.value.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null)
-                    handleApiError(error)
+                    showActionError(error)
                 }
             )
         }
@@ -238,7 +250,7 @@ class QQDownloadViewModel(
     /** 打开专辑选曲弹窗并拉取曲目列表（默认全不选：整张下载有专辑行上的专门按钮）。 */
     fun openAlbumPicker(album: QQAlbumDto) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(errorMessage = "请先连接下载服务")
+            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
             return
         }
         loadAlbumTracks(currentApi, album.albumMid, album.albumName)
@@ -292,12 +304,12 @@ class QQDownloadViewModel(
         val picker = _state.value.albumPicker ?: return
         if (picker.selectedMids.isEmpty()) return
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(errorMessage = "请先连接下载服务")
+            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
             return
         }
         viewModelScope.launch(dispatcher) {
             _state.value = _state.value.copy(
-                isEnqueuingAlbum = true, enqueuingAlbumMid = picker.albumMid, errorMessage = null
+                isEnqueuingAlbum = true, enqueuingAlbumMid = picker.albumMid, actionMessage = null
             )
             currentApi.enqueueAlbum(picker.albumMid, _state.value.quality, picker.selectedMids.toList()).fold(
                 onSuccess = { response ->
@@ -310,14 +322,14 @@ class QQDownloadViewModel(
                         isEnqueuingAlbum = false,
                         enqueuingAlbumMid = null,
                         albumPicker = null,
-                        errorMessage = if (missing > 0) "有 $missing 首已不在该专辑内，未加入下载" else null
+                        actionMessage = if (missing > 0) "有 $missing 首已不在该专辑内，未加入下载" else null
                     )
                     startPolling()
                 },
                 onFailure = { error ->
                     // 失败保留弹窗与勾选：重选一遍代价太高，用户修好问题（如刷新凭证）可直接再点。
                     _state.value = _state.value.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null)
-                    handleApiError(error)
+                    setPickerError(error)
                 }
             )
         }
@@ -328,7 +340,7 @@ class QQDownloadViewModel(
         // 先亮弹窗再拉列表：加载中也要看得见，用户才知道点到了。
         _state.value = _state.value.copy(
             albumPicker = AlbumPickerState(albumMid = albumMid, albumName = albumName),
-            errorMessage = null
+            actionMessage = null
         )
         viewModelScope.launch(dispatcher) {
             currentApi.albumSongs(albumMid).fold(
@@ -344,9 +356,15 @@ class QQDownloadViewModel(
                 onFailure = { error ->
                     if (generation != pickerGeneration) return@fold
                     // 加载失败也要收掉转圈，弹窗里改成「错误 + 重新获取」。
+                    // 凭证过期仍要点亮过期横幅（弹窗里的「重试提取凭证」靠它出现）。
+                    // 错误文案只写进弹窗：模态弹窗挡着 Snackbar，且 Snackbar 显示完就清。
+                    applyErrorFlags(error)
+                    val message = errorTextFor(error)
                     val picker = _state.value.albumPicker ?: return@fold
-                    _state.value = _state.value.copy(albumPicker = picker.copy(isLoading = false))
-                    handleApiError(error)
+                    _state.value = _state.value.copy(
+                        albumPicker = picker.copy(isLoading = false, errorMessage = message),
+                        isSearching = false
+                    )
                 }
             )
         }
@@ -356,44 +374,65 @@ class QQDownloadViewModel(
     fun retryCredential() {
         val currentApi = api ?: return
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isRetryingCredential = true, errorMessage = null)
+            _state.value = _state.value.copy(isRetryingCredential = true, actionMessage = null)
             currentApi.retryCredential().fold(
                 onSuccess = {
                     _state.value = _state.value.copy(
                         isRetryingCredential = false,
                         credentialExpired = false,
-                        errorMessage = null
+                        actionMessage = null,
+                        searchError = null
                     )
+                    // 凭证恢复了，搜索页还停在同一句词：自动重搜，别让分区挂着旧错误。
+                    if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
                     // 弹窗还开着但没拉到曲目（就是被凭证卡住的）→ 自动重拉，不用用户再点一次
                     if (_state.value.albumPicker?.tracks.isNullOrEmpty()) retryAlbumTracks()
                 },
                 onFailure = { error ->
                     _state.value = _state.value.copy(isRetryingCredential = false)
-                    handleApiError(error)
+                    // 分区里的「重试」就是这条路：失败文案回到同一格小字，别又弹一条 Snackbar。
+                    if (_state.value.albumPicker == null) {
+                        showSearchError(error)
+                    } else {
+                        setPickerError(error)
+                    }
                 }
             )
         }
+    }
+
+    /** 搜索分区「重试」：凭证过期走重提，否则重新探活；查询词还在就顺手重搜一遍。 */
+    fun retrySearch() {
+        if (_state.value.credentialExpired) {
+            retryCredential()
+            return
+        }
+        viewModelScope.launch(dispatcher) { checkHealth() }
+        if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
     }
 
     /** 手动一键刷新凭证：连接后随时可用（比如刚在电脑上重新登录了 QQ 音乐）。 */
     fun refreshCredential() {
         val currentApi = api ?: return
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isRetryingCredential = true, credentialMessage = null, errorMessage = null)
+            _state.value = _state.value.copy(isRetryingCredential = true, credentialMessage = null, actionMessage = null)
             currentApi.retryCredential().fold(
                 onSuccess = {
                     _state.value = _state.value.copy(
                         isRetryingCredential = false,
                         credentialExpired = false,
-                        credentialMessage = "凭证已刷新"
+                        credentialMessage = "凭证已刷新",
+                        // 搜索页可能还挂着上一次「凭证过期」的小字：刷新成功一并撤掉。
+                        searchError = null
                     )
+                    if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
                 },
                 onFailure = { error ->
                     // 提取不到新凭证 ≠ 当前凭证过期（常见：电脑上没开 QQ 音乐客户端），
                     // 所以这里不点亮过期横幅，只提示原因。
                     _state.value = _state.value.copy(isRetryingCredential = false)
                     _state.value = _state.value.copy(
-                        errorMessage = when (error) {
+                        actionMessage = when (error) {
                             is QQDownloadError.CredentialExpired ->
                                 "刷新凭证失败：请确认电脑上 QQ 音乐客户端正在运行并已登录"
                             is QQDownloadError.ServiceUnreachable ->
@@ -409,7 +448,7 @@ class QQDownloadViewModel(
     fun refreshJobs() {
         val currentApi = api ?: return
         viewModelScope.launch(dispatcher) {
-            currentApi.jobs().fold(::applyJobs, ::handleApiError)
+            currentApi.jobs().fold(::applyJobs, ::showActionError)
         }
     }
 
@@ -454,7 +493,8 @@ class QQDownloadViewModel(
                     },
                     onFailure = { error ->
                         // 首查失败才报错；重查失败静默停（服务可能关了），不刷屏。
-                        if (firstAttempt) handleApiError(error)
+                        // 探活失败是「服务不可用」的持续状态：放搜索分区小字，不弹 Snackbar。
+                        if (firstAttempt) showSearchError(error)
                     }
                 )
                 firstAttempt = false
@@ -472,7 +512,8 @@ class QQDownloadViewModel(
             libraryReady = health.library.ready,
             libraryCount = health.library.count,
             libraryRoot = health.libraryRoot.ifBlank { health.library.root },
-            errorMessage = if (health.ffmpegReady) null
+            // ffmpeg 不可用是「服务不能干活」的持续状态，和连不上/凭证过期同类：放分区小字那一格。
+            searchError = if (health.ffmpegReady) null
                 else (health.ffmpegError ?: "电脑端 ffmpeg 不可用，无法处理下载")
         )
     }
@@ -486,7 +527,7 @@ class QQDownloadViewModel(
             while (coroutineContext.isActive && generation == pollGeneration) {
                 val result = currentApi.jobs()
                 val hasActive = result.fold(::applyJobs) { error ->
-                    handleApiError(error)
+                    showActionError(error)
                     false
                 }
                 if (!hasActive) break
@@ -514,37 +555,61 @@ class QQDownloadViewModel(
         else -> "已跳过 ${response.skippedCount} 首（已在库），新加入下载 ${response.count} 首"
     }
 
-    private fun handleApiError(error: Throwable) {
+    /**
+     * 两类失败必须走两条渲染路径（ADR-0006）：
+     * - 搜索期失败（不可达 / 凭证过期 / 服务异常）→ 搜索页 QQ 分区内小字常驻；
+     * - 下载**动作**失败 → Snackbar。
+     * 共用一格会让「电脑没开」把曲库结果盖掉，或者让一条临时提示赖在结果列表里。
+     */
+    private fun showSearchError(error: Throwable) {
+        applyErrorFlags(error)
+        val message = errorTextFor(error)
+        _state.value = _state.value.copy(isSearching = false, searchError = message)
+    }
+
+    private fun showActionError(error: Throwable) {
+        applyErrorFlags(error)
+        val message = errorTextFor(error)
+        _state.value = _state.value.copy(
+            isSearching = false,
+            isEnqueuingAlbum = false,
+            actionMessage = message
+        )
+    }
+
+    /** 弹窗里也要一份错误文案：模态弹窗挡着 Snackbar，且 Snackbar 显示完就清。 */
+    private fun setPickerError(error: Throwable) {
+        applyErrorFlags(error)
+        val message = errorTextFor(error)
+        val picker = _state.value.albumPicker ?: return
+        _state.value = _state.value.copy(albumPicker = picker.copy(errorMessage = message))
+    }
+
+    /** 错误附带的服务状态变化（凭证过期 / 服务不可达）：和文案分开，文案保持纯函数。 */
+    private fun applyErrorFlags(error: Throwable) {
         when (error) {
             is CancellationException -> throw error
-            is QQDownloadError.CredentialExpired -> {
-                _state.value = _state.value.copy(
-                    credentialExpired = true,
-                    isSearching = false,
-                    isEnqueuingAlbum = false,
-                    errorMessage = "QQ 音乐凭证已过期：请在电脑上打开 QQ 音乐并登录，然后点「重试提取凭证」"
-                )
-            }
-            is QQDownloadError.ServiceUnreachable -> {
-                _state.value = _state.value.copy(
-                    serviceReachable = false,
-                    isSearching = false,
-                    errorMessage = "连不上下载服务：确认电脑上已启动（start.bat），且手机和电脑在同一网络"
-                )
-            }
-            is QQDownloadError.Http -> {
-                _state.value = _state.value.copy(
-                    isSearching = false,
-                    errorMessage = "下载服务返回 ${error.statusCode}：${error.detail.take(80)}"
-                )
-            }
-            is QQDownloadError.InvalidResponse -> {
-                _state.value = _state.value.copy(isSearching = false, errorMessage = "下载服务返回了无法识别的数据")
-            }
-            else -> {
-                _state.value = _state.value.copy(isSearching = false, errorMessage = "请求失败，请稍后重试")
-            }
+            is QQDownloadError.CredentialExpired ->
+                _state.value = _state.value.copy(credentialExpired = true)
+            is QQDownloadError.ServiceUnreachable ->
+                _state.value = _state.value.copy(serviceReachable = false)
+            else -> Unit
         }
+    }
+
+    private fun errorTextFor(error: Throwable): String = when (error) {
+        is CancellationException -> throw error
+        is QQDownloadError.CredentialExpired ->
+            "QQ 音乐凭证已过期：请在电脑上打开 QQ 音乐并登录，然后点「重试提取凭证」"
+        is QQDownloadError.ServiceUnreachable -> SERVICE_UNREACHABLE_MESSAGE
+        is QQDownloadError.Http -> "下载服务返回 ${error.statusCode}：${error.detail.take(80)}"
+        is QQDownloadError.InvalidResponse -> "下载服务返回了无法识别的数据"
+        else -> "请求失败，请稍后重试"
+    }
+
+    /** Snackbar 显示完（或用户划掉）后清掉动作反馈。 */
+    fun dismissActionMessage() {
+        _state.value = _state.value.copy(actionMessage = null)
     }
 
     override fun onCleared() {
@@ -593,7 +658,13 @@ data class QQDownloadUiState(
     val fileOpsKey: String = "",
     /** 密钥输入框的当前值；与 [fileOpsKey] 不同才允许保存。 */
     val fileOpsKeyInput: String = "",
-    val errorMessage: String? = null
+    /**
+     * 搜索期失败（连不上服务 / 凭证过期 / ffmpeg 不可用）：搜索页 QQ 分区内的一行小字，常驻。
+     * 与 [actionMessage] 分开——共用一格会让「电脑没开」把曲库搜索结果盖掉（ADR-0006）。
+     */
+    val searchError: String? = null,
+    /** 下载动作的反馈（音质不可用 / 入队失败 / 整专跳过 N 首）：走 Snackbar，显示完即清。 */
+    val actionMessage: String? = null
 ) {
     /** 正在下载的 mid：服务端最新标记 ∪ 本地任务队列 queued/running（刚点下去还没轮询到也要立刻准）。 */
     val activeDownloadingMids: Set<String>
@@ -601,6 +672,19 @@ data class QQDownloadUiState(
             .map { it.songMid }
             .toSet()
 }
+
+/**
+ * 搜索页 QQ 分区顶部那行常驻状态：搜索期失败或凭证过期。
+ *
+ * 凭证过期即便还没搜（健康接口先报出来的）也要提前说，别等用户点了下载才拦。
+ * 与 [QQDownloadUiState.actionMessage] 是两条渲染路径：这条常驻在分区里，那条走 Snackbar。
+ */
+internal val QQDownloadUiState.searchStatus: String?
+    get() = searchError ?: if (credentialExpired) {
+        "QQ 音乐凭证已过期：在电脑上打开 QQ 音乐并登录，然后点「重试」"
+    } else {
+        null
+    }
 
 /** 选曲弹窗顶部汇总文案：「共 12 首 · 已有 8 首」。 */
 internal fun albumPickerSummary(tracks: List<QQAlbumSongDto>, inLibraryMids: Set<String>): String =
@@ -612,5 +696,7 @@ data class AlbumPickerState(
     val albumName: String,
     val isLoading: Boolean = true,
     val tracks: List<QQAlbumSongDto> = emptyList(),
-    val selectedMids: Set<String> = emptySet()
+    val selectedMids: Set<String> = emptySet(),
+    /** 弹窗内错误（曲目列表拉不到 / 入队失败）：模态弹窗挡着 Snackbar，只能写在这里。 */
+    val errorMessage: String? = null
 )

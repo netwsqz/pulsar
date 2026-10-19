@@ -1431,8 +1431,9 @@ class JellyfinViewModelTest {
     }
 
     @Test
-    fun `切歌后播放历史缓存作废，下次进发现页重新拉取`() = runTest {
+    fun `切歌后播放历史标记过期但保留旧数据，重拉成功前不闪空`() = runTest {
         // 工单 09：播放上报会改服务端的 UserData，「最近播放」不能一直用旧缓存。
+        // 但清成 null 会让发现页两节先闪成骨架——只打过期标记，旧列表留在屏幕上。
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
             recentlyPlayedResult = Result.success(listOf(track))
             mostPlayedResult = Result.success(listOf(track))
@@ -1450,14 +1451,85 @@ class JellyfinViewModelTest {
         )
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.recentlyPlayed)
-        assertNull(viewModel.state.value.mostPlayed)
+        // 旧数据还在（界面不会先空一帧），只是版本号推进了
+        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(track), viewModel.state.value.mostPlayed)
+        assertEquals(1, viewModel.state.value.historyEpoch)
 
         viewModel.loadRecentlyPlayed()
         viewModel.loadMostPlayed()
         advanceUntilIdle()
         assertEquals(2, api.recentlyPlayedCalls)
         assertEquals(2, api.mostPlayedCalls)
+        // 版本号对上了：再调一次不会重复请求
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+        assertEquals(2, api.recentlyPlayedCalls)
+        assertEquals(2, api.mostPlayedCalls)
+    }
+
+    @Test
+    fun `切歌后的重拉在途时旧历史仍然显示`() = runTest {
+        val old = Track("old-1", "旧的", "歌手", "专辑", 1L, null)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(old))
+            mostPlayedResult = Result.success(listOf(old))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        api.historyGate = gate
+        viewModel.onMediaItemTransition(MediaItem.Builder().setMediaId("track-1").build())
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        advanceUntilIdle()
+
+        // 请求还没回来：旧列表必须还在（这就是「不闪」）
+        assertEquals(listOf(old), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(old), viewModel.state.value.mostPlayed)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(2, api.recentlyPlayedCalls)
+    }
+
+    @Test
+    fun `下拉刷新期间历史旧数据保留，不闪骨架`() = runTest {
+        val old = Track("old-1", "旧的", "歌手", "专辑", 1L, null)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(old))
+            mostPlayedResult = Result.success(listOf(old))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadMostPlayed()
+        viewModel.loadRecentlyAdded()
+        advanceUntilIdle()
+
+        api.historyGate = gate
+        viewModel.refreshDiscover()
+        advanceUntilIdle()
+
+        // 刷新进行中：旧数据都在，界面不会掉进骨架屏
+        assertTrue(viewModel.state.value.isDiscoverRefreshing)
+        assertEquals(listOf(old), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(old), viewModel.state.value.mostPlayed)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertFalse(viewModel.state.value.isDiscoverRefreshing)
+        assertEquals(2, api.recentlyPlayedCalls)
     }
 
     @Test

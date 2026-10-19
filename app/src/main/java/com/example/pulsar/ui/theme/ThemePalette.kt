@@ -162,6 +162,16 @@ fun deriveColorScheme(seed: Color, darkTheme: Boolean): ColorScheme {
 }
 
 /**
+ * 背景渐变用的压深：只乘 HSL 明度，色相与饱和度原样保留。
+ * [factor] 越小越深；1 = 不变。用于主界面背景——色板的 surface 三档本身接近白，
+ * 直接铺满全屏会显得发飘、没有层次。
+ */
+internal fun Color.deepened(factor: Float): Color {
+    val hsl = hslOf(toArgb())
+    return hslColor(hsl[0], hsl[1], (hsl[2] * factor).coerceIn(0f, 1f))
+}
+
+/**
  * `on*` 角色：在「最暗档 / 最亮档」两个固定候选里按相对亮度选对比更高的那个。
  * 这是**一条结构规则**，不是逐对配色校验；但必须看相对亮度而不是 HSL 明度——
  * 黄色 l=0.45 已经很亮，按明度档位给白字会糊成一片。

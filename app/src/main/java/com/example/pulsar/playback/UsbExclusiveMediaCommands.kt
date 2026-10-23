@@ -44,6 +44,18 @@ object UsbExclusiveMediaCommands {
     fun volumePercentFrom(extras: Bundle): Int? =
         if (extras.containsKey(KEY_VOLUME_PERCENT)) extras.getInt(KEY_VOLUME_PERCENT) else null
 
+    /**
+     * USB 泵是否真的在输出（= 声音已绕过系统混音器）。
+     *
+     * 音量键接管必须以此为条件，不能用"独占开关开着"：开关开着但没插设备（或泵还没起来）
+     * 时声音走的是系统 AudioTrack，此时吃掉音量键只会去改一个对实际出声无效的 USB 音量，
+     * 表现为"音量键完全没反应"。只有泵在跑，系统音量才是那个无效的东西。
+     */
+    fun isUsbAudioActive(state: String): Boolean = state == "streaming"
+
+    /** 同上，给服务侧用（状态机对象，避免为一次判断绕一圈字符串）。 */
+    fun isUsbAudioActive(state: UsbExclusiveState): Boolean = state is UsbExclusiveState.Streaming
+
     fun stateBundle(
         enabled: Boolean,
         state: UsbExclusiveState,

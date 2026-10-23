@@ -95,6 +95,8 @@ class PlaybackService : MediaSessionService() {
     private var usbExclusiveEnabled = false
     private var usbExclusiveState: UsbExclusiveState = UsbExclusiveState.Disabled
     private var usbVolumePercent = kDefaultVolumePercent
+    /** 当前 session 上挂的是不是远程音量包装；用于避免状态抖动时反复 setPlayer。 */
+    private var sessionUsbVolumeMounted = false
     private var rebuildingPlayer = false
 
     // 静音跳曲：音频 sink（播放线程）写电平，轮询协程读电平结合位置/时长判定。
@@ -310,7 +312,11 @@ class PlaybackService : MediaSessionService() {
             }
         }
         serviceScope.launch {
-            usbExclusiveController.state.collect { usbExclusiveState = it }
+            usbExclusiveController.state.collect { state ->
+                usbExclusiveState = state
+                // 泵起来/停下决定要不要接管系统音量键（见 playerForSession）。
+                refreshSessionVolumeWrapper()
+            }
         }
         serviceScope.launch {
             silenceSkipPreferences.enabled.collect { enabled ->
@@ -393,13 +399,27 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 交给 MediaSession 的播放器：USB 独占时包一层 [RemoteVolumePlayer]，让系统把
-     * 音量键与系统音量条交给 App（详见该类注释）；退出独占时交回裸播放器，音量键
-     * 立刻恢复系统行为。挂/摘就是这一次选择——Media3 每次换 player 都会重读
-     * DeviceInfo 并重挂远程音量 provider。
+     * 交给 MediaSession 的播放器：USB 泵**正在输出**时包一层 [RemoteVolumePlayer]，让系统
+     * 把音量键与系统音量条交给 App（详见该类注释）；其余情况交回裸播放器，音量键恢复系统
+     * 行为。挂/摘就是这一次选择——Media3 每次换 player 都会重读 DeviceInfo 并重挂远程音量
+     * provider。
+     *
+     * 条件用"泵在输出"而不是"独占开关开着"：开关开着但没插设备时声音实际走系统
+     * AudioTrack，此时挂远程音量会让音量键调到一个对出声无效的 USB 音量 = 音量键失灵。
      */
-    private fun playerForSession(exoPlayer: ExoPlayer): Player =
-        if (usbExclusiveEnabled) RemoteVolumePlayer(exoPlayer, remoteVolumeSource) else exoPlayer
+    private fun playerForSession(exoPlayer: ExoPlayer, exclusive: Boolean = usbExclusiveEnabled): Player {
+        val mount = exclusive && UsbExclusiveMediaCommands.isUsbAudioActive(usbExclusiveState)
+        sessionUsbVolumeMounted = mount
+        return if (mount) RemoteVolumePlayer(exoPlayer, remoteVolumeSource) else exoPlayer
+    }
+
+    /** 独占状态变化后按需重新挂/摘远程音量包装（挂载条件见 [playerForSession]）。 */
+    private fun refreshSessionVolumeWrapper() {
+        val exoPlayer = player ?: return
+        val shouldMount = usbExclusiveEnabled && UsbExclusiveMediaCommands.isUsbAudioActive(usbExclusiveState)
+        if (shouldMount == sessionUsbVolumeMounted) return
+        mediaSession?.setPlayer(playerForSession(exoPlayer))
+    }
 
     /**
      * 回放增益（ReplayGain）：把当前曲目的响度增益换算成线性系数写进
@@ -618,7 +638,7 @@ class PlaybackService : MediaSessionService() {
             oldPlayer.playWhenReady = false
             restorePlayerState(newPlayer, state)
             newPlayer.setPreferredAudioDevice(usbOutputDevice.value)
-            mediaSession?.setPlayer(playerForSession(newPlayer))
+            mediaSession?.setPlayer(playerForSession(newPlayer, isUsbExclusive))
             if (isUsbExclusive) usbExclusiveController.enable()
             else usbExclusiveController.disable()
             player = newPlayer
@@ -629,7 +649,7 @@ class PlaybackService : MediaSessionService() {
             oldPlayer.release()
             newPlayer.playWhenReady = state.playWhenReady
         } catch (error: Throwable) {
-            runCatching { mediaSession?.setPlayer(oldPlayer) }
+            runCatching { mediaSession?.setPlayer(playerForSession(oldPlayer)) }
             runCatching {
                 if (usbExclusiveEnabled) usbExclusiveController.enable()
                 else usbExclusiveController.disable()

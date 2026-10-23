@@ -77,7 +77,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 - `UsbAudioOutput.kt`：USB 音频设备插拔监听与路由（插 DAC 强制 `setPreferredAudioDevice`，拔掉回系统默认）。
 - **USB 独占下的音量键**（`RemoteVolumePlayer.kt` + `ForegroundVolumeKeys.kt`，详见 `docs/usb-volume-key-interception.md`）：独占模式绕过 AudioFlinger，系统音量对输出无效，音量真源是 `UsbExclusivePreferences.volumePercent`。两条接管路径——
   - **标准路**：`RemoteVolumePlayer`（`ForwardingPlayer` 子类）让 Media3 自动注册 `VolumeProvider`，系统把音量键交给 App。给 AOSP 设备用；**MIUI 上整条失效**（ROM 保留了 `setPlaybackToRemote` 的 API 却删掉了音量键派发，App 侧绕不过去）。
-  - **前台路（真正干活的那条）**：`MainActivity.dispatchKeyEvent` 吃掉 `KEYCODE_VOLUME_UP/DOWN` → 自定义命令 `ADJUST_VOLUME`（**传 ±1 档，不传绝对值**）→ `PlaybackService.applyUsbVolume`。只在 Pulsar 位于前台时有效，息屏/后台调不了。
+  - **前台路（真正干活的那条）**：`MainActivity.dispatchKeyEvent` 吃掉 `KEYCODE_VOLUME_UP/DOWN` → 自定义命令 `ADJUST_VOLUME`（**传 ±1 档，不传绝对值**）→ `PlaybackService.applyUsbVolume`。只在 Pulsar 位于前台时有效，息屏/后台调不了。**接管条件是「USB 泵正在输出」（`state == streaming`），不是独占开关**——开关开着但没插设备时声音走系统 AudioTrack，接管会让音量键彻底失灵。
   - **两个别改坏的约定**：①算术只在服务一处（UI 侧只有 500ms 轮询快照，自己算会丢档）；②DOWN 与 UP 必须同进同退（`lastDownConsumed`），只吃一个会让系统行为变得莫名其妙。
 
 #### USB 专属驱动子系统 `playback/usb/`

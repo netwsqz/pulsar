@@ -29,8 +29,13 @@ class ForegroundVolumeKeys {
         fun adjust(step: Int): Boolean
     }
 
-    /** UI 层轮询回填的实时状态；`null` = 尚未就绪，一律不接管。 */
-    data class Snapshot(val exclusiveEnabled: Boolean)
+    /**
+     * UI 层轮询回填的实时状态；`null` = 尚未就绪，一律不接管。
+     *
+     * [usbAudioActive] 必须是"USB 泵正在输出"，**不是**"独占开关开着"——没插设备时声音
+     * 走系统 AudioTrack，接管音量键只会让音量键彻底失灵（真机反馈）。
+     */
+    data class Snapshot(val usbAudioActive: Boolean)
 
     @Volatile
     var snapshot: Snapshot? = null
@@ -62,7 +67,7 @@ class ForegroundVolumeKeys {
     }
 
     private fun takeOver(step: Int): Boolean {
-        if (snapshot?.exclusiveEnabled != true) return false
+        if (snapshot?.usbAudioActive != true) return false
         val sink = sink ?: return false
         return sink.adjust(step)
     }

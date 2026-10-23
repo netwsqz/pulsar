@@ -1,7 +1,7 @@
 # USB 独占下接管系统音量键
 
 > 状态：实现完成，真机验证通过（前台截获路径）
-> 日期：2026-09-14 起，2026-09-15 真机收敛
+> 日期：2026-09-14 起，2026-09-15 真机收敛；2026-10-23 修正接管条件（改为「泵正在输出」）并真机复验通过
 > 关联：[CLAUDE.md](../CLAUDE.md)、[usb-exclusive-research.md](usb-exclusive-research.md)
 
 ## 一句话结论
@@ -109,13 +109,14 @@ class RemoteVolumePlayer(
 - 新增 `private fun playerForSession(exoPlayer: ExoPlayer): Player`：`if (usbExclusiveEnabled) RemoteVolumePlayer(exoPlayer, remoteVolumeSource) else exoPlayer`。
 - `onCreate` 建 session 与 `rebuildPlayer()` 都改为 `mediaSession.setPlayer(playerForSession(newPlayer))`——**挂/摘是同一个调用**，独占开关一切换就自动生效。
 - **面板数字同步**：系统音量面板显示的数字取自注册时读过一次的 provider 当前值，App 内滑块调音量不经过音量键路径，面板会一直停在旧值。所以 `applyUsbVolume` 末尾调 `(mediaSession?.player as? RemoteVolumePlayer)?.syncFromSource()`，把面板对齐；`syncFromSource` 只刷新展示、不回调 source，不会形成回环。
-- 挂载时机跟随 `usbExclusiveEnabled`（不是 `UsbExclusiveState.Streaming`）：独占开着但设备还没就绪时，音量键调 App 音量也合理（设备就绪后立即生效）；少依赖一个状态机中间态，边界更少。
+- **挂载时机跟随"USB 泵正在输出"（`UsbExclusiveState.Streaming`），不是独占开关**：开关开着但没插设备（或泵还没起来）时声音走系统 `AudioTrack`，此时接管音量键只会去改一个对实际出声无效的 USB 音量，表现就是**音量键完全失灵**（真机反馈，2026-10-23 修正，原先是按开关挂载）。泵起来时由 `usbExclusiveController.state` collector 补挂，停下时摘掉。
 
 ## 4. 行为表（真机实测）
 
 | 场景 | 音量键 | 系统音量条 |
 |---|---|---|
-| 独占开 + **Pulsar 在前台**（不论播放还是暂停） | 调 App 音量（±5%），USB 硬件/软件衰减立即生效，**系统 `STREAM_MUSIC` 纹丝不动** | **不弹出**——按键被完全吃掉（见 §11.3） |
+| 独占开 + 泵在输出（`streaming`）+ **Pulsar 在前台**（不论播放还是暂停） | 调 App 音量（±5%），USB 硬件/软件衰减立即生效，**系统 `STREAM_MUSIC` 纹丝不动** | **不弹出**——按键被完全吃掉（见 §11.3） |
+| 独占开但**没插设备 / 泵未就绪** | **还给系统**（声音走系统 AudioTrack，系统音量才有效） | 系统自己的 STREAM_MUSIC 行 |
 | 独占开 + 息屏/切到别的 App | **调系统音量，对 USB 无效**（平台限制，见 §5、§11） | 系统自己的 STREAM_MUSIC 行 |
 | 独占关 / USB 拔出 | 立刻还给系统（`setPlayer(exoPlayer)` + 清空前台快照），恢复原生行为 | 原生行为 |
 

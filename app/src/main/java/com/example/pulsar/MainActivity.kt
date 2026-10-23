@@ -4389,17 +4389,19 @@ private fun rememberMediaController(
             onDispose { current.removeListener(listener) }
         }
     }
-    // 前台音量键接管：把"独占开关 + 下发口"交给 Activity 的 dispatchKeyEvent（MIUI 不向
-    // 远程音量会话派发音量键，见 ForegroundVolumeKeys 注释）。控制器没连上时清空，音量键
-    // 立刻还给系统。独占关闭也走同一条清空路径——这就是"关掉开关马上交还系统"。
-    DisposableEffect(controller, usbExclusiveEnabled) {
+    // 前台音量键接管：把"USB 泵是否在输出 + 下发口"交给 Activity 的 dispatchKeyEvent（MIUI
+    // 不向远程音量会话派发音量键，见 ForegroundVolumeKeys 注释）。控制器没连上时清空，
+    // 音量键立刻还给系统。**泵没在输出（没插设备/未就绪）也走同一条清空路径**——那时声音
+    // 走系统 AudioTrack，接管只会让音量键失灵。
+    DisposableEffect(controller, usbExclusiveState) {
         val current = controller
         if (current == null) {
             volumeKeys.snapshot = null
             volumeKeys.sink = null
         } else {
-            volumeKeys.snapshot =
-                ForegroundVolumeKeys.Snapshot(exclusiveEnabled = usbExclusiveEnabled)
+            volumeKeys.snapshot = ForegroundVolumeKeys.Snapshot(
+                usbAudioActive = UsbExclusiveMediaCommands.isUsbAudioActive(usbExclusiveState)
+            )
             volumeKeys.sink = ForegroundVolumeKeys.Sink { step ->
                 // 服务把算完的新音量随命令结果带回，拿它直接点亮浮窗——比等 500ms 轮询快一个来回。
                 adjustDeviceVolume(current, step, VolumeFeedback::show)

@@ -20,11 +20,11 @@ class ForegroundVolumeKeysTest {
 
     /** 安装状态快照与下发口，返回记录每一次下发的步进列表。 */
     private fun install(
-        exclusiveEnabled: Boolean = true,
+        usbAudioActive: Boolean = true,
         sinkAvailable: Boolean = true,
     ): MutableList<Int> {
         val steps = mutableListOf<Int>()
-        keys.snapshot = ForegroundVolumeKeys.Snapshot(exclusiveEnabled = exclusiveEnabled)
+        keys.snapshot = ForegroundVolumeKeys.Snapshot(usbAudioActive = usbAudioActive)
         keys.sink = ForegroundVolumeKeys.Sink { step ->
             if (!sinkAvailable) return@Sink false
             steps += step
@@ -54,8 +54,10 @@ class ForegroundVolumeKeysTest {
     }
 
     @Test
-    fun `独占关闭时音量键立刻还给系统`() {
-        val steps = install(exclusiveEnabled = false)
+    fun `USB 泵没在输出时音量键立刻还给系统`() {
+        // 独占开关开着但没插设备（或泵未就绪）：声音走系统 AudioTrack，此时接管只会去改
+        // 一个对出声无效的 USB 音量 —— 用户看到的就是音量键失灵。
+        val steps = install(usbAudioActive = false)
 
         assertFalse(keys.handle(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.ACTION_DOWN))
         assertFalse(keys.handle(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_DOWN))
@@ -124,8 +126,8 @@ class ForegroundVolumeKeysTest {
     }
 
     @Test
-    fun `独占关闭时抬起事件也还给系统`() {
-        val steps = install(exclusiveEnabled = false)
+    fun `USB 泵没在输出时抬起事件也还给系统`() {
+        val steps = install(usbAudioActive = false)
 
         assertFalse(keys.handle(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.ACTION_DOWN))
         assertFalse(keys.handle(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.ACTION_UP))

@@ -480,7 +480,8 @@ private fun LibraryGroupsContent(
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
-                albums == null && state.isLoading -> TrackListSkeleton(count = 8)
+                // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
+                albums == null && state.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 groups.isEmpty() -> EmptyState(
                     if (offlineNotice != null) "离线 · 手机里还没有下载的专辑" else "暂无艺术家"
@@ -542,24 +543,7 @@ private fun LibraryGroupDetailContent(
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
-                albums == null && state.isLoading -> {
-                    val shimmer = rememberSkeletonShimmer()
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
-                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-                    ) {
-                        items(6) {
-                            SkeletonBox(
-                                Modifier.fillMaxWidth().aspectRatio(1f),
-                                progress = shimmer,
-                                shape = RoundedCornerShape(Dimens.CornerLarge)
-                            )
-                        }
-                    }
-                }
+                albums == null && state.isLoading -> AlbumGridSkeleton()
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 group == null || group.albums.isEmpty() -> EmptyState(
                     if (offlineNotice != null) "离线 · 这里还没有下载的专辑" else "这里还没有专辑"
@@ -653,13 +637,16 @@ private fun cardBorderColor(): Color =
 private fun TrackListSkeleton(
     count: Int = 6,
     trailingSpace: Boolean = false,
+    /** 行间距：与真实列表的 `verticalArrangement` 对齐。歌曲 / 播放列表 / 艺术家页都是
+     * [Dimens.SpaceTiny]；专辑详情的真实列表没有额外间距，传 `0.dp`。 */
+    rowSpacing: Dp = Dimens.SpaceTiny,
     modifier: Modifier = Modifier
 ) {
     val shimmer = rememberSkeletonShimmer()
     // 8dp / 4dp 是组件自身尺寸（与 AlbumCover 默认圆角、灰条圆角一致），按工单 01 约定不进 Dimens。
     val coverShape = RoundedCornerShape(8.dp)
     val trailingSlot: (@Composable () -> Unit)? = if (trailingSpace) ({ }) else null
-    Column(modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(rowSpacing)) {
         repeat(count) { index ->
             MediaRowLayout(
                 leading = {
@@ -2715,18 +2702,94 @@ private fun AlbumGridCard(
                 Modifier.padding(Dimens.SpaceMidMedium),
                 verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
             ) {
+                // 标题固定两行（spec §5）：短名也占两行高度，网格底边不会参差。
                 Text(
                     album.name,
                     style = MaterialTheme.typography.titleMedium,
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
+                // 副标题次要色、只占一行，不和标题抢注意力（spec §11）。
                 Text(
                     album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
+    }
+}
+
+/**
+ * 专辑网格卡骨架：与 [AlbumGridCard] 同构——方形封面 + 12dp 内边距 + 两行标题 + 一行副标题。
+ * 文字区高度直接取真实排版的行高（`titleMedium` / `bodyMedium` 的 lineHeight，随系统字体缩放走），
+ * 间距同为 [Dimens.SpaceTiny]——专辑页与艺术家详情共用，加载完成卡高不跳（spec §5）。
+ * [progress] 由调用方取一次传给整屏所有卡，扫光同步。
+ */
+@Composable
+private fun AlbumCardSkeleton(progress: State<Float>) {
+    // 用真实行高而不是写死 24/20dp：系统字号调大时，真实卡和骨架仍一起变高。
+    val titleLineHeight = with(LocalDensity.current) { MaterialTheme.typography.titleMedium.lineHeight.toDp() }
+    val subtitleLineHeight = with(LocalDensity.current) { MaterialTheme.typography.bodyMedium.lineHeight.toDp() }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                width = 1.dp,
+                color = cardBorderColor(),
+                shape = RoundedCornerShape(Dimens.CornerLarge)
+            ),
+        shape = RoundedCornerShape(Dimens.CornerLarge)
+    ) {
+        Column {
+            SkeletonBox(
+                Modifier.fillMaxWidth().aspectRatio(1f),
+                progress = progress,
+                shape = RoundedCornerShape(Dimens.CornerLarge)
+            )
+            Column(
+                Modifier.padding(Dimens.SpaceMidMedium),
+                verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+            ) {
+                // 两条标题行高的灰条紧贴，合起来正好是标题固定两行的高度。
+                Column {
+                    SkeletonBox(
+                        Modifier.fillMaxWidth(0.7f).height(titleLineHeight),
+                        progress = progress,
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                    SkeletonBox(
+                        Modifier.fillMaxWidth(0.45f).height(titleLineHeight),
+                        progress = progress,
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                }
+                SkeletonBox(
+                    Modifier.fillMaxWidth(0.5f).height(subtitleLineHeight),
+                    progress = progress,
+                    shape = RoundedCornerShape(4.dp)
+                )
+            }
+        }
+    }
+}
+
+/** 专辑网格骨架：2 列、间距与真实网格一致，卡片与 [AlbumGridCard] 同构。
+ * 专辑页与艺术家详情页共用，两处骨架不会各走各的（工单 08）。 */
+@Composable
+private fun AlbumGridSkeleton() {
+    val shimmer = rememberSkeletonShimmer()
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
+        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    ) {
+        items(6) { AlbumCardSkeleton(shimmer) }
     }
 }
 
@@ -2758,54 +2821,8 @@ private fun AlbumsContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 albums == null && state.isLoading -> {
-                    // 骨架屏：2列网格，每个卡片显示占位方块（圆角/间距与 AlbumGridCard 一致，切换不跳变）
-                    val shimmer = rememberSkeletonShimmer()
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
-                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-                    ) {
-                        items(6) { // 显示6个骨架占位
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .border(
-                                        width = 1.dp,
-                                        color = cardBorderColor(),
-                                        shape = RoundedCornerShape(Dimens.CornerLarge)
-                                    ),
-                                shape = RoundedCornerShape(Dimens.CornerLarge)
-                            ) {
-                                Column {
-                                    SkeletonBox(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(1f),
-                                        progress = shimmer,
-                                        shape = RoundedCornerShape(Dimens.CornerLarge)
-                                    )
-                                    Column(Modifier.padding(Dimens.SpaceMidMedium), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
-                                        SkeletonBox(
-                                            Modifier
-                                                .fillMaxWidth(0.7f)
-                                                .height(16.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                        SkeletonBox(
-                                            Modifier
-                                                .fillMaxWidth(0.5f)
-                                                .height(14.dp),
-                                            progress = shimmer,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
+                    AlbumGridSkeleton()
                 }
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState(
@@ -2984,7 +3001,8 @@ private fun AlbumDetailContent(
             }
             when {
                 albumTracks == null && state.isLoading -> item(key = "skeleton") {
-                    TrackListSkeleton(count = 6, modifier = Modifier.fillMaxWidth())
+                    // 专辑详情的真实曲目行紧挨着排（LazyColumn 无额外间距），骨架也别留行距。
+                    TrackListSkeleton(count = 6, rowSpacing = 0.dp, modifier = Modifier.fillMaxWidth())
                 }
                 albumTracks == null && state.errorMessage != null -> item(key = "error") {
                     ErrorState(state.errorMessage, onRetry = onRetry)

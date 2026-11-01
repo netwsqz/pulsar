@@ -390,9 +390,9 @@ private fun ErrorState(
     onRetry: (() -> Unit)? = null
 ) {
     Column(
-        modifier = modifier.padding(16.dp),
+        modifier = modifier.padding(Dimens.SpaceMedium),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         Icon(
             imageVector = Icons.Filled.CloudOff,
@@ -417,9 +417,9 @@ private fun EmptyState(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.padding(16.dp),
+        modifier = modifier.padding(Dimens.SpaceMedium),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         Icon(
             imageVector = Icons.Filled.MusicNote,
@@ -471,7 +471,7 @@ private fun LibraryGroupsContent(
         Text(
             title,
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
+            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -487,7 +487,7 @@ private fun LibraryGroupsContent(
                 )
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                 ) {
                     itemsIndexed(groups, key = { _, g -> g.name }) { index, group ->
@@ -548,7 +548,7 @@ private fun LibraryGroupDetailContent(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                     ) {
@@ -568,7 +568,7 @@ private fun LibraryGroupDetailContent(
                 else -> LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                     horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                 ) {
@@ -701,8 +701,8 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .padding(Dimens.SpaceLarge),
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMedium)
     ) {
             Text("连接 Jellyfin", style = MaterialTheme.typography.headlineSmall)
             // 地址历史下拉：输过的地址点一下回填。没历史时就是个普通输入框。
@@ -746,9 +746,6 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
             }
     }
 }
-
-/** 顶部玻璃岛的固定占位高度：岛本身 56dp + 上下外边距各 8dp；状态栏高度由各列表的 statusBars inset 另算。 */
-internal val GlassIslandTopSpacing = 72.dp
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -1260,7 +1257,10 @@ private fun MusicLibraryScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .padding(
+                        horizontal = Dimens.FloatingHorizontalMargin,
+                        vertical = Dimens.FloatingVerticalMargin
+                    )
             )
         }
         // 底部玻璃播放条（悬浮）：四角全圆角，完整液态玻璃（模糊 + 透镜 + 高光）。
@@ -1291,7 +1291,10 @@ private fun MusicLibraryScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
+                .padding(
+                    horizontal = Dimens.FloatingHorizontalMargin,
+                    vertical = Dimens.FloatingVerticalMargin
+                )
         )
         // Snackbar 提示（悬浮在播放条上方，显示「已添加到播放队列」反馈）；
         // 小展开面板展开时上移让位（面板含进度/队列约 320dp 高）。
@@ -1300,7 +1303,7 @@ private fun MusicLibraryScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 80.dp + if (playerExpanded) 320.dp else 0.dp)
-                .padding(horizontal = 12.dp)
+                .padding(horizontal = Dimens.FloatingHorizontalMargin)
         )
         // 全屏播放页：盖在所有内容最上层，从底部滑入 / 滑出。
         // session 编号作为 key：下滑手势收起时 dragOffset 停在松手位置不归零（供 exit 从松手处
@@ -1349,7 +1352,7 @@ private fun MusicLibraryScreen(
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(top = GlassIslandTopSpacing + 8.dp)
+                .padding(top = Dimens.GlassIslandTopSpacing + Dimens.FloatingVerticalMargin)
         )
         // 多选操作条（工单 05）：玻璃岛正下方悬浮，「全选」只选当前页面的列表。
         if (state.multiSelectIds.isNotEmpty()) {
@@ -1357,7 +1360,11 @@ private fun MusicLibraryScreen(
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
-                    .padding(top = GlassIslandTopSpacing + 8.dp, start = 16.dp, end = 16.dp),
+                    .padding(
+                        top = Dimens.GlassIslandTopSpacing + Dimens.FloatingVerticalMargin,
+                        start = 16.dp,
+                        end = 16.dp
+                    ),
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
                 // 材质 / 锚点的统一归工单 04；这里先补前景色：带 alpha 的 surface 匹配不上
@@ -1477,7 +1484,7 @@ private fun GlassChipBar(
     ) {
         Row(
             modifier = Modifier
-                .height(Dimens.TouchTargetMedium)
+                .height(Dimens.GlassIslandHeight)
                 .padding(horizontal = Dimens.SpaceSmall),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
@@ -1607,7 +1614,12 @@ private fun TracksContent(
         Modifier
             .fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(start = Dimens.SpaceMedium, end = Dimens.SpaceMedium, top = GlassIslandTopSpacing, bottom = 96.dp),
+        contentPadding = PaddingValues(
+            start = Dimens.SpaceMedium,
+            end = Dimens.SpaceMedium,
+            top = Dimens.GlassIslandTopSpacing,
+            bottom = Dimens.BottomContentInset
+        ),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
         item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
@@ -1916,7 +1928,7 @@ private fun AddToQueueMenu(
         action()
         onDismiss()
     }
-    val shadowPaddingPx = with(LocalDensity.current) { 16.dp.toPx().toInt() }
+    val shadowPaddingPx = with(LocalDensity.current) { Dimens.MenuEdgePadding.toPx().toInt() }
     LaunchedEffect(Unit) {
         menuScale.snapTo(0.85f)
         menuScale.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 650f))
@@ -1944,7 +1956,7 @@ private fun AddToQueueMenu(
         properties = PopupProperties(focusable = true)
     ) {
         Box(
-            modifier = Modifier.padding(16.dp)
+            modifier = Modifier.padding(Dimens.MenuEdgePadding)
         ) {
             Box(
                 modifier = Modifier
@@ -2216,7 +2228,12 @@ private fun DiscoverContent(
     LazyColumn(
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(start = Dimens.SpaceMedium, end = Dimens.SpaceMedium, top = GlassIslandTopSpacing, bottom = 96.dp),
+        contentPadding = PaddingValues(
+            start = Dimens.SpaceMedium,
+            end = Dimens.SpaceMedium,
+            top = Dimens.GlassIslandTopSpacing,
+            bottom = Dimens.BottomContentInset
+        ),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
         // 三节历史来自服务端，各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
@@ -2651,7 +2668,7 @@ private fun AlbumsContent(
         Text(
             "专辑",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
+            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -2662,7 +2679,7 @@ private fun AlbumsContent(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                     ) {
@@ -2715,7 +2732,7 @@ private fun AlbumsContent(
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(2),
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
                     ) {
@@ -2803,7 +2820,7 @@ private fun AlbumDetailContent(
                 start = Dimens.SpaceMedium,
                 end = Dimens.SpaceMedium,
                 top = Dimens.SpaceMedium,
-                bottom = 96.dp
+                bottom = Dimens.BottomContentInset
             )
         ) {
             item(key = "header") {
@@ -2941,7 +2958,7 @@ private fun PlaylistsContent(
         Text(
             "播放列表",
             style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
+            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
@@ -2955,7 +2972,7 @@ private fun PlaylistsContent(
                 else -> {
                     LazyColumn(
                         Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
                         itemsIndexed(playlistList, key = { _, p -> p.id }) { index, playlist ->
@@ -3019,7 +3036,7 @@ private fun SearchContent(
             .windowInsetsPadding(WindowInsets.statusBars)
             .padding(horizontal = Dimens.SpaceMedium)
             // 让出顶部玻璃岛高度（与列表页同款占位），搜索框固定在岛正下方。
-            .padding(top = GlassIslandTopSpacing),
+            .padding(top = Dimens.GlassIslandTopSpacing),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         // 搜索框固定顶部：输入时两个 ViewModel 各自防抖后请求；非空时显示清除按钮。
@@ -3103,7 +3120,7 @@ private fun SearchContent(
                 else -> {
                     LazyColumn(
                         Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
                         if (results != null) {
@@ -3292,7 +3309,7 @@ private fun PlaylistDetailContent(
                     val trackList = playlistTracks.orEmpty()
                     LazyColumn(
                         Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
+                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
@@ -3344,7 +3361,10 @@ private fun SettingsContent(
             .fillMaxSize()
             .statusBarsPadding()
             .padding(horizontal = Dimens.SpaceMedium)
-            .verticalScroll(rememberScrollState()),
+            // 底部留白放在 verticalScroll **之后**：加在可视区上的话是固定空隙，滚不动；
+            // 加在滚动内容里，最后一张「下载」卡才能滚到迷你播放条上方（工单 01）。
+            .verticalScroll(rememberScrollState())
+            .padding(bottom = Dimens.BottomContentInset),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         Text(
@@ -3755,7 +3775,7 @@ private fun CachedCopiesContent(
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
-                    contentPadding = PaddingValues(bottom = 96.dp)
+                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset)
                 ) {
                     items(cachedAlbums, key = { it.album.id }) { entry ->
                         DownloadedAlbumRow(
@@ -3946,7 +3966,7 @@ private fun MiniPlayerCover(
     sharedTransitionScope: SharedTransitionScope,
     visible: Boolean
 ) {
-    Box(Modifier.size(40.dp)) {
+    Box(Modifier.size(Dimens.PlayerDockCover)) {
         if (track == null) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
         } else {

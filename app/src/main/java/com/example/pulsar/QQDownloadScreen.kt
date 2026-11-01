@@ -92,7 +92,7 @@ internal fun DownloadServiceScreen(
             .statusBarsPadding()
             .padding(horizontal = Dimens.SpaceMedium)
             .padding(top = Dimens.SpaceSmall),
-        contentPadding = PaddingValues(bottom = 96.dp),
+        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         item(key = "title") {

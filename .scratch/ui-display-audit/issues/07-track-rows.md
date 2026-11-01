@@ -47,6 +47,17 @@
 - 本单没有新增单测：仓库无 Compose UI 测试设施，spec §「不测什么」明确排除间距/字号/颜色/手势；
   改动全是布局与组合，没有可测的纯函数缝。
 
+**代码审查后修正**
+
+- Spec：`EmptyState` / `ErrorState` 的图标尺寸从字面量 `48.dp` 改为 `Dimens.TouchTargetSmall`
+  （spec §5 要求空态/错误态的间距与图标尺寸走 Dimens）。
+- Standards：删掉专辑详情两处与组件内部新默认值重复的 `Modifier.fillMaxWidth()`；
+  搜索页一处全限定 `TextAlign.Center` 改为已 import 的短名。
+- Standards 提出但未改：①前槽宽度公式与槽内组件尺寸仍是两处书写（布局规格本身就是
+  「勾选框 48 + 4 + 封面 48」，注释已标明对应关系；改成实测宽度会有一帧分隔线错位）；
+  ②`navLabel().orEmpty()` 与 Artists 分支同写法，分支本身已静态确定非空；
+  ③`DownloadedAlbumRow` 等其它手写行不属本单（歌曲/搜索/播放列表/艺术家行）范围。
+
 **边界说明（留给后续工单）**
 
 - 播放列表列表行 / 艺术家列表行已跟着 `SearchResultRow` 迁到同一布局；两个列表页自身的骨架

@@ -400,7 +400,7 @@ private fun ErrorState(
         Icon(
             imageVector = Icons.Filled.CloudOff,
             contentDescription = null,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(Dimens.TouchTargetSmall),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
         )
         Text(
@@ -427,7 +427,7 @@ private fun EmptyState(
         Icon(
             imageVector = Icons.Filled.MusicNote,
             contentDescription = null,
-            modifier = Modifier.size(48.dp),
+            modifier = Modifier.size(Dimens.TouchTargetSmall),
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
         )
         Text(
@@ -2987,10 +2987,10 @@ private fun AlbumDetailContent(
                     TrackListSkeleton(count = 6, modifier = Modifier.fillMaxWidth())
                 }
                 albumTracks == null && state.errorMessage != null -> item(key = "error") {
-                    ErrorState(state.errorMessage, onRetry = onRetry, modifier = Modifier.fillMaxWidth())
+                    ErrorState(state.errorMessage, onRetry = onRetry)
                 }
                 trackList.isEmpty() -> item(key = "empty") {
-                    EmptyState("该专辑暂无歌曲", Modifier.fillMaxWidth())
+                    EmptyState("该专辑暂无歌曲")
                 }
                 else -> itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
                     TrackRow(
@@ -3191,7 +3191,7 @@ private fun SearchContent(
                         qqStatus,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        textAlign = TextAlign.Center
                     )
                     TextButton(onClick = onRetryQqSearch) { Text("重试") }
                 }

@@ -129,9 +129,9 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 **导航（工单 04，对齐 Auxio tab 语义）**：**不引入导航库**。`LibrarySection` sealed interface 作本地导航状态，`TopLevelSections`（`LibrarySection.kt`）定义顶层顺序与文案：
 
-> 发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表 / QQ 下载
+> 发现 / 歌曲 / 专辑 / 艺术家 / 播放列表
 
-搜索、设置、已缓存、详情页（专辑 / 播放列表 / 艺术家组 / 流派组）**不在顶层**，从别处进入。`navIndex()` 决定左右切换方向，`isDetail()` 判断是否详情层。改导航顺序时**只改 `TopLevelSections`**，chip 和占位页标题都从它取。
+搜索、设置、已缓存、详情页（专辑 / 播放列表 / 艺术家组）**不在顶层**，从别处进入。`navIndex()` 决定左右切换方向，`isDetail()` 判断是否详情层。改导航顺序时**只改 `TopLevelSections`**，chip 和占位页标题都从它取。流派页已删除（ADR-0009），不要再加回来。
 
 - **`JellyfinViewModel`**（AndroidViewModel）：单一 `StateFlow<JellyfinUiState>`，通过 `JellyfinViewModelFactory` 注入 `SessionRepository`、`JellyfinApiFactory`、`AuthorizationSink`。向 UI 暴露纯函数式的请求构造器：`streamUrl(track)`、`albumCover(album)`、`trackCover(track)`（未登录/无封面返回 null，UI 据此显示占位）。错误文案集中在 `friendlyError()`。
 - **幂等加载模式**：`albumsJob` + `albumsGeneration` 防止重复请求、过期响应失效。`loadAlbums()` 已加载则不重发；库函数通过"字段非空"判断是否已加载，**因此切换账号时必须清空所有缓存字段**。
@@ -160,7 +160,7 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 - 数据层测试覆盖 URL 格式、Authorization 头、**断言 URL 不含 token**、错误映射。
 - `JellyfinViewModelTest`：覆盖会话恢复、Unauthorized 清会话、网络错误保留会话、库请求过期、搜索防抖、会话过期后缓存全部清空等场景。
 - `QQDownloadViewModelTest` / `QQDownloadDataSourceTest`：QQ 下载的搜索防抖、音质降级、轮询启停、凭证过期恢复、503→CredentialExpired 映射等。**注意：测试任务一直 running 时轮询无限继续，必须用有界 `advanceTimeBy` 而非 `advanceUntilIdle`**（否则虚拟时间死循环卡死测试进程）。同理，`viewModelScope` 里的无限 `delay` 循环配 `runTest` 虚拟时间会活锁卡死 gradle daemon——**周期循环必须有上限**。
-- **纯函数优先拆出来单测**：`DiscoverPicks`（每日推荐选曲）、`LibraryGroups`（按艺术家/流派分组）、`PlaybackLogic`、`PlaybackReporter.positionTicks` 等都不碰 IO，直接喂数据断言。分组规则有明确边界：大小写不敏感归并、空白/`UNKNOWN_ARTIST` 不建组、排序稳定。
+- **纯函数优先拆出来单测**：`DiscoverPicks`（每日推荐选曲）、`LibraryGroups`（按艺术家分组）、`PlaybackLogic`、`PlaybackReporter.positionTicks` 等都不碰 IO，直接喂数据断言。分组规则有明确边界：大小写不敏感归并、空白/`UNKNOWN_ARTIST` 不建组、排序稳定。
 - `PlaybackReporterTest`：上报开始/停止的时机、去重、失败静默、`content://` 本地文件不参与上报。
 - USB/播放逻辑均有独立测试类（`playback/` 和 `playback/usb/` 目录下）。
 - **UI 没有 Compose 测试设施**：布局改动靠真机肉眼验证，不要为样式写 UI 测试。
@@ -199,3 +199,4 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 - `0006` 搜索合并（曲库 + QQ 音乐），QQ 下载降为设置二级页
 - `0007` **下载取代自动缓存**：用户手动下载、永不自动删、播放链路纯只读（取代 0003 的自动淘汰部分）
 - `0008` **离线只显示已下载**：取消「全量 + 标灰」，过滤在界面层派生（部分取代 0007 的离线可见性口径）
+- `0009` **删除流派页**：顶层收敛为 5 项，艺术家维度保留，`Album.genres` 数据字段不动（部分取代 0006 的顶层列表）

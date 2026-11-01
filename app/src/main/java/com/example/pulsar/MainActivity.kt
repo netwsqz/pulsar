@@ -445,9 +445,9 @@ private fun OfflineNoticeText(text: String, modifier: Modifier = Modifier) {
 }
 
 /**
- * 艺术家 / 流派列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
+ * 艺术家列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
  * 行语言沿用 Auxio 列表项：封面 + 组名 + 「N 张专辑」副信息。
- * 封面取组内第一张专辑的封面——服务端没给艺术家/流派单独的图。
+ * 封面取组内第一张专辑的封面——服务端没给艺术家单独的图。
  */
 @Composable
 private fun LibraryGroupsContent(
@@ -455,13 +455,12 @@ private fun LibraryGroupsContent(
     albums: List<Album>?,
     title: String,
     offlineNotice: String?,
-    byGenre: Boolean,
     onOpenGroup: (String) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val groups = remember(albums, byGenre) { libraryGroups(albums.orEmpty(), byGenre) }
+    val groups = remember(albums) { libraryGroups(albums.orEmpty()) }
     Column(
         modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars)
@@ -479,11 +478,7 @@ private fun LibraryGroupsContent(
                 albums == null && state.isLoading -> TrackListSkeleton(count = 8)
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 groups.isEmpty() -> EmptyState(
-                    when {
-                        offlineNotice != null -> "离线 · 手机里还没有下载的专辑"
-                        byGenre -> "暂无流派"
-                        else -> "暂无艺术家"
-                    }
+                    if (offlineNotice != null) "离线 · 手机里还没有下载的专辑" else "暂无艺术家"
                 )
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
@@ -506,13 +501,12 @@ private fun LibraryGroupsContent(
     }
 }
 
-/** 艺术家 / 流派详情（工单 06）：标题 + 该组下的专辑网格，点专辑进专辑详情。 */
+/** 艺术家详情（工单 06）：标题 + 该组下的专辑网格，点专辑进专辑详情。 */
 @Composable
 private fun LibraryGroupDetailContent(
     state: JellyfinUiState,
     albums: List<Album>?,
     groupName: String,
-    isGenre: Boolean,
     offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
@@ -520,9 +514,9 @@ private fun LibraryGroupDetailContent(
     modifier: Modifier = Modifier
 ) {
     // 组名来自导航状态，专辑列表可能还在加载/刷新：按组名重新分组，找不到就显示空态。
-    val group = remember(albums, groupName, isGenre) {
+    val group = remember(albums, groupName) {
         // 组名按大小写不敏感匹配：显示名取「首次出现的写法」，输入顺序一变精确匹配就会失手。
-        libraryGroups(albums.orEmpty(), isGenre)
+        libraryGroups(albums.orEmpty())
             .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
     }
     Column(
@@ -800,9 +794,9 @@ private fun MusicLibraryScreen(
             }
             LibrarySection.Tracks -> Unit
             LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
-            // 艺术家 / 流派页由已加载的专辑客户端分组而来（工单 06），零新 API：
+            // 艺术家页由已加载的专辑客户端分组而来（工单 06），零新 API：
             // 只确保专辑列表到位，其余全在 UI 侧现算。
-            LibrarySection.Artists, LibrarySection.Genres -> if (sessionReady) viewModel.loadAlbums()
+            LibrarySection.Artists -> if (sessionReady) viewModel.loadAlbums()
             is LibrarySection.GroupDetail -> if (sessionReady) viewModel.loadAlbums()
             LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
             LibrarySection.Search -> Unit
@@ -966,9 +960,9 @@ private fun MusicLibraryScreen(
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.GroupDetail -> {
-                // 组详情没有可清的服务端状态（专辑列表还在用）。来源固定是艺术家/流派页，
-                // 由 isGenre 直接推出——不借 detailOrigin：它可能被「组详情 → 专辑详情」覆盖过。
-                section = if (s.isGenre) LibrarySection.Genres else LibrarySection.Artists
+                // 组详情没有可清的服务端状态（专辑列表还在用）。来源固定是艺术家页——
+                // 不借 detailOrigin：它可能被「组详情 → 专辑详情」覆盖过。
+                section = LibrarySection.Artists
                 detailOrigin = LibrarySection.Discover
             }
             LibrarySection.Settings -> {
@@ -1115,15 +1109,14 @@ private fun MusicLibraryScreen(
                         onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
-                    LibrarySection.Artists, LibrarySection.Genres -> LibraryGroupsContent(
+                    LibrarySection.Artists -> LibraryGroupsContent(
                         state = state,
                         albums = visible.albums,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
-                        byGenre = s == LibrarySection.Genres,
                         onOpenGroup = { name ->
                             detailOrigin = section
-                            section = LibrarySection.GroupDetail(name, isGenre = s == LibrarySection.Genres)
+                            section = LibrarySection.GroupDetail(name)
                         },
                         coverFor = viewModel::albumCover,
                         onRetry = viewModel::loadAlbums,
@@ -1209,7 +1202,6 @@ private fun MusicLibraryScreen(
                         state = state,
                         albums = visible.albums,
                         groupName = s.name,
-                        isGenre = s.isGenre,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
@@ -1452,7 +1444,7 @@ private fun MusicLibraryScreen(
 
 /**
  * 顶部玻璃岛：悬浮的液态玻璃面板（与播放条同款：四角圆角 + 模糊 + 透镜 + 高光），
- * 装「发现 / 歌曲 / 专辑 / 艺术家 / 流派 / 播放列表」与搜索 / 设置 / 退出按钮。
+ * 装「发现 / 歌曲 / 专辑 / 艺术家 / 播放列表」与搜索 / 设置 / 退出按钮。
  * chip 分组可横向滑动（分区多了会挤不下），滑动区域两侧有渐变提示，选中项切换时自动滚入可见区。
  */
 @Composable
@@ -2602,7 +2594,7 @@ private fun DiscoverAlbumCard(
 }
 
 /** 专辑网格卡（Auxio 封面网格语言）：方形封面 + 专辑名 + 「歌手 · N 首」。
- * 专辑页与艺术家/流派详情页共用，避免两处各写一份卡片样式。 */
+ * 专辑页与艺术家详情页共用，避免两处各写一份卡片样式。 */
 @Composable
 private fun AlbumGridCard(
     album: Album,

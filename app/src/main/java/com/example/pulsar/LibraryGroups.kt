@@ -3,7 +3,7 @@ package com.example.pulsar
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.UNKNOWN_ARTIST
 
-/** 艺术家/流派列表的一行：组名 + 它下面的专辑（已按专辑名排序）。 */
+/** 艺术家列表的一行：组名 + 它下面的专辑（已按专辑名排序）。 */
 internal data class LibraryGroup(val name: String, val albums: List<Album>)
 
 /**
@@ -17,16 +17,9 @@ internal data class LibraryGroup(val name: String, val albums: List<Album>)
 internal fun groupAlbumsByArtist(albums: List<Album>): List<LibraryGroup> =
     groupAlbums(albums) { listOf(it.artist) }
 
-/**
- * 按流派把专辑分组。一张专辑可以属于多个流派，每个流派各出现一次；
- * 同一张专辑重复标注同一流派（大小写不同）只算一次。规则其余同 [groupAlbumsByArtist]。
- */
-internal fun groupAlbumsByGenre(albums: List<Album>): List<LibraryGroup> =
-    groupAlbums(albums) { it.genres }
-
-/** UI 用的统一入口：按页面类型选分组维度，列表页和详情页共用，避免两处各写一遍 if。 */
-internal fun libraryGroups(albums: List<Album>, byGenre: Boolean): List<LibraryGroup> =
-    if (byGenre) groupAlbumsByGenre(albums) else groupAlbumsByArtist(albums)
+/** UI 用的入口：艺术家列表页和详情页共用，避免两处各写一遍。流派页已删除（ADR-0009）。 */
+internal fun libraryGroups(albums: List<Album>): List<LibraryGroup> =
+    groupAlbumsByArtist(albums)
 
 private fun groupAlbums(
     albums: List<Album>,

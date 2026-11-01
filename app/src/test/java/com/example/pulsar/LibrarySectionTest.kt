@@ -16,7 +16,6 @@ class LibrarySectionTest {
                 LibrarySection.Tracks,
                 LibrarySection.Albums,
                 LibrarySection.Artists,
-                LibrarySection.Genres,
                 LibrarySection.Playlists
             ),
             TopLevelSections.map { it.first }
@@ -27,13 +26,23 @@ class LibrarySectionTest {
 
     @Test
     fun `nav index follows tab order and is -1 for non top level pages`() {
-        assertEquals(0, LibrarySection.Discover.navIndex())
-        assertEquals(1, LibrarySection.Tracks.navIndex())
-        assertEquals(3, LibrarySection.Artists.navIndex())
+        // 左右切换方向由相邻顶层页签的序号差决定。按类型断言相对顺序，不硬编码绝对索引；
+        // 不用「遍历 TopLevelSections 比对 index」那种写法——navIndex 本身就是按位置推导的，会自证。
+        val positions = listOf(
+            LibrarySection.Discover,
+            LibrarySection.Tracks,
+            LibrarySection.Albums,
+            LibrarySection.Artists,
+            LibrarySection.Playlists
+        ).map { it.navIndex() }
+        positions.zipWithNext().forEach { (left, right) ->
+            assertTrue("顶层页签序号应严格递增：$positions", right > left)
+        }
         assertEquals(-1, LibrarySection.DownloadService.navIndex())
         assertEquals(-1, LibrarySection.Search.navIndex())
         assertEquals(-1, LibrarySection.Settings.navIndex())
         assertEquals(-1, LibrarySection.CachedCopies.navIndex())
+        assertEquals(-1, LibrarySection.GroupDetail("Rock").navIndex())
     }
 
     @Test
@@ -44,7 +53,7 @@ class LibrarySectionTest {
 
     @Test
     fun `group detail is a non top level detail page`() {
-        val group = LibrarySection.GroupDetail(name = "Rock", isGenre = true)
+        val group = LibrarySection.GroupDetail(name = "Rock")
         assertEquals(-1, group.navIndex())
         assertNull(group.navLabel())
         assertTrue(group.isDetail())
@@ -55,7 +64,7 @@ class LibrarySectionTest {
         assertEquals("发现", LibrarySection.Discover.navLabel())
         assertEquals("歌曲", LibrarySection.Tracks.navLabel())
         assertEquals("艺术家", LibrarySection.Artists.navLabel())
-        assertEquals("流派", LibrarySection.Genres.navLabel())
+        assertEquals("播放列表", LibrarySection.Playlists.navLabel())
         assertNull(LibrarySection.DownloadService.navLabel())
         assertNull(LibrarySection.Search.navLabel())
         assertNull(LibrarySection.Settings.navLabel())

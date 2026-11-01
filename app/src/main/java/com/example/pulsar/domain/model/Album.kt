@@ -7,7 +7,7 @@ internal const val UNKNOWN_ARTIST = "Unknown artist"
 
 /**
  * 专辑信息。trackCount 为 null 表示服务器未提供歌曲数。
- * genres 为空 = 服务器没给流派；艺术家/流派页靠它做客户端分组（工单 06）。
+ * genres 为空 = 服务器没给流派；字段保留，但流派页已删除（ADR-0009），客户端不再按它分组。
  */
 @Serializable
 data class Album(

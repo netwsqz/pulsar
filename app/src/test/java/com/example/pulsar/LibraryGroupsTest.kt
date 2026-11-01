@@ -5,7 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 艺术家 / 流派分组（工单 06）：纯函数、无 IO、稳定排序，边界覆盖空库/缺字段/同名归并。 */
+/** 艺术家分组（工单 06 / ADR-0009）：纯函数、无 IO、稳定排序，边界覆盖空库/缺字段/同名归并。 */
 class LibraryGroupsTest {
 
     private fun album(
@@ -18,7 +18,7 @@ class LibraryGroupsTest {
     @Test
     fun `空列表返回空分组`() {
         assertTrue(groupAlbumsByArtist(emptyList()).isEmpty())
-        assertTrue(groupAlbumsByGenre(emptyList()).isEmpty())
+        assertTrue(libraryGroups(emptyList()).isEmpty())
     }
 
     @Test
@@ -79,34 +79,15 @@ class LibraryGroupsTest {
     }
 
     @Test
-    fun `一张专辑可以属于多个流派`() {
-        val groups = groupAlbumsByGenre(
-            listOf(album("a1", "One", "Artist", genres = listOf("Rock", "Pop")))
-        )
-
-        assertEquals(listOf("Pop", "Rock"), groups.map { it.name })
-        assertTrue(groups.all { it.albums.map(Album::id) == listOf("a1") })
-    }
-
-    @Test
-    fun `没有流派的专辑不产生分组`() {
-        val groups = groupAlbumsByGenre(
+    fun `libraryGroups 只按艺术家分组，流派字段不参与`() {
+        // 流派页已删除（ADR-0009）：专辑带流派也只按艺术家建组。
+        val groups = libraryGroups(
             listOf(
-                album("a1", "One", "Artist"),
-                album("a2", "Two", "Artist", genres = listOf("  "))
+                album("a1", "One", "Artist A", genres = listOf("Rock", "Pop")),
+                album("a2", "Two", "Artist B", genres = listOf("Rock"))
             )
         )
 
-        assertTrue(groups.isEmpty())
-    }
-
-    @Test
-    fun `同一专辑里重复的流派只归一次组`() {
-        val groups = groupAlbumsByGenre(
-            listOf(album("a1", "One", "Artist", genres = listOf("Rock", "rock", "ROCK")))
-        )
-
-        assertEquals(1, groups.size)
-        assertEquals(listOf("a1"), groups[0].albums.map(Album::id))
+        assertEquals(listOf("Artist A", "Artist B"), groups.map { it.name })
     }
 }

@@ -585,15 +585,12 @@ class JellyfinViewModelTest {
         assertEquals(listOf(listOf("E:\\music\\other.flac")), api.deletedPaths)
     }
 
-    // ── 本地缓存与离线（工单 01/02/03/04/05/06）─────────────────────
-    // 断网场景有两个注意点（都踩过）：
-    // ① 别用 advanceUntilIdle——探活协程会往调度器里排 delay，推虚拟时间会把它
-    //   每轮跑完又排下一轮，无限喂队列（QQDownloadViewModelTest 的同款教训）；
-    //   一律用有界 advanceBounded。
-    // ② 测试体收尾要调 stopOfflineForTest——viewModelScope 不归 runTest 管，
-    //   留着探活协程 teardown 要白推 500 轮 delay。
+    // ── 离线与快照 ──────────────────────────────────────────────────
 
-    /** 断网场景的有界推进：跑完当前排队任务即可，不碰探活的 delay 队列。 */
+    /**
+     * 断网相关测试的时间推进：**必须有界**。探活循环是无限 delay，`advanceUntilIdle`
+     * 会把它一直往前推 → 虚拟时间活锁，卡死 gradle daemon（仓库踩过，见 memory）。
+     */
     private fun TestScope.advanceBounded() {
         advanceTimeBy(1_000)
     }
@@ -689,12 +686,12 @@ class JellyfinViewModelTest {
         val cached = Track("cached-1", "歌", "手", "辑", 1L, null)
         val uncached = Track("uncached-1", "歌", "手", "辑", 1L, null)
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(cached, uncached))
-        val mediaCache = FakeMediaCache()
+        val mediaDownloads = FakeMediaDownloads()
         // 缓存键 = streamUrl(mediaId)；Fake 按 id 生成 "stream/{id}"
-        mediaCache.completeKeys += "stream/cached-1"
+        mediaDownloads.completeKeys += "stream/cached-1"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
-            api, mediaCache = mediaCache, snapshotRepository = snapshotRepo
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         advanceBounded()
 
@@ -702,7 +699,7 @@ class JellyfinViewModelTest {
         advanceBounded()
         assertTrue(viewModel.isPlayable(cached))
         assertTrue(!viewModel.isPlayable(uncached))
-        assertEquals("这首歌没有缓存，联网后才能播放", viewModel.unplayableReason(uncached))
+        assertEquals("这首歌没有下载，联网后才能播放", viewModel.unplayableReason(uncached))
         assertNull(viewModel.unplayableReason(cached))
         viewModel.stopOfflineForTest()
     }
@@ -724,11 +721,11 @@ class JellyfinViewModelTest {
         api.musicItemsError = JellyfinError.Network(IOException("no network"))
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
-        val mediaCache = FakeMediaCache()
-        mediaCache.failAll = true
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.failAll = true
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
-            api, mediaCache = mediaCache, snapshotRepository = snapshotRepo
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         advanceBounded()
         // 判定失败 = 没有缓存能力，全部按不可播处理——不是崩溃
@@ -737,8 +734,7 @@ class JellyfinViewModelTest {
     }
 
     @Test
-    fun `断网时搜索改为快照过滤并标记离线搜索`() = runTest {
-        val api = FakeJellyfinApi()
+    fun `断网时搜索改为快照过滤并标记离线搜索`() = runTest {        val api = FakeJellyfinApi()
         api.musicItemsError = JellyfinError.Network(IOException("no network"))
         api.searchError = JellyfinError.Network(IOException("no network"))
         val snapshotRepo = FakeSnapshotRepository()
@@ -780,40 +776,370 @@ class JellyfinViewModelTest {
     }
 
     @Test
-    fun `退出登录清空缓存与快照（换账号不串数据）`() = runTest {
-        val mediaCache = FakeMediaCache()
+    fun `退出登录清快照但不清下载（下载是用户主动存的）`() = runTest {
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/track-1"
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
-            mediaCache = mediaCache, snapshotRepository = snapshotRepo
+            mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         advanceUntilIdle()
 
         viewModel.signOut()
         advanceUntilIdle()
 
-        assertTrue(mediaCache.cleared)
+        // ADR-0007 / 用户故事 16：主动退出不清下载
+        assertEquals(setOf("stream/track-1"), mediaDownloads.completeKeys)
+        assertTrue(mediaDownloads.removedKeys.isEmpty())
         assertTrue(snapshotRepo.cleared)
     }
 
     @Test
-    fun `会话过期（token 失效）不清缓存也不清快照`() = runTest {
+    fun `会话过期（token 失效）不清下载也不清快照`() = runTest {
         val api = FakeJellyfinApi()
         api.musicItemsError = JellyfinError.Unauthorized()
-        val mediaCache = FakeMediaCache()
+        val mediaDownloads = FakeMediaDownloads()
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
-            api, mediaCache = mediaCache, snapshotRepository = snapshotRepo
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         // 401 → 过期分支（无网络失败，没有常驻探活协程），可以安全推到底
         advanceUntilIdle()
 
-        assertTrue(!mediaCache.cleared)
+        assertTrue(mediaDownloads.removedKeys.isEmpty())
         assertTrue(!snapshotRepo.cleared)
+    }
+
+    // ── 工单 08：离线口径 = 字节真相 ∩ 名单可见性；已下载列表清单 ──────────
+
+    private fun downloadedEntry(
+        trackIds: List<String>,
+        userId: String = "user-1",
+        serverUrl: String = "https://server.test",
+        kind: DownloadKind = DownloadKind.ALBUM,
+        id: String = "album-1",
+        name: String = "Album"
+    ) = DownloadEntry(serverUrl, userId, kind, id, name, trackIds, 1L)
+
+    @Test
+    fun `离线时字节完整且在当前账号名单里的歌才可播`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val inLedger = Track("in-ledger", "歌", "手", "辑", 1L, null)
+        val notInLedger = Track("not-in-ledger", "歌", "手", "辑", 1L, null)
+        val snapshotRepo = FakeSnapshotRepository().apply {
+            stored = LibrarySnapshot(tracks = listOf(inLedger, notInLedger))
+        }
+        val mediaDownloads = FakeMediaDownloads().apply {
+            // 两首字节都完整：差别只在名单
+            completeKeys += "stream/in-ledger"
+            completeKeys += "stream/not-in-ledger"
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("in-ledger")))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        assertTrue(viewModel.isPlayable(inLedger))
+        assertFalse(viewModel.isPlayable(notInLedger))
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `离线时名单里有但字节不完整的歌不可播（判定仍是字节真相）`() = runTest {        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val half = Track("half", "歌", "手", "辑", 1L, null)
+        val snapshotRepo = FakeSnapshotRepository().apply { stored = LibrarySnapshot(tracks = listOf(half)) }
+        val ledger = FakeDownloadLedgerStore().apply { entries = listOf(downloadedEntry(listOf("half"))) }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        assertFalse(viewModel.isPlayable(half))
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `离线时界面派生的曲库只剩已下载（ADR-0008）`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val kept = Track("kept", "留下的", "手", "辑", 1L, null)
+        val dropped = Track("dropped", "没下载的", "手", "辑", 1L, null)
+        val snapshotRepo = FakeSnapshotRepository().apply {
+            stored = LibrarySnapshot(
+                tracks = listOf(kept, dropped),
+                albums = listOf(Album("al", "辑", "手", trackCount = 2, imageTag = null))
+            )
+        }
+        val mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/kept" }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("kept")))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        val state = viewModel.state.value
+        // 原始状态保留全量（回在线要用），界面派生的那一份才筛。
+        assertEquals(listOf(kept, dropped), state.tracks)
+        val visible = offlineVisibleLibrary(
+            tracks = state.tracks,
+            albums = state.albums,
+            visibleTrackIds = state.cachedTrackIds.orEmpty()
+        )
+        assertEquals(listOf(kept), visible.tracks)
+        // 专辑只下了一首也还在（选曲下载不该让整张消失）
+        assertEquals(listOf("al"), visible.albums?.map { it.id })
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `回在线后派生列表恢复全量，不需要重拉`() = runTest {
+        val api = FakeJellyfinApi(listOf(track))
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val snapshotRepo = FakeSnapshotRepository().apply {
+            stored = LibrarySnapshot(tracks = listOf(track))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, snapshotRepository = snapshotRepo
+        )
+        advanceBounded()
+        assertTrue(viewModel.state.value.isOffline)
+
+        api.musicItemsError = null
+        advanceTimeBy(20_000)
+        advanceBounded()
+
+        val state = viewModel.state.value
+        assertFalse(state.isOffline)
+        // 回在线时 cachedTrackIds 清成 null：界面不筛，直接显示原件全量。
+        assertNull(state.cachedTrackIds)
+        assertEquals(listOf(track), state.tracks)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `换账号后看不见上一个账号的下载（字节还在，但名单不归我）`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val snapshotRepo = FakeSnapshotRepository().apply { stored = LibrarySnapshot(tracks = listOf(track)) }
+        val mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" }
+        // 名单只有 user-1 的条目；当前会话是 user-2
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("track-1"), userId = "user-1"))
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        assertFalse(viewModel.isPlayable(track))
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `退出登录后重新登录，下载还在且离线能放`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        val mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("track-1")))
+        }
+        val snapshotRepo = FakeSnapshotRepository()
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceUntilIdle()
+
+        viewModel.signOut()
+        advanceUntilIdle()
+        assertEquals(setOf("stream/track-1"), mediaDownloads.completeKeys)
+        // 退出登录不清名单（启动迁移可能再补一条专辑条目，所以只断言原来那条还在）
+        assertTrue(ledger.entries.any { it.trackIds.contains("track-1") })
+
+        // 重登成功后网又断了：字节 + 名单都还在，离线照常能放
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+        assertTrue(!viewModel.state.value.isOffline)
+
+        api.albumsError = JellyfinError.Network(IOException("no network"))
+        viewModel.loadAlbums()
+        advanceBounded()
+
+        assertTrue(viewModel.state.value.isOffline)
+        assertTrue(viewModel.isPlayable(track))
+        // 重登后迁移会补一条专辑条目（存量副本反推），原来那条下载记录不能丢
+        assertTrue(ledger.entries.any { it.trackIds.contains("track-1") })
+        viewModel.stopOfflineForTest()
+    }
+
+    private val offlinePlaylist = Playlist("pl-1", "通勤", 1, null)
+    private val notDownloadedPlaylist = Playlist("pl-2", "别人的列表", 1, null)
+
+    private fun snapshotWithDownloadedPlaylist(
+        userId: String = "user-1",
+        serverUrl: String = "https://server.test",
+        tracks: List<Track> = listOf(track)
+    ) = LibrarySnapshot(
+        tracks = listOf(track),
+        downloadedPlaylists = listOf(
+            DownloadedPlaylist(
+                id = offlinePlaylist.id,
+                name = offlinePlaylist.name,
+                serverUrl = serverUrl,
+                userId = userId,
+                trackCount = tracks.size,
+                tracks = tracks
+            )
+        )
+    )
+
+    @Test
+    fun `离线时已下载的播放列表能打开，曲目来自本地清单`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                downloadedEntry(listOf("track-1"), kind = DownloadKind.PLAYLIST, id = "pl-1", name = "通勤")
+            )
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" },
+            snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist() },
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        viewModel.loadPlaylists()
+        advanceBounded()
+        assertEquals(listOf(offlinePlaylist.id), viewModel.state.value.playlists?.map { it.id })
+
+        viewModel.loadPlaylistTracks(offlinePlaylist)
+        advanceBounded()
+        assertEquals(listOf(track), viewModel.state.value.playlistTracks)
+        assertNull(viewModel.state.value.errorMessage)
+        assertTrue(viewModel.isPlayable(track))
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `离线时没下载过的播放列表照旧需要联网`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                downloadedEntry(listOf("track-1"), kind = DownloadKind.PLAYLIST, id = "pl-1", name = "通勤")
+            )
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = FakeMediaDownloads(),
+            snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist() },
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        viewModel.loadPlaylistTracks(notDownloadedPlaylist)
+        advanceBounded()
+
+        assertNull(viewModel.state.value.playlistTracks)
+        assertEquals("这个播放列表没有下载，需要联网才能查看", viewModel.state.value.errorMessage)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `已下载列表清单按账号过滤，换账号看不见别人的列表`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        // 快照里躺着 user-1 的清单；当前会话是 user-2
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                downloadedEntry(listOf("track-1"), userId = "user-2", kind = DownloadKind.PLAYLIST, id = "pl-1", name = "通勤")
+            )
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            api, mediaDownloads = FakeMediaDownloads(),
+            snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist(userId = "user-1") },
+            downloadLedgerStore = ledger
+        )
+        advanceBounded()
+
+        viewModel.loadPlaylists()
+        advanceBounded()
+
+        // 一个可见的都没有：保持 null，界面照旧「需要联网」，不误报「暂无播放列表」
+        assertNull(viewModel.state.value.playlists)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `在线打开已下载的列表详情会写进已下载列表清单`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        api.playlistTracksResult = Result.success(listOf(track))
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                downloadedEntry(listOf("track-1"), kind = DownloadKind.PLAYLIST, id = "pl-1", name = "通勤")
+            )
+        }
+        val snapshotRepo = FakeSnapshotRepository()
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger
+        )
+        advanceUntilIdle()
+
+        viewModel.loadPlaylistTracks(offlinePlaylist)
+        advanceUntilIdle()
+
+        val listing = snapshotRepo.stored?.downloadedPlaylists?.single()
+        assertEquals("pl-1", listing?.id)
+        assertEquals(listOf(track), listing?.tracks)
+        assertEquals("user-1", listing?.userId)
+    }
+
+    @Test
+    fun `没下载过的列表在线打开不会写进已下载列表清单`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        api.playlistTracksResult = Result.success(listOf(track))
+        val snapshotRepo = FakeSnapshotRepository()
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
+            downloadLedgerStore = FakeDownloadLedgerStore()
+        )
+        advanceUntilIdle()
+
+        viewModel.loadPlaylistTracks(offlinePlaylist)
+        advanceUntilIdle()
+
+        assertTrue(snapshotRepo.stored?.downloadedPlaylists.isNullOrEmpty())
     }
 
     @Test
@@ -891,6 +1217,51 @@ class JellyfinViewModelTest {
         assertEquals(listOf("https://old.test"), viewModel.state.value.serverUrlHistory)
     }
 
+    /**
+     * 回归：地址历史的读盘和会话恢复是 init 里两个并发协程，**都在真 DataStore 上挂起**。
+     *
+     * 曾经的写法是 `_state.value = _state.value.copy(serverUrlHistory = load())`——
+     * Kotlin 先求 receiver 再求参数，所以 `_state.value` 在进入挂起点**之前**就被求值成
+     * 一份「serverUrl 还是空串」的快照。等读盘回来执行 copy 时，会话恢复早已把
+     * `serverUrl` 写好，这一份旧快照又把它盖回空串。
+     *
+     * 后果不是界面难看而已：`serverUrl` 是下载名单的归属键，空了以后
+     * `entriesFor(真实地址, userId)` 一条都匹配不上，「已下载」页永远是空的；
+     * 专辑页的下载按钮也因为 `buildDownloadTarget` 里 `serverUrl.isBlank()` 而一直禁用。
+     *
+     * 测试要点：`FakeServerUrlHistory.loadGate` 必须真的挂起，否则复现不出这个交错。
+     */
+    @Test
+    fun `地址历史读盘挂起期间会话恢复写入的地址不被旧快照覆盖`() = runTest {
+        val history = FakeServerUrlHistory()
+        history.record("https://old.test")
+        val historyGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        history.loadGate = historyGate
+        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        // 会话读盘也卡住：这样才能让两个协程真正交错，复现真 DataStore 下的挂起点。
+        val sessionGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        sessions.loadGate = sessionGate
+        val viewModel = createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)), serverUrlHistory = history)
+
+        // 两个协程此刻都挂在盘上；地址历史那条**已经**读到了 `_state.value`
+        // （那时 serverUrl 还是空串），正卡在 load() 里面。
+        advanceUntilIdle()
+
+        // 先放行会话恢复：它会写 serverUrl 和 tracks。
+        sessionGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("https://server.test", viewModel.state.value.serverUrl)
+        assertEquals(listOf(track), viewModel.state.value.tracks)
+
+        // 再放行地址历史读盘。它带着「serverUrl 为空」的旧快照回来，不能把新状态盖掉。
+        historyGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf("https://old.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals("https://server.test", viewModel.state.value.serverUrl)
+        assertEquals(listOf(track), viewModel.state.value.tracks)
+    }
+
     @Test
     fun `退出登录保留地址历史（本地数据，与账号无关）`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
@@ -938,41 +1309,19 @@ class JellyfinViewModelTest {
     }
 
     @Test
-    fun `清空缓存保留正在播的那首，不被从播放流底下抽走`() = runTest {
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/track-1"
-        mediaCache.completeKeys += "stream/other"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
-            FakeJellyfinApi(tracks = listOf(track)),
-            mediaCache = mediaCache
-        )
-        advanceUntilIdle()
-        viewModel.setPlaybackQueue(listOf(track), "track-1")
-
-        viewModel.clearCache()
-        advanceUntilIdle()
-
-        // 正在播的 "stream/track-1" 留下，其余副本全清
-        assertEquals(setOf("stream/track-1"), mediaCache.completeKeys)
-        assertEquals(setOf("stream/track-1"), mediaCache.lastClearKept)
-        assertTrue(mediaCache.removedKeys.contains("stream/other"))
-    }
-
-    @Test
-    fun `已缓存页按专辑列出完整副本的进度`() = runTest {
+    fun `已下载页按专辑列出完整副本的进度`() = runTest {
         val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
         val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
         val t3 = Track("t3", "Song B1", "Artist Y", "Album B", 1000L, null)
         val albumA = Album("a1", "Album A", "Artist X", 2, null)
         val albumB = Album("a2", "Album B", "Artist Y", 1, null)
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/t1"
-        mediaCache.completeKeys += "stream/t3"
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        mediaDownloads.completeKeys += "stream/t3"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t2, t3), albums = listOf(albumA, albumB)),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -983,44 +1332,47 @@ class JellyfinViewModelTest {
 
         assertEquals(
             listOf(
-                CachedAlbum(albumA, cachedCount = 1, totalCount = 2),
-                CachedAlbum(albumB, cachedCount = 1, totalCount = 1)
+                CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2),
+                CachedAlbum(albumB, tracks = listOf(t3), totalCount = 1)
             ),
             viewModel.state.value.cachedAlbums
         )
     }
 
     @Test
-    fun `专辑页没加载过时进已缓存页会先拉专辑再分组`() = runTest {
+    fun `专辑页没加载过时进已下载页会先拉专辑再分组`() = runTest {
         val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
         val albumA = Album("a1", "Album A", "Artist X", 1, null)
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/t1"
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
-        // 不先逛专辑页：直接进已缓存页（快照里也没有专辑列表）
+        // 不先逛专辑页：直接进已下载页（快照里也没有专辑列表）
         viewModel.loadCachedAlbums()
         advanceUntilIdle()
 
-        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 1)), viewModel.state.value.cachedAlbums)
+        assertEquals(
+            listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 1)),
+            viewModel.state.value.cachedAlbums
+        )
     }
 
     @Test
-    fun `按专辑删副本：正在播的保留，其余删掉，统计与列表同步刷新`() = runTest {
+    fun `按专辑删下载：正在播的保留，其余删掉，统计与列表同步刷新`() = runTest {
         val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
         val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
         val albumA = Album("a1", "Album A", "Artist X", 2, null)
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/t1"
-        mediaCache.completeKeys += "stream/t2"
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        mediaDownloads.completeKeys += "stream/t2"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1032,25 +1384,28 @@ class JellyfinViewModelTest {
         viewModel.deleteAlbumCopies(albumA)
         advanceUntilIdle()
 
-        assertEquals(setOf("stream/t1"), mediaCache.completeKeys)
-        assertTrue(mediaCache.removedKeys.contains("stream/t2"))
+        assertEquals(setOf("stream/t1"), mediaDownloads.completeKeys)
+        assertTrue(mediaDownloads.removedKeys.contains("stream/t2"))
         assertEquals(1, viewModel.state.value.cacheTrackCount)
-        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 2)), viewModel.state.value.cachedAlbums)
+        assertEquals(
+            listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2)),
+            viewModel.state.value.cachedAlbums
+        )
     }
 
     @Test
-    fun `整张专辑删光后从已缓存列表消失`() = runTest {
+    fun `整张专辑删光后从已下载列表消失`() = runTest {
         val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
         val t3 = Track("t3", "Song B1", "Artist Y", "Album B", 1000L, null)
         val albumA = Album("a1", "Album A", "Artist X", 1, null)
         val albumB = Album("a2", "Album B", "Artist Y", 1, null)
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/t1"
-        mediaCache.completeKeys += "stream/t3"
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        mediaDownloads.completeKeys += "stream/t3"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t3), albums = listOf(albumA, albumB)),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1061,23 +1416,101 @@ class JellyfinViewModelTest {
         viewModel.deleteAlbumCopies(albumB)
         advanceUntilIdle()
 
-        assertTrue(mediaCache.removedKeys.contains("stream/t3"))
-        assertEquals(listOf(CachedAlbum(albumA, cachedCount = 1, totalCount = 1)), viewModel.state.value.cachedAlbums)
+        assertTrue(mediaDownloads.removedKeys.contains("stream/t3"))
+        assertEquals(
+            listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 1)),
+            viewModel.state.value.cachedAlbums
+        )
     }
 
     @Test
-    fun `换账号重新登录后已缓存列表清空，不残留旧账号的分组`() = runTest {
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/track-1"
+    fun `整张删按名单删：服务器后来新增的歌不在名单里，不跟着删`() = runTest {
+        val old1 = Track("old1", "老歌 1", "Artist X", "Album A", 1000L, null)
+        val old2 = Track("old2", "老歌 2", "Artist X", "Album A", 1000L, null)
+        // 服务器后加的：用户没下过，只是列表里有
+        val added = Track("added", "新歌", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 3, null)
+        val mediaDownloads = FakeMediaDownloads()
+        // 三首都有完整副本（新歌是自动缓存时代留下的字节，模拟「盘上有但名单里没有」）
+        mediaDownloads.completeKeys += listOf("stream/old1", "stream/old2", "stream/added")
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                DownloadEntry(
+                    serverUrl = "https://server.test", userId = "user-1", kind = DownloadKind.ALBUM,
+                    id = "a1", name = "Album A", trackIds = listOf("old1", "old2"), createdAt = 1L
+                )
+            )
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(old1, old2, added), albums = listOf(albumA)),
+            mediaDownloads = mediaDownloads,
+            downloadLedgerStore = ledger
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        viewModel.deleteAlbumCopies(albumA)
+        advanceUntilIdle()
+
+        // 用户故事 10：只删当初下的那批
+        assertEquals(setOf("stream/added"), mediaDownloads.completeKeys)
+        assertEquals(listOf("stream/old1", "stream/old2"), mediaDownloads.removedKeys)
+        // 名单跟着清（跟专辑页的删除按钮同一口径）：删干净就整条移除
+        assertTrue(ledger.entries.none { it.id == "a1" })
+    }
+
+    @Test
+    fun `展开后删单首：只删这一首，正在播的删不动`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 2, null)
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        mediaDownloads.completeKeys += "stream/t2"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
+            mediaDownloads = mediaDownloads
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+        viewModel.loadCachedAlbums()
+        advanceUntilIdle()
+        viewModel.setPlaybackQueue(listOf(t1, t2), "t1")
+
+        viewModel.deleteDownloadedTrack(t2)
+        advanceUntilIdle()
+        assertEquals(listOf("stream/t2"), mediaDownloads.removedKeys)
+
+        // 正在播的那首：ViewModel 侧也挡一道，不指望界面永远记得禁按钮
+        viewModel.deleteDownloadedTrack(t1)
+        advanceUntilIdle()
+        assertEquals(listOf("stream/t2"), mediaDownloads.removedKeys)
+        assertEquals(setOf("stream/t1"), mediaDownloads.completeKeys)
+        assertEquals(
+            listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2)),
+            viewModel.state.value.cachedAlbums
+        )
+    }
+
+    @Test
+    fun `换账号重新登录后已下载列表清空，不残留旧账号的分组`() = runTest {
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/track-1"
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
-            api, mediaCache = mediaCache
+            api, mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
         viewModel.loadCachedAlbums()
         advanceUntilIdle()
-        assertEquals(emptyList<CachedAlbum>(), viewModel.state.value.cachedAlbums)
+        // 切换前：旧账号确实看得到自己的下载。专辑列表没加载时从曲目反推卡片
+        // （见 groupCachedByAlbum），所以这里不是空列表——本用例只关心「切换后清空」。
+        assertEquals(1, viewModel.state.value.cachedAlbums?.size)
 
         api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
         viewModel.updateServerUrl("https://server.test")
@@ -1091,60 +1524,54 @@ class JellyfinViewModelTest {
 
     @Test
     fun `删歌成功后顺带删掉这首的本地副本`() = runTest {
-        val mediaCache = FakeMediaCache()
+        val mediaDownloads = FakeMediaDownloads()
         val fileOps = FakeLibraryFilesApi()
         val deletable = track.copy(id = "t1", filePath = "E:\\music\\t1.flac")
         val viewModel = createViewModelWithFileOps(
             fileOps, tracks = listOf(deletable),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
 
         viewModel.deleteTrack(deletable)
 
         advanceUntilIdle()
         assertTrue(viewModel.state.value.tracks.isNullOrEmpty())
-        assertEquals(listOf("stream/t1"), mediaCache.removedKeys)
+        assertEquals(listOf("stream/t1"), mediaDownloads.removedKeys)
     }
 
     @Test
-    fun `改名成功不动缓存（副本照样能放）`() = runTest {
-        val mediaCache = FakeMediaCache()
+    fun `改名成功不动下载（副本照样能放）`() = runTest {
+        val mediaDownloads = FakeMediaDownloads()
         val fileOps = FakeLibraryFilesApi()
         val renameable = track.copy(id = "t1", filePath = "E:\\music\\t1.flac")
         val viewModel = createViewModelWithFileOps(
             fileOps, tracks = listOf(renameable),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
 
         viewModel.renameTrack(renameable, title = "新名字")
 
         advanceUntilIdle()
-        // 工单 06：改名改的是内嵌标签，歌没变，副本一个字节都不动
-        assertTrue(mediaCache.removedKeys.isEmpty())
-        assertTrue(!mediaCache.cleared)
+        // 工单 06：改名改的是内嵌标签，歌没变，下载一个字节都不动
+        assertTrue(mediaDownloads.removedKeys.isEmpty())
     }
 
     @Test
-    fun `清空缓存后占用与首数归零并带完成提示`() = runTest {
-        val mediaCache = FakeMediaCache()
-        mediaCache.completeKeys += "stream/track-1"
+    fun `下载统计照旧：占用与首数来自下载层`() = runTest {
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/track-1"
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
 
         viewModel.loadCacheStats()
         advanceUntilIdle()
+
         assertEquals(1, viewModel.state.value.cacheTrackCount)
-
-        viewModel.clearCache()
-        advanceUntilIdle()
-
-        assertEquals(0, viewModel.state.value.cacheTrackCount)
-        assertTrue(viewModel.state.value.cacheMessage != null)
-        assertTrue(!viewModel.state.value.isCacheBusy)
+        assertEquals(36_000_000L, viewModel.state.value.cacheBytes)
     }
 
     // ── 播放历史（工单 02：发现页个人化聚合的数据基础） ──────────────────
@@ -1592,13 +2019,13 @@ class JellyfinViewModelTest {
     private fun TestScope.createViewModelWithFileOps(
         fileOps: FakeLibraryFilesApi,
         tracks: List<Track>,
-        mediaCache: FakeMediaCache? = null
+        mediaDownloads: FakeMediaDownloads? = null
     ): JellyfinViewModel {
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = tracks),
             libraryFilesFactory = { fileOps },
-            mediaCache = mediaCache
+            mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
         return viewModel
@@ -1609,19 +2036,45 @@ class JellyfinViewModelTest {
         api: FakeJellyfinApi,
         authorization: FakeAuthorizationSink = FakeAuthorizationSink(),
         libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
-        mediaCache: FakeMediaCache? = null,
+        mediaDownloads: FakeMediaDownloads? = null,
         snapshotRepository: FakeSnapshotRepository? = null,
-        serverUrlHistory: FakeServerUrlHistory? = null
+        serverUrlHistory: FakeServerUrlHistory? = null,
+        downloadLedgerStore: FakeDownloadLedgerStore? = null
     ): JellyfinViewModel = JellyfinViewModel(
         sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
-        libraryFilesFactory, mediaCache, snapshotRepository, serverUrlHistory
+        libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory, downloadLedgerStore
     )
+
+    /** 下载名单的内存 Fake（迁移测试用）。 */
+    private class FakeDownloadLedgerStore : DownloadLedgerStore {
+        var entries = emptyList<DownloadEntry>()
+        var replaceCalls = 0
+        var done = false
+        /** 写盘失败：模拟 DataStore 坏了，迁移必须静默放弃。 */
+        var failWrite = false
+        override suspend fun load() = DownloadLedger(entries)
+        override suspend fun replaceAll(entries: List<DownloadEntry>) {
+            if (failWrite) throw RuntimeException("ledger broken")
+            replaceCalls++
+            this.entries = entries
+        }
+        override suspend fun entriesFor(serverUrl: String, userId: String) =
+            entries.filter { it.serverUrl == serverUrl && it.userId == userId }
+    }
 
     /** 地址历史的内存 Fake：记录写入与读取，验证登录成功时的 record 调用。 */
     private class FakeServerUrlHistory : ServerUrlHistory {
         val recorded = mutableListOf<String>()
         private val urls = mutableListOf<String>()
-        override suspend fun load(): List<String> = urls.toList()
+        /**
+         * 非空时 [load] 会真的挂起，直到测试放行。真 DataStore 读盘本来就是挂起的，
+         * 这里必须能复现那个挂起点，否则「跨挂起点的读-改-写」竞态在测试里根本不出现。
+         */
+        var loadGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        override suspend fun load(): List<String> {
+            loadGate?.await()
+            return urls.toList()
+        }
         override suspend fun record(url: String) {
             recorded += url
             urls.remove(url)
@@ -1629,28 +2082,31 @@ class JellyfinViewModelTest {
         }
     }
 
-    private class FakeMediaCache : MediaCache {
+    private class FakeMediaDownloads : MediaDownloads {
         val completeKeys = mutableSetOf<String>()
-        var cleared = false
-        var lastClearKept: Set<String>? = null
         val removedKeys = mutableListOf<String>()
         var failAll = false
         override suspend fun hasCompleteCopy(key: String): Boolean {
-            if (failAll) throw RuntimeException("cache broken")
+            if (failAll) throw RuntimeException("downloads broken")
             return key in completeKeys
         }
-        override suspend fun usedBytes(): Long = if (failAll) throw RuntimeException("cache broken") else 36_000_000L
-        override suspend fun completeCount(): Int = if (failAll) throw RuntimeException("cache broken") else completeKeys.size
+        override suspend fun usedBytes(): Long =
+            if (failAll) throw RuntimeException("downloads broken") else 36_000_000L
+        override suspend fun completeCount(): Int =
+            if (failAll) throw RuntimeException("downloads broken") else completeKeys.size
         override suspend fun completeKeys(): Set<String> {
-            if (failAll) throw RuntimeException("cache broken")
+            if (failAll) throw RuntimeException("downloads broken")
             return completeKeys.toSet()
         }
-        override suspend fun clear(keepKeys: Set<String>) {
-            cleared = true
-            lastClearKept = keepKeys
-            (completeKeys - keepKeys).forEach { removedKeys += it }
-            completeKeys.clear()
-            completeKeys += keepKeys
+        override suspend fun download(
+            url: String,
+            key: String,
+            onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
+        ): Boolean {
+            if (failAll) return false
+            completeKeys += key
+            onProgress(1L, 1L)
+            return true
         }
         override suspend fun remove(key: String) { removedKeys += key; completeKeys -= key }
     }
@@ -1670,7 +2126,12 @@ class JellyfinViewModelTest {
 
     private class FakeSessionRepository(private var session: SavedSession?) : SessionRepository {
         var cleared = false
-        override suspend fun load() = session
+        /** 非空时 [load] 真的挂起：复现「会话恢复还没写完，别的协程已经在读状态」。 */
+        var loadGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        override suspend fun load(): SavedSession? {
+            loadGate?.await()
+            return session
+        }
         override suspend fun save(session: SavedSession) { this.session = session }
         override suspend fun clear() { cleared = true; session = null }
     }
@@ -1740,9 +2201,12 @@ class JellyfinViewModelTest {
         }
         override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = Result.success(emptyList<Track>())
         var playlistsError: Throwable? = null
+        /** 播放列表详情返回的曲目（工单 08：在线打开列表详情会写已下载列表清单）。 */
+        var playlistTracksResult: Result<List<Track>> = Result.success(emptyList())
         override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =
             playlistsError?.let { Result.failure(it) } ?: Result.success(emptyList())
-        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) = Result.success(emptyList<Track>())
+        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) =
+            playlistTracksResult
         override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> {
             searchQueries += query
             return searchError?.let { Result.failure(it) } ?: Result.success(searchResults)

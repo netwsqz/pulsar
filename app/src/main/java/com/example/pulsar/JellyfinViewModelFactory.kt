@@ -17,9 +17,12 @@ class JellyfinViewModelFactory(private val application: Application) : ViewModel
             authorizationSink = application,
             dispatcher = Dispatchers.Main.immediate,
             libraryFilesFactory = application.libraryFilesFactory(),
-            mediaCache = application.mediaCache(),
+            mediaDownloads = application.mediaDownloads(),
             snapshotRepository = application.librarySnapshotRepository(),
-            serverUrlHistory = application.serverUrlHistory()
+            serverUrlHistory = application.serverUrlHistory(),
+            // 存量副本迁移（工单 07）写这里。直接拿 App 的 DataStore 建 store：
+            // 不动 PulsarApplication（那文件归别的工单），也不必多一个工厂方法。
+            downloadLedgerStore = DataStoreDownloadLedgerStore(application.pulsarPreferencesDataStore)
         ) as T
     }
 }

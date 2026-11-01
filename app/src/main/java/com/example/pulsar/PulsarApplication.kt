@@ -3,7 +3,7 @@ package com.example.pulsar
 import android.app.Application
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.Cache
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
 import com.example.pulsar.data.jellyfin.JellyfinApi
@@ -22,12 +22,10 @@ import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import java.io.File
 
-/** 缓存目录用 `filesDir` 而**不是** `cacheDir`：后者会被系统在空间紧张时清掉，
- * 也会被设置里的「清除缓存」整锅端——而这份缓存是专门为「出门能听」攒的。 */
-private const val kMediaCacheDirName = "media_cache"
-
-/** 缓存上限 5 GB（按 FLAC 平均 36 MB/首算约 140 首）。超了自动淘汰**最久没听的**。 */
-private const val kMediaCacheMaxBytes = 5L * 1024 * 1024 * 1024
+/** 下载目录用 `filesDir` 而**不是** `cacheDir`：后者会被系统在空间紧张时清掉，
+ * 也不适合放用户主动要的东西——这里的副本是用户点了「下载」才有的，不能自己消失。
+ * 目录名沿用 `media_cache`：升级后老副本原地就是「下载」，一首不丢（铁律 7）。 */
+private const val kMediaDownloadsDirName = "media_cache"
 
 private const val kLibrarySnapshotFileName = "library-snapshot.json"
 
@@ -89,20 +87,27 @@ class PulsarApplication : Application(), AuthorizationSink {
     fun qqDownloadSettings(): QQDownloadSettings = QQDownloadPreferences(pulsarPreferencesDataStore)
 
     /**
-     * 手机本地音频副本。**进程级单例**：`SimpleCache` 对同一个目录只允许有一个实例
-     * （第二个会被锁文件挡下来），而它同时被播放服务（写）和界面（查完整副本 / 报占用）
+     * 手机本地音频副本（下载）。**进程级单例**：`SimpleCache` 对同一个目录只允许有一个实例
+     * （第二个会被锁文件挡下来），而它同时被播放服务（只读）和界面（查完整副本 / 报占用）
      * 用到，所以只能建在这里。也正因为共用，服务销毁时**不能**释放它——那会让界面
      * 随后的查询全变成异常。它的生命周期就是 App 的进程。
+     *
+     * 淘汰器是 `NoOpCacheEvictor`：**不自动淘汰任何东西**，没有总量上限（ADR-0007）。
+     * 用户的下载只有用户能删。
      */
     val mediaCacheStore: Cache by lazy {
         SimpleCache(
-            File(filesDir, kMediaCacheDirName),
-            LeastRecentlyUsedCacheEvictor(kMediaCacheMaxBytes),
+            File(filesDir, kMediaDownloadsDirName),
+            NoOpCacheEvictor(),
             StandaloneDatabaseProvider(this)
         )
     }
 
-    fun mediaCache(): MediaCache = SimpleCacheMediaCache(mediaCacheStore)
+    /** 下载库。上游（网络）源复用播放那条鉴权工厂：token 只进 header，绝不进 URL。 */
+    fun mediaDownloads(): MediaDownloads = SimpleCacheMediaDownloads(
+        cache = mediaCacheStore,
+        upstreamFactory = AuthHttpDataSourceFactory { activeAuthorization },
+    )
 
     /** 曲库快照：一份 JSON 落在 App 私有目录，断网时顶上。 */
     fun librarySnapshotRepository(): LibrarySnapshotRepository =
@@ -124,5 +129,23 @@ class PulsarApplication : Application(), AuthorizationSink {
     fun libraryFilesFactory(): suspend () -> LibraryFilesApi {
         val settings = qqDownloadSettings()
         return { libraryFilesApi(settings.serviceUrl(), settings.fileOpsKey()) }
+    }
+
+    /** 下载名单（`DownloadLedger`）的持久化。 */
+    fun downloadLedgerStore(): DownloadLedgerStore = DataStoreDownloadLedgerStore(pulsarPreferencesDataStore)
+
+    /**
+     * 下载调度器，**进程级单例**：串行队列与进度状态都挂在它身上，界面重建不能重来一遍。
+     * 用独立的作用域而不是 [playbackReportScope]：两者生命周期虽然一样，但这些下载
+     * 任务时长以分钟计，混在一起会让播放上报的诊断更难看清。
+     */
+    val downloadScheduler: DownloadScheduler by lazy {
+        DownloadScheduler(
+            scope = kotlinx.coroutines.CoroutineScope(
+                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+            ),
+            downloads = mediaDownloads(),
+            ledger = downloadLedgerStore(),
+        )
     }
 }

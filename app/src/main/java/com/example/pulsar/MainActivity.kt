@@ -129,6 +129,7 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
@@ -139,6 +140,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -431,6 +433,17 @@ private fun EmptyState(
         )
     }
 }
+/** 离线过滤生效时标题下的一行小字（ADR-0008）：解释歌为什么变少了。 */
+@Composable
+private fun OfflineNoticeText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = modifier
+    )
+}
+
 /**
  * 艺术家 / 流派列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
  * 行语言沿用 Auxio 列表项：封面 + 组名 + 「N 张专辑」副信息。
@@ -439,14 +452,15 @@ private fun EmptyState(
 @Composable
 private fun LibraryGroupsContent(
     state: JellyfinUiState,
+    albums: List<Album>?,
     title: String,
+    offlineNotice: String?,
     byGenre: Boolean,
     onOpenGroup: (String) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val albums = state.albums
     val groups = remember(albums, byGenre) { libraryGroups(albums.orEmpty(), byGenre) }
     Column(
         modifier.fillMaxSize()
@@ -459,11 +473,18 @@ private fun LibraryGroupsContent(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
+        offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 albums == null && state.isLoading -> TrackListSkeleton(count = 8)
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                groups.isEmpty() -> EmptyState(if (byGenre) "暂无流派" else "暂无艺术家")
+                groups.isEmpty() -> EmptyState(
+                    when {
+                        offlineNotice != null -> "离线 · 手机里还没有下载的专辑"
+                        byGenre -> "暂无流派"
+                        else -> "暂无艺术家"
+                    }
+                )
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 96.dp),
@@ -489,14 +510,15 @@ private fun LibraryGroupsContent(
 @Composable
 private fun LibraryGroupDetailContent(
     state: JellyfinUiState,
+    albums: List<Album>?,
     groupName: String,
     isGenre: Boolean,
+    offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val albums = state.albums
     // 组名来自导航状态，专辑列表可能还在加载/刷新：按组名重新分组，找不到就显示空态。
     val group = remember(albums, groupName, isGenre) {
         // 组名按大小写不敏感匹配：显示名取「首次出现的写法」，输入顺序一变精确匹配就会失手。
@@ -517,6 +539,7 @@ private fun LibraryGroupDetailContent(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
@@ -539,7 +562,9 @@ private fun LibraryGroupDetailContent(
                     }
                 }
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                group == null || group.albums.isEmpty() -> EmptyState("这里还没有专辑")
+                group == null || group.albums.isEmpty() -> EmptyState(
+                    if (offlineNotice != null) "离线 · 这里还没有下载的专辑" else "这里还没有专辑"
+                )
                 else -> LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier.fillMaxSize(),
@@ -792,7 +817,31 @@ private fun MusicLibraryScreen(
             is LibrarySection.PlaylistDetail -> if (sessionReady) viewModel.loadPlaylistTracks(s.playlist)
         }
     }
-    val tracks = state.tracks.orEmpty()
+    // 离线可见性（ADR-0008）：离线时各屏只显示已下载的东西，不再「全量 + 标灰」。
+    // 原始 state 一律不动，这里派生一份渲染用的列表——回在线自动恢复全量，不用重拉。
+    // cachedTrackIds 为 null（还没算出来）时不筛，免得把能播的歌藏掉。
+    val offlineFilter = state.isOffline && state.cachedTrackIds != null
+    val visible = if (offlineFilter) {
+        offlineVisibleLibrary(
+            tracks = state.tracks,
+            albums = state.albums,
+            discoverAlbums = state.discoverAlbums,
+            albumTracks = state.albumTracks,
+            playlistTracks = state.playlistTracks,
+            searchResults = state.searchResults,
+            visibleTrackIds = state.cachedTrackIds.orEmpty()
+        )
+    } else {
+        VisibleLibrary(
+            tracks = state.tracks,
+            albums = state.albums,
+            discoverAlbums = state.discoverAlbums,
+            albumTracks = state.albumTracks,
+            playlistTracks = state.playlistTracks,
+            searchResults = state.searchResults
+        )
+    }
+    val tracks = visible.tracks.orEmpty()
     // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     // 音量浮窗的显示窗口：独占模式下音量键被 App 截获、系统音量条不会弹，靠它给唯一的视觉反馈。
@@ -810,7 +859,7 @@ private fun MusicLibraryScreen(
         onDispose { controller.removeListener(listener) }
     }
     // 统一播放入口：记录当前曲目后交给 playTracks。未连接播放服务时直接忽略。
-    // 离线时 playTracks 内部会跳过没缓存的歌（队列里混着能放/不能放时按工单 03 口径处理）。
+    // 离线时 playTracks 内部会跳过没下载的歌（队列里混着能放/不能放时按工单 03 口径处理）。
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
     // QQ 下载动作反馈（音质不可用 / 入队失败 / 整专跳过 N 首）走 Snackbar——那是动作反馈。
@@ -820,40 +869,30 @@ private fun MusicLibraryScreen(
         snackbarHostState.showSnackbar(message)
         qqViewModel.dismissActionMessage()
     }
-    // 离线没缓存的歌的统一话术（文案只此一处，经 ViewModel 的 unplayableReason 出口）。
+    // 离线没下载的歌的统一话术（文案只此一处，经 ViewModel 的 unplayableReason 出口）。
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
         val controller = controllerState.controller
         if (controller != null) {
             val start = trackList.firstOrNull { it.id == trackId }
             val reason = start?.let(viewModel::unplayableReason)
             if (reason != null) {
-                // 先守门再进队列：点了没缓存的歌只弹提示，不把它写进「正在播」镜像——
+                // 先守门再进队列：点了没下载的歌只弹提示，不把它写进「正在播」镜像——
                 // 不然迷你条/高亮/歌词都会指向一首根本没在放的歌。
                 snackbarScope.launch { snackbarHostState.showSnackbar(reason) }
             } else {
-                // 队列里只留能放的：离线播到没缓存的歌只会中途断掉。
+                // 队列里只留能放的：离线播到没下载的歌只会中途断掉。
                 val playable = trackList.filter(viewModel::isPlayable)
                 viewModel.setPlaybackQueue(playable, trackId)
                 playTracks(playable, trackId, controller, playbackMode, viewModel::streamUrl)
             }
         }
     }
-    // 离线态（工单 03/04）：列表行据此标灰，点击没缓存的歌给明确提示。
-    val offlineState = remember(state.isOffline, state.cachedTrackIds) {
-        OfflineState(
-            active = state.isOffline,
-            cachedTrackIds = state.cachedTrackIds,
-            onUnplayable = { track ->
-                snackbarScope.launch {
-                    snackbarHostState.showSnackbar(viewModel.unplayableReason(track) ?: "这首歌没有缓存")
-                }
-            }
-        )
-    }
+    // 离线过滤生效时给各内容页的统一小字（ADR-0008）：歌变少了得有一句解释。
+    val offlineNotice = if (offlineFilter) "离线 · 只显示已下载" else null
     val onAddToQueue: (Track) -> Unit = { track ->
         val ctrl = controllerState.controller
         if (ctrl != null) {
-            // 离线没缓存的歌进不了队列——插进去等到它播也是断，不如当场说清。
+            // 离线没下载的歌进不了队列——插进去等到它播也是断，不如当场说清。
             val reason = viewModel.unplayableReason(track)
             if (reason != null) {
                 snackbarScope.launch { snackbarHostState.showSnackbar(reason) }
@@ -920,8 +959,8 @@ private fun MusicLibraryScreen(
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
                 section = detailOrigin
-                // 来源已消费：二级链（设置 → 已缓存 → 专辑）返回后不留陈旧来源，
-                // 否则再往回退会卡在 设置↔已缓存 的循环里。
+                // 来源已消费：二级链（设置 → 已下载 → 专辑）返回后不留陈旧来源，
+                // 否则再往回退会卡在 设置↔已下载 的循环里。
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.PlaylistDetail -> {
@@ -993,7 +1032,7 @@ private fun MusicLibraryScreen(
         LocalTrackFileOps provides trackFileOps,
         LocalMultiSelect provides multiSelect,
         LocalCoverAccent provides coverAccentAnimated,
-        LocalOfflineState provides offlineState
+        LocalOfflineActive provides state.isOffline
     ) {
     SharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(backgroundBrush)) {
@@ -1037,6 +1076,8 @@ private fun MusicLibraryScreen(
                     LibrarySection.Discover -> DiscoverContent(
                         state = state,
                         tracks = tracks,
+                        discoverAlbums = visible.discoverAlbums,
+                        isOfflineFiltered = offlineFilter,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
                         trackCoverFor = viewModel::trackCover,
@@ -1052,6 +1093,7 @@ private fun MusicLibraryScreen(
                     LibrarySection.Tracks -> TracksContent(
                         state = state,
                         tracks = tracks,
+                        offlineNotice = offlineNotice,
                         controllerState = controllerState,
                         coverFor = viewModel::trackCover,
                         onLocalAudio = { localAudioLauncher.launch(arrayOf("audio/*")) },
@@ -1062,6 +1104,8 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Albums -> AlbumsContent(
                         state = state,
+                        albums = visible.albums,
+                        offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
                         onRetry = viewModel::loadAlbums,
@@ -1076,7 +1120,9 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Artists, LibrarySection.Genres -> LibraryGroupsContent(
                         state = state,
+                        albums = visible.albums,
                         title = s.navLabel().orEmpty(),
+                        offlineNotice = offlineNotice,
                         byGenre = s == LibrarySection.Genres,
                         onOpenGroup = { name ->
                             detailOrigin = section
@@ -1088,6 +1134,8 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Search -> SearchContent(
                         state = state,
+                        results = visible.searchResults,
+                        isOfflineFiltered = offlineFilter,
                         qqState = qqState,
                         // 一次输入同时问两边：两个 ViewModel 各跑各的 300ms 防抖，同时到期 = 一次防抖。
                         onSearchQueryChange = { query ->
@@ -1133,6 +1181,8 @@ private fun MusicLibraryScreen(
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         state = state,
                         album = s.album,
+                        albumTracks = visible.albumTracks,
+                        hideDownloadButton = state.isOffline,
                         coverFor = viewModel::trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
@@ -1140,11 +1190,14 @@ private fun MusicLibraryScreen(
                         onRetry = { viewModel.loadAlbumTracks(s.album) },
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
+                        streamUrl = viewModel::streamUrl,
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
                         state = state,
                         playlist = s.playlist,
+                        playlistTracks = visible.playlistTracks,
+                        hideDownloadButton = state.isOffline,
                         coverFor = viewModel::trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
@@ -1152,12 +1205,15 @@ private fun MusicLibraryScreen(
                         onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
+                        streamUrl = viewModel::streamUrl,
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
                         state = state,
+                        albums = visible.albums,
                         groupName = s.name,
                         isGenre = s.isGenre,
+                        offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
                         onRetry = viewModel::loadAlbums,
@@ -1167,7 +1223,6 @@ private fun MusicLibraryScreen(
                         state = state,
                         viewModel = viewModel,
                         albumCoverFor = viewModel::albumCover,
-                        onOpenAlbum = openAlbum,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -1531,6 +1586,7 @@ private fun glassChipBorder() = BorderStroke(
 private fun TracksContent(
     state: JellyfinUiState,
     tracks: List<Track>,
+    offlineNotice: String?,
     controllerState: ControllerState,
     coverFor: (Track) -> JellyfinRequest?,
     onLocalAudio: () -> Unit,
@@ -1548,6 +1604,9 @@ private fun TracksContent(
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
         item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
+        offlineNotice?.let { notice ->
+            item { OfflineNoticeText(notice) }
+        }
         item {
             Button(
                 onClick = onLocalAudio,
@@ -1556,7 +1615,14 @@ private fun TracksContent(
             ) { Text("选择手机里的音频") }
         }
         // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
-        if (state.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) item { EmptyState("暂无音乐") }
+        // 离线且一首都没下载：专用空态（「曲库空了」和「离线只能看下载」是两回事）。
+        if (state.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) {
+            item {
+                EmptyState(
+                    if (offlineNotice != null) "离线 · 手机里还没有下载的歌曲" else "暂无音乐"
+                )
+            }
+        }
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             TrackRow(
                 track = track,
@@ -1598,23 +1664,16 @@ private val LocalMultiSelect = compositionLocalOf<MultiSelectState?> { null }
  * 提供——只有它拿得到当前播放曲目——正在播放的均衡器条读它，和迷你条进度、全屏进度条同色。 */
 private val LocalCoverAccent = compositionLocalOf { BrandPrimary }
 
-/** 离线态与「哪些歌有完整副本」：由 [MusicLibraryScreen] 提供，所有 TrackRow 消费。
- * cachedTrackIds 为 null = 在线（或还没算出来），不标灰。 */
-private class OfflineState(
-    val active: Boolean,
-    val cachedTrackIds: Set<String>?,
-    /** 点击没缓存的歌：弹「这首歌没有缓存」提示。 */
-    val onUnplayable: (Track) -> Unit
-)
-
-private val LocalOfflineState = compositionLocalOf<OfflineState?> { null }
+/** 是否处于离线态：由 [MusicLibraryScreen] 提供，TrackRow 消费——离线时藏掉长按菜单里的
+ * 删除 / 改名（要走 PC 伴生服务，断网必然失败，ADR-0008）。 */
+private val LocalOfflineActive = compositionLocalOf { false }
 
 /** 单曲行：小封面 + 标题（大）+ 作者（灰色小字）+ 底部灰色分隔线。取消卡片形式，列表更紧凑。
  * 当前播放曲目：标题高亮为品牌色，封面上叠一层半透明遮罩 + 均衡器跳动条（暂停时静止）。
  * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。
  * 手势用 combinedClickable（Material 水波纹按压反馈），长按触觉由框架内置；触点坐标由旁挂的
  * 轻量 pointerInput 只观察不消费地记录，菜单仍锚定真实触点。
- * 离线时没缓存的歌整行变灰：能看到、但现在放不了——跟「没有这首歌」是两回事。 */
+ * 离线时列表里只剩已下载的歌（ADR-0008），所以这里不再需要标灰分支。 */
 @Composable
 private fun TrackRow(
     track: Track,
@@ -1624,6 +1683,8 @@ private fun TrackRow(
     isCurrent: Boolean = false,
     isPlaying: Boolean = false,
     onAddToQueue: (() -> Unit)? = null,
+    /** 专辑详情页用：行首显示曲目序号而不是小封面（Apple Music 列表语言）。null = 保持封面。 */
+    leadingNumber: Int? = null,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -1632,9 +1693,6 @@ private fun TrackRow(
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     val multiSelect = LocalMultiSelect.current
-    // 离线且这首歌没有完整副本 → 整行标灰；点击改为弹「没缓存」提示，不发起播放。
-    val offline = LocalOfflineState.current
-    val dimmed = offline?.active == true && offline.cachedTrackIds?.contains(track.id) != true
     // 长按与「更多」按钮共用同一个菜单，锚点不同而已。
     fun openMenuAt(point: IntOffset) {
         menuOffset = point
@@ -1646,14 +1704,9 @@ private fun TrackRow(
                 .fillMaxWidth()
                 // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
                 .combinedClickable(
-                    // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）；
-                    // 离线没缓存的歌点击 = 弹「没缓存」提示，同样不发起播放（工单 03）。
+                    // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）。
                     onClick = {
-                        when {
-                            multiSelect?.active == true -> multiSelect.onToggle(track.id)
-                            dimmed -> offline?.onUnplayable?.invoke(track)
-                            else -> onClick()
-                        }
+                        if (multiSelect?.active == true) multiSelect.onToggle(track.id) else onClick()
                     },
                     onLongClick = {
                         // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
@@ -1683,17 +1736,36 @@ private fun TrackRow(
                 )
                 Spacer(Modifier.width(Dimens.SpaceTiny))
             }
-            Box {
-                AlbumCover(cover, track.title, Modifier.size(Dimens.TouchTargetSmall))
-                // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
-                // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
-                if (isCurrent) {
-                    PlayingIndicatorOverlay(
-                        isPlaying = isPlaying,
-                        modifier = Modifier
-                            .matchParentSize()
-                            .clip(RoundedCornerShape(8.dp)) // 与 AlbumCover 默认圆角一致
+            if (leadingNumber != null) {
+                // 专辑详情：序号列与下方封面槽同高，右对齐贴着标题（Apple Music 的曲目行）。
+                // 末尾留 8dp：序号往左收一点，不顶死在标题前。
+                Box(
+                    Modifier.size(Dimens.TouchTargetSmall).padding(end = Dimens.SpaceSmall),
+                    contentAlignment = Alignment.CenterEnd
+                ) {
+                    Text(
+                        "$leadingNumber",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (isCurrent) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
                     )
+                }
+            } else {
+                Box {
+                    AlbumCover(cover, track.title, Modifier.size(Dimens.TouchTargetSmall))
+                    // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
+                    // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
+                    if (isCurrent) {
+                        PlayingIndicatorOverlay(
+                            isPlaying = isPlaying,
+                            modifier = Modifier
+                                .matchParentSize()
+                                .clip(RoundedCornerShape(8.dp)) // 与 AlbumCover 默认圆角一致
+                        )
+                    }
                 }
             }
             Spacer(Modifier.width(Dimens.SpaceMidMedium))
@@ -1701,24 +1773,15 @@ private fun TrackRow(
                 Text(
                     track.title,
                     style = MaterialTheme.typography.bodyLarge,
-                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致；
-                    // 离线没缓存的歌整行降透明度（标灰）。
-                    color = when {
-                        isCurrent -> MaterialTheme.colorScheme.primary
-                        dimmed -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-                        else -> Color.Unspecified
-                    },
+                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致。
+                    color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     track.artist,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (dimmed) {
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1755,7 +1818,8 @@ private fun TrackRow(
     }
     // 长按弹出菜单：Popup 作为独立窗口渲染，动画在菜单内容上的 graphicsLayer 进行。
     if (showMenu) {
-        val fileOps = LocalTrackFileOps.current
+        // 离线时长按菜单里不给「改名 / 删除」：走 PC 伴生服务，断网必然失败（ADR-0008）。
+        val fileOps = LocalTrackFileOps.current.takeUnless { LocalOfflineActive.current }
         AddToQueueMenu(
             touchPoint = menuOffset,
             onAddToQueue = { onAddToQueue?.invoke() },
@@ -2094,6 +2158,8 @@ private fun StaggeredMenuItem(
 private fun DiscoverContent(
     state: JellyfinUiState,
     tracks: List<Track>,
+    discoverAlbums: List<Album>?,
+    isOfflineFiltered: Boolean,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     trackCoverFor: (Track) -> JellyfinRequest?,
@@ -2122,12 +2188,13 @@ private fun DiscoverContent(
     }
     // 下拉刷新：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段放行幂等守卫），
     // 每日推荐是本地计算，递增变体编号立刻换一批。
+    // 离线时不发网络请求（必然失败）：只重排本地的每日推荐与专辑墙（ADR-0008）。
     val pullRefreshState = rememberPullToRefreshState()
     PullToRefreshBox(
         isRefreshing = state.isDiscoverRefreshing,
         onRefresh = {
             picksVariant++
-            onRefresh()
+            if (!isOfflineFiltered) onRefresh()
         },
         state = pullRefreshState,
         modifier = modifier.fillMaxSize()
@@ -2188,6 +2255,9 @@ private fun DiscoverContent(
         item(key = "dailyHeader") {
             DiscoverSectionHeader("每日推荐", Modifier.padding(top = Dimens.SpaceMidLarge))
         }
+        if (isOfflineFiltered) {
+            item(key = "offlineNotice") { OfflineNoticeText("离线 · 只显示已下载") }
+        }
         if (state.tracks == null) {
             // 会话还没恢复完：灰色波浪占位。不能走下面的"登录后这里会推荐…"空态文案——
             // 那是"确实没有内容"，而这里是"还在连"，两者语义完全不同。
@@ -2197,7 +2267,7 @@ private fun DiscoverContent(
         } else if (dailyPicks.isEmpty() && tracks.isEmpty()) {
             item(key = "dailyEmpty") {
                 Text(
-                    "登录后这里会推荐当天的歌曲",
+                    if (isOfflineFiltered) "离线 · 手机里还没有下载的歌曲" else "登录后这里会推荐当天的歌曲",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
@@ -2236,7 +2306,7 @@ private fun DiscoverContent(
                 }
             )
         }
-        val albums = state.discoverAlbums
+        val albums = discoverAlbums
         when {
             albums == null && state.isLoading -> {
                 // 骨架屏：与历史 section 同一份横滑骨架（同宽同造型）。
@@ -2248,7 +2318,9 @@ private fun DiscoverContent(
                 item(key = "albumError") { ErrorState(state.errorMessage, onRetry = onRetry) }
             }
             albums.orEmpty().isEmpty() -> {
-                item(key = "albumEmpty") { EmptyState("暂无专辑") }
+                item(key = "albumEmpty") {
+                    EmptyState(if (isOfflineFiltered) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
+                }
             }
             else -> {
                 val albumList = albums.orEmpty()
@@ -2273,10 +2345,13 @@ private fun DiscoverContent(
             state.recentlyPlayed.orEmpty().isNotEmpty() ||
             state.mostPlayed.orEmpty().isNotEmpty() ||
             state.recentlyAdded.orEmpty().isNotEmpty() ||
-            state.discoverAlbums.orEmpty().isNotEmpty()
+            discoverAlbums.orEmpty().isNotEmpty()
         if (state.tracks != null && !hasAnySection && !state.isLoading) {
             item(key = "discoverEmpty") {
-                EmptyState("曲库还是空的——去搜索页搜歌并下载，或在设置里刷新曲库")
+                EmptyState(
+                    if (isOfflineFiltered) "离线 · 手机里还没有下载的歌曲"
+                    else "曲库还是空的——去搜索页搜歌并下载，或在设置里刷新曲库"
+                )
             }
         }
     }
@@ -2543,6 +2618,8 @@ private fun AlbumGridCard(
 @Composable
 private fun AlbumsContent(
     state: JellyfinUiState,
+    albums: List<Album>?,
+    offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     onRetry: () -> Unit,
@@ -2562,8 +2639,8 @@ private fun AlbumsContent(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.fillMaxWidth().padding(top = GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
+        offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val albums = state.albums
             when {
                 albums == null && state.isLoading -> {
                     // 骨架屏：2列网格，每个卡片显示占位方块（圆角/间距与 AlbumGridCard 一致，切换不跳变）
@@ -2616,7 +2693,9 @@ private fun AlbumsContent(
                     }
                 }
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                albums.orEmpty().isEmpty() -> EmptyState("暂无专辑")
+                albums.orEmpty().isEmpty() -> EmptyState(
+                    if (offlineNotice != null) "离线 · 手机里还没有下载的专辑" else "暂无专辑"
+                )
                 else -> {
                     val albumList = albums.orEmpty()
                     LazyVerticalGrid(
@@ -2671,6 +2750,8 @@ private fun AlbumDetailSkeleton(modifier: Modifier = Modifier) {
 private fun AlbumDetailContent(
     state: JellyfinUiState,
     album: Album,
+    albumTracks: List<Track>?,
+    hideDownloadButton: Boolean,
     coverFor: (Track) -> JellyfinRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
@@ -2678,52 +2759,150 @@ private fun AlbumDetailContent(
     onRetry: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
+    streamUrl: (Track) -> String?,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
-    Column(
-        modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp).padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            AlbumCover(albumCoverFor(album), album.name, Modifier.size(120.dp))
-            Column {
-                Text(album.name, style = MaterialTheme.typography.titleLarge)
-                Text(
-                    album.trackCount?.let { "${album.artist} · $it 首" } ?: album.artist,
-                    style = MaterialTheme.typography.bodyMedium
+    // Apple Music 式专辑页：整页染上这张专辑的封面主色（顶部柔光向下淡出），
+    // 大封面 + 居中的专辑信息 + 播放/随机按钮，然后才是曲目列表；整页一起滚。
+    val darkTheme = isSystemInDarkTheme()
+    val albumTheme = rememberCoverGradient(albumCoverFor(album), darkTheme)
+    val trackList = albumTracks.orEmpty()
+    val playable = trackList.isNotEmpty()
+    Box(modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.72f)
+                .background(
+                    Brush.verticalGradient(
+                        // 主题色压得更实、铺得更满：上半屏基本就是这块专辑色，再向下淡出。
+                        0f to albumTheme.gradient.top,
+                        0.5f to albumTheme.gradient.top.copy(alpha = 0.8f),
+                        1f to Color.Transparent
+                    )
                 )
-            }
-        }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val albumTracks = state.albumTracks
-            when {
-                albumTracks == null && state.isLoading -> AlbumDetailSkeleton(Modifier.fillMaxSize())
-                albumTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                albumTracks.orEmpty().isEmpty() -> EmptyState("该专辑暂无歌曲")
-                else -> {
-                    val trackList = albumTracks.orEmpty()
-                    LazyColumn(
-                        Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 96.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
-                            TrackRow(
-                                track = track,
-                                cover = coverFor(track),
-                                onClick = { onPlayTrack(trackList, track.id) },
-                                onAddToQueue = { onAddToQueue(track) },
-                                showDivider = index != trackList.lastIndex,
-                                isCurrent = currentTrackId == track.id,
-                                isPlaying = isPlaying,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+        )
+        LazyColumn(
+            Modifier.fillMaxSize().statusBarsPadding(),
+            contentPadding = PaddingValues(
+                start = Dimens.SpaceMedium,
+                end = Dimens.SpaceMedium,
+                top = Dimens.SpaceMedium,
+                bottom = 96.dp
+            )
+        ) {
+            item(key = "header") {
+                Column(
+                    Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    AlbumCover(
+                        albumCoverFor(album),
+                        album.name,
+                        Modifier.fillMaxWidth(0.62f).aspectRatio(1f),
+                        cornerRadius = Dimens.CornerLarge
+                    )
+                    Spacer(Modifier.height(Dimens.SpaceLarge))
+                    Text(
+                        album.name,
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(Dimens.SpaceTiny))
+                    Text(
+                        album.artist,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(Dimens.SpaceTiny))
+                    Text(
+                        // 曲目数优先取已加载的列表（服务端的 trackCount 可能滞后），时长按已加载曲目求和。
+                        albumSummary(album, trackList),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(Dimens.SpaceMedium))
+                    Row(horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
+                        Button(
+                            onClick = { onPlayTrack(trackList, trackList.first().id) },
+                            enabled = playable
+                        ) {
+                            Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(Dimens.SpaceSmall))
+                            Text("播放")
+                        }
+                        FilledTonalButton(
+                            onClick = {
+                                val shuffled = trackList.shuffled()
+                                onPlayTrack(shuffled, shuffled.first().id)
+                            },
+                            enabled = playable
+                        ) {
+                            Icon(Icons.Filled.Shuffle, contentDescription = null, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(Dimens.SpaceSmall))
+                            Text("随机播放")
                         }
                     }
+                    // 下载（工单 05）：四态由 DownloadActionButton 自己算（字节真相 + 调度器状态）。
+                    // 离线时藏起来（ADR-0008）：这时列表里已经全是下载过的，再点也下不了。
+                    if (!hideDownloadButton) {
+                        Spacer(Modifier.height(Dimens.SpaceMidMedium))
+                        DownloadActionButton(
+                            kind = DownloadKind.ALBUM,
+                            id = album.id,
+                            name = album.name,
+                            tracks = trackList,
+                            serverUrl = state.serverUrl,
+                            streamUrl = streamUrl,
+                            currentTrackId = currentTrackId
+                        )
+                    }
+                    Spacer(Modifier.height(Dimens.SpaceLarge))
+                }
+            }
+            when {
+                albumTracks == null && state.isLoading -> item(key = "skeleton") {
+                    TrackListSkeleton(count = 6, modifier = Modifier.fillMaxWidth())
+                }
+                albumTracks == null && state.errorMessage != null -> item(key = "error") {
+                    ErrorState(state.errorMessage, onRetry = onRetry, modifier = Modifier.fillMaxWidth())
+                }
+                trackList.isEmpty() -> item(key = "empty") {
+                    EmptyState("该专辑暂无歌曲", Modifier.fillMaxWidth())
+                }
+                else -> itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
+                    TrackRow(
+                        track = track,
+                        cover = coverFor(track),
+                        onClick = { onPlayTrack(trackList, track.id) },
+                        onAddToQueue = { onAddToQueue(track) },
+                        showDivider = index != trackList.lastIndex,
+                        isCurrent = currentTrackId == track.id,
+                        isPlaying = isPlaying,
+                        leadingNumber = index + 1,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }
+    }
+}
+
+/** 专辑副标题：「N 首 · M 分钟」。列表未加载时退回服务端给的曲目数，时长未知就只显示曲目数。 */
+private fun albumSummary(album: Album, tracks: List<Track>): String {
+    val count = tracks.size.takeIf { it > 0 } ?: album.trackCount
+    val minutes = tracks.sumOf { it.durationMs ?: 0L } / 60_000
+    return when {
+        count == null -> "专辑"
+        minutes > 0 -> "$count 首 · $minutes 分钟"
+        else -> "$count 首"
     }
 }
 
@@ -2791,6 +2970,8 @@ private fun PlaylistsContent(
 @Composable
 private fun SearchContent(
     state: JellyfinUiState,
+    results: SearchResults?,
+    isOfflineFiltered: Boolean,
     qqState: QQDownloadUiState,
     onSearchQueryChange: (String) -> Unit,
     trackCoverFor: (Track) -> JellyfinRequest?,
@@ -2849,16 +3030,17 @@ private fun SearchContent(
             },
             singleLine = true
         )
-        // 离线搜索标识：这轮曲库结果来自手机上的快照。QQ 是另一个服务，不受影响。
+        // 离线搜索标识：这轮曲库结果来自手机上的快照，且只含已下载（ADR-0008）。
+        // QQ 是另一个服务，不受影响。
         if (state.isOfflineSearch) {
             Text(
-                "曲库离线 · 只搜手机上的快照；QQ 音乐不受影响",
+                if (isOfflineFiltered) "曲库离线 · 只搜已下载；QQ 音乐不受影响"
+                else "曲库离线 · 只搜手机上的快照；QQ 音乐不受影响",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val results = state.searchResults
             // 「搜过了确实没有」= 结果非 null 且三类全空。null 是「还没拉到 / 拉失败」，
             // 不能当成曲库没有——那会谎报「曲库中没找到」。
             val librarySearchedEmpty = results != null &&
@@ -2899,7 +3081,10 @@ private fun SearchContent(
                     TextButton(onClick = onRetryQqSearch) { Text("重试") }
                 }
                 bothEmpty && state.isOfflineSearch ->
-                    EmptyState("快照里没找到「${state.searchQuery}」\n联网后能搜全曲库")
+                    EmptyState(
+                        if (isOfflineFiltered) "已下载的歌曲里没找到「${state.searchQuery}」\n联网后能搜全曲库"
+                        else "快照里没找到「${state.searchQuery}」\n联网后能搜全曲库"
+                    )
                 bothEmpty && !qqState.isSearching -> EmptyState("未找到相关内容")
                 else -> {
                     LazyColumn(
@@ -3041,6 +3226,8 @@ private fun SearchResultRow(
 private fun PlaylistDetailContent(
     state: JellyfinUiState,
     playlist: Playlist,
+    playlistTracks: List<Track>?,
+    hideDownloadButton: Boolean,
     coverFor: (Track) -> JellyfinRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
@@ -3048,6 +3235,7 @@ private fun PlaylistDetailContent(
     onRetry: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
+    streamUrl: (Track) -> String?,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -3063,14 +3251,29 @@ private fun PlaylistDetailContent(
                     playlist.trackCount?.let { "$it 首" } ?: "播放列表",
                     style = MaterialTheme.typography.bodyMedium
                 )
+                // 下载（工单 05）：曲目还没加载时按钮禁用（target 为 null）。
+                // 离线时藏起来（ADR-0008）：下不了，且列表里已经全是下载过的。
+                if (!hideDownloadButton) {
+                    Spacer(Modifier.height(Dimens.SpaceSmall))
+                    DownloadActionButton(
+                        kind = DownloadKind.PLAYLIST,
+                        id = playlist.id,
+                        name = playlist.name,
+                        tracks = playlistTracks.orEmpty(),
+                        serverUrl = state.serverUrl,
+                        streamUrl = streamUrl,
+                        currentTrackId = currentTrackId
+                    )
+                }
             }
         }
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val playlistTracks = state.playlistTracks
             when {
                 playlistTracks == null && state.isLoading -> AlbumDetailSkeleton(Modifier.fillMaxSize())
                 playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                playlistTracks.orEmpty().isEmpty() -> EmptyState("该播放列表暂无歌曲")
+                playlistTracks.orEmpty().isEmpty() -> EmptyState(
+                    if (hideDownloadButton) "离线 · 这个播放列表还没有下载的歌曲" else "该播放列表暂无歌曲"
+                )
                 else -> {
                     val trackList = playlistTracks.orEmpty()
                     LazyColumn(
@@ -3281,12 +3484,13 @@ private fun SettingsContent(
                 )
             }
         }
-        // 下载服务（ADR-0006）：QQ 下载退出顶层导航后从这里进，二级页与「已缓存」同一套模式。
-        SettingsSectionHeader("下载")
+        // QQ 音乐导入（ADR-0006 / ADR-0007）：QQ 下载退出顶层导航后从这里进，二级页与「已下载」同一套模式。
+        // 不叫「下载」——那个词已经归手机上的下载功能了（ADR-0007）。
+        SettingsSectionHeader("QQ 音乐导入")
         SurfaceCard(onClick = onOpenDownloadService) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("下载服务", style = MaterialTheme.typography.titleMedium)
+                    Text("QQ 音乐导入", style = MaterialTheme.typography.titleMedium)
                     Text(
                         "服务状态、音质、密钥与下载任务",
                         style = MaterialTheme.typography.labelSmall,
@@ -3303,9 +3507,9 @@ private fun SettingsContent(
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
         SettingsSectionHeader("存储")
         SurfaceCard { RecycleBinSection(state = state, viewModel = viewModel) }
-        // 手机缓存：听过的歌在手机上留的副本，离线能听。占了空间就得看得见（ADR-0003）。
+        // 下载（ADR-0007）：占用 + 首数 + 「已下载」入口。没有清空按钮——没有一键清空。
         SurfaceCard {
-            MediaCacheSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
+            DownloadsSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
         }
     }
 }
@@ -3409,7 +3613,7 @@ private fun SettingsSectionHeader(title: String) {
 /** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。 */
 @Composable
 private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewModel) {
-    // 每次进设置页重拉一次：删除/恢复随时会改变回收站内容，不缓存。
+    // 每次进设置页重拉一次：删除/恢复随时会改变回收站内容，不留旧值。
     LaunchedEffect(Unit) { viewModel.loadRecycle() }
     var showPurgeConfirm by remember { mutableStateOf(false) }
     Column(
@@ -3500,14 +3704,14 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
     }
 }
 
-/** 已缓存列表页（CONTEXT.md「已缓存列表」）：按专辑分组的完整副本。点专辑进详情页，
- * 每张专辑可单独删副本——删的是手机副本，歌还在电脑上（确认框说清，同 ADR-0003）。 */
+/** 已下载列表页（CONTEXT.md「已下载列表」）：按专辑分组的完整副本。
+ * 每张专辑可展开逐首删，也能整张删——删的是手机副本，歌还在电脑上（确认框说清，同 ADR-0003）。
+ * 整张删按下载名单删（用户故事 10）：服务器后来新增的歌不在名单里，不会跟着没。 */
 @Composable
 private fun CachedCopiesContent(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
     albumCoverFor: (Album) -> JellyfinRequest?,
-    onOpenAlbum: (Album) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -3517,7 +3721,7 @@ private fun CachedCopiesContent(
             .padding(top = Dimens.SpaceSmall)
     ) {
         Text(
-            "已缓存",
+            "已下载",
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.SpaceMidMedium)
         )
@@ -3530,37 +3734,38 @@ private fun CachedCopiesContent(
             cachedAlbums.isEmpty() -> Box(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentAlignment = Alignment.Center
-            ) { EmptyState("还没有缓存的音乐\n先在线听几首，副本会自动留下") }
+            ) { EmptyState("还没有下载的音乐\n点专辑或播放列表上的「下载」，就能离线听") }
             else -> {
                 var deleteTarget by remember { mutableStateOf<CachedAlbum?>(null) }
+                val playingTrackId = viewModel.currentTrack.collectAsStateWithLifecycle().value?.id
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
                     contentPadding = PaddingValues(bottom = 96.dp)
                 ) {
                     items(cachedAlbums, key = { it.album.id }) { entry ->
-                        CachedAlbumRow(
+                        DownloadedAlbumRow(
                             entry = entry,
                             cover = albumCoverFor(entry.album),
-                            busy = state.isCacheBusy,
-                            onOpen = { onOpenAlbum(entry.album) },
-                            onDelete = { deleteTarget = entry }
+                            trackCoverFor = viewModel::trackCover,
+                            playingTrackId = playingTrackId,
+                            onDeleteTrack = viewModel::deleteDownloadedTrack,
+                            onDeleteAlbum = { deleteTarget = entry }
                         )
                     }
                 }
                 deleteTarget?.let { target ->
                     AlertDialog(
                         onDismissRequest = { deleteTarget = null },
-                        title = { Text("删掉这张专辑的副本？") },
+                        title = { Text("删掉这张专辑的下载？") },
                         text = {
                             Text(
-                                "将删掉《${target.album.name}》在手机上的 ${target.cachedCount} 首副本。\n" +
-                                    "歌还在电脑上一首没动，下次联网听过会自动再攒；正在播的那首会保留。"
+                                "将删掉《${target.album.name}》在手机上下载的 ${target.tracks.size} 首。\n" +
+                                    "歌还在电脑上一首没动；服务器后来新增的歌不会跟着删，正在播的那首会跳过。"
                             )
                         },
                         confirmButton = {
                             TextButton(
-                                enabled = !state.isCacheBusy,
                                 onClick = {
                                     val album = target.album
                                     deleteTarget = null
@@ -3578,18 +3783,24 @@ private fun CachedCopiesContent(
     }
 }
 
-/** 已缓存列表的一行：封面 + 专辑名 + 进度，右侧删除按钮。整行点击进专辑详情页。
- * 与设置页 / QQ 下载页同用 [SurfaceCard]（列表里的卡片语言）。 */
+/** 已下载列表的一行：封面 + 专辑名 + 进度，右侧展开/整张删。点行体展开逐首列表。
+ * 与设置页 / QQ 音乐导入页同用 [SurfaceCard]（列表里的卡片语言）。 */
 @Composable
-private fun CachedAlbumRow(
+private fun DownloadedAlbumRow(
     entry: CachedAlbum,
     cover: JellyfinRequest?,
-    busy: Boolean,
-    onOpen: () -> Unit,
-    onDelete: () -> Unit
+    trackCoverFor: (Track) -> JellyfinRequest?,
+    playingTrackId: String?,
+    onDeleteTrack: (Track) -> Unit,
+    onDeleteAlbum: () -> Unit
 ) {
-    SurfaceCard(onClick = onOpen) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    var expanded by rememberSaveable(entry.album.id) { mutableStateOf(false) }
+    SurfaceCard {
+        Row(
+            Modifier.fillMaxWidth()
+                .clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             AlbumCover(cover, entry.album.name, Modifier.size(Dimens.TouchTargetLarge))
             Spacer(Modifier.width(Dimens.SpaceMidMedium))
             Column(Modifier.weight(1f)) {
@@ -3600,37 +3811,81 @@ private fun CachedAlbumRow(
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    "${entry.album.artist} · 已缓存 ${entry.cachedCount}/${entry.totalCount} 首",
+                    "${entry.album.artist} · 已下载 ${entry.tracks.size}/${entry.totalCount} 首",
                     style = MaterialTheme.typography.bodyMedium
                 )
             }
-            IconButton(onClick = onDelete, enabled = !busy) {
-                Icon(Icons.Filled.Delete, contentDescription = "删除这张专辑的副本")
+            IconButton(onClick = onDeleteAlbum) {
+                Icon(Icons.Filled.Delete, contentDescription = "删除这张专辑的下载")
+            }
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "收起" else "展开曲目"
+            )
+        }
+        if (expanded) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+            entry.tracks.forEach { track ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    AlbumCover(trackCoverFor(track), track.title, Modifier.size(Dimens.TouchTargetSmall))
+                    Spacer(Modifier.width(Dimens.SpaceMidMedium))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            track.title,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (track.id == playingTrackId) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                Color.Unspecified
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            if (track.id == playingTrackId) "正在播放 · 不能删" else track.artist,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    // 正在播的那首删不了：从播放流底下抽走会让声音当场断掉。
+                    IconButton(
+                        onClick = { onDeleteTrack(track) },
+                        enabled = track.id != playingTrackId
+                    ) {
+                        Icon(Icons.Filled.Delete, contentDescription = "删除这首的下载")
+                    }
+                }
             }
         }
     }
 }
 
-/** 设置页的手机缓存区块（工单 05）：占用 + 首数 + 一键清空。
- * 清空的只是手机上的副本，歌还在电脑上——确认框里必须说清这一点（ADR-0003）。 */
+/** 设置页的「下载」区块（工单 06）：占用 + 首数 + 「已下载」入口。
+ * **没有清空按钮**——没有「一键清空全部」是有意的摩擦（ADR-0007 / spec 铁律 2）。 */
 @Composable
-private fun MediaCacheSection(
+private fun DownloadsSection(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
     onOpenCachedCopies: () -> Unit
 ) {
-    // 每次进设置页重拉：播放随时在攒副本，数字不能停在旧值。
+    // 每次进设置页重拉：下载随时在跑，数字不能停在旧值。
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
-    var showClearConfirm by remember { mutableStateOf(false) }
+    val application = LocalContext.current.applicationContext as PulsarApplication
+    val scheduler = remember(application) { application.downloadScheduler }
+    val downloadStates by scheduler.state.collectAsStateWithLifecycle()
+    // 失败提示（用户故事 20）：调度器只管本次运行，失败数如实汇总在这里。
+    val failedTracks = downloadStates.values.sumOf { (it as? DownloadState.PartiallyFailed)?.failed ?: 0 }
     Column(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("手机缓存", style = MaterialTheme.typography.titleMedium)
+                Text("下载", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (state.cacheTrackCount == 0) "听过的歌自动存在手机上，没网也能听"
+                    if (state.cacheTrackCount == 0) "点专辑或播放列表上的「下载」，就能离线听"
                     else "${state.cacheTrackCount} 首 · ${formatBytes(state.cacheBytes)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -3639,55 +3894,20 @@ private fun MediaCacheSection(
             TextButton(
                 onClick = onOpenCachedCopies,
                 enabled = state.cacheTrackCount > 0
-            ) { Text("已缓存") }
-            TextButton(
-                onClick = { showClearConfirm = true },
-                enabled = state.cacheTrackCount > 0 && !state.isCacheBusy
-            ) { Text("清空") }
+            ) { Text("已下载") }
         }
-        if (state.isCacheBusy) {
+        if (failedTracks > 0) {
             Text(
-                "正在清空…",
+                "有 $failedTracks 首下载失败 · 去专辑页点「重试」",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.error
             )
         }
-        state.cacheMessage?.let { message ->
-            Text(
-                message,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-    if (showClearConfirm) {
-        AlertDialog(
-            onDismissRequest = { if (!state.isCacheBusy) showClearConfirm = false },
-            title = { Text("清空手机缓存？") },
-            text = {
-                Text(
-                    "将删掉手机上的 ${state.cacheTrackCount} 首缓存副本（${formatBytes(state.cacheBytes)}）。\n" +
-                        "歌还在电脑上一首没动，清掉的只是手机里的副本；下次联网听过会自动再攒。"
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !state.isCacheBusy,
-                    onClick = {
-                        showClearConfirm = false
-                        viewModel.clearCache()
-                    }
-                ) { Text("清空") }
-            },
-            dismissButton = {
-                TextButton(enabled = !state.isCacheBusy, onClick = { showClearConfirm = false }) { Text("取消") }
-            }
-        )
     }
 }
 
-/** 文件大小的短表示：回收站列表用。 */
-private fun formatBytes(bytes: Long): String = when {
+/** 文件大小的短表示：回收站 / 下载提示共用。 */
+internal fun formatBytes(bytes: Long): String = when {
     bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1_000_000_000.0)
     bytes >= 1_000_000 -> "%.0f MB".format(bytes / 1_000_000.0)
     bytes >= 1_000 -> "%.0f KB".format(bytes / 1_000.0)

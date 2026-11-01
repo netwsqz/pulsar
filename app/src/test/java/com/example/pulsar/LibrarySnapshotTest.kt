@@ -109,4 +109,47 @@ class LibrarySnapshotTest {
     fun `离线搜索不搜播放列表（快照里没有）`() {
         assertTrue(snapshot.search("任意").playlists.isEmpty())
     }
+
+    // ── 已下载列表清单（工单 08）──────────────────────────────────
+
+    private val playlistTrack = Track("p1", "通勤之歌", "歌手", "专辑", 1L, null)
+
+    @Test
+    fun `已下载列表清单往返：encode 后 decode 内容一致`() {
+        val withPlaylists = LibrarySnapshot(
+            downloadedPlaylists = listOf(
+                DownloadedPlaylist(
+                    id = "pl-1",
+                    name = "通勤",
+                    serverUrl = "https://server.test",
+                    userId = "user-1",
+                    trackCount = 1,
+                    tracks = listOf(playlistTrack)
+                )
+            )
+        )
+        val decoded = LibrarySnapshotCodec.decode(LibrarySnapshotCodec.encode(withPlaylists))
+        assertEquals(withPlaylists, decoded)
+        assertEquals(listOf(playlistTrack), decoded?.downloadedPlaylists?.single()?.tracks)
+    }
+
+    @Test
+    fun `旧快照文件（没有已下载列表清单）解码不失败，读出空清单`() {
+        // 老版本写下的 JSON：只有三节，没有 downloadedPlaylists
+        val legacy = """{"tracks":[],"albums":[],"discoverAlbums":[]}"""
+        val decoded = LibrarySnapshotCodec.decode(legacy)
+        assertEquals(LibrarySnapshot(), decoded)
+        assertTrue(decoded!!.downloadedPlaylists.isEmpty())
+    }
+
+    @Test
+    fun `已下载列表清单按账号过滤`() {
+        val mine = DownloadedPlaylist("pl-1", "我的", "https://server.test", "user-1")
+        val others = DownloadedPlaylist("pl-2", "别人的", "https://server.test", "user-2")
+        val otherServer = DownloadedPlaylist("pl-3", "别的服务器", "https://other.test", "user-1")
+        val snap = LibrarySnapshot(downloadedPlaylists = listOf(mine, others, otherServer))
+
+        assertEquals(listOf(mine), snap.downloadedPlaylistsFor("https://server.test", "user-1"))
+        assertTrue(snap.downloadedPlaylistsFor("https://server.test", "nobody").isEmpty())
+    }
 }

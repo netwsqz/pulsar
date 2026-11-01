@@ -1,6 +1,12 @@
 # 规格：手机本地缓存（离线能听）
 
-**Status:** ready-for-agent
+**Status:** 部分作废（2026-10-25）
+
+> **已被 [`.scratch/download-instead-of-cache/spec.md`](../download-instead-of-cache/spec.md) 部分取代（[ADR-0007](../../docs/adr/0007-downloads-replace-auto-cache.md)）。**
+>
+> 作废的部分：自动缓存、5 GB LRU 淘汰、手动下载「明确不做」、缓存预热「明确不做」。
+> 仍然有效的部分：曲库快照（工单 02）、离线标灰判定、完整副本判据、`guardedIo` 兜底套路、
+> 工单 03/04 的离线搜索成果。读本文时请对照新的 spec。
 
 ## 问题陈述
 

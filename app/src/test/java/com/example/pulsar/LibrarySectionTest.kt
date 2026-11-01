@@ -21,7 +21,7 @@ class LibrarySectionTest {
             ),
             TopLevelSections.map { it.first }
         )
-        // QQ 下载退出顶层导航（ADR-0006）：它是「往曲库里加东西」的工具，不是曲库的一个维度。
+        // QQ 音乐导入退出顶层导航（ADR-0006）：它是「往曲库里加东西」的工具，不是曲库的一个维度。
         assertTrue(TopLevelSections.none { it.first == LibrarySection.DownloadService })
     }
 
@@ -37,7 +37,7 @@ class LibrarySectionTest {
     }
 
     @Test
-    fun `download service is a detail page reached from settings`() {
+    fun `qq music import is a detail page reached from settings`() {
         assertTrue(LibrarySection.DownloadService.isDetail())
         assertNull(LibrarySection.DownloadService.navLabel())
     }

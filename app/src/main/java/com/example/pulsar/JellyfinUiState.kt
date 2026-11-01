@@ -80,20 +80,18 @@ data class JellyfinUiState(
      */
     val isOffline: Boolean = false,
     /**
-     * 有**完整副本**的曲目 id。null = 还不知道（在线时不需要知道，别标灰）。
+     * 离线时**能显示也能播**的曲目 id（已下载，ADR-0008）。
+     * null = 还不知道（在线时不需要知道，界面不筛）。
      *
-     * 只有完整副本才算能放：听到一半切走的半截副本离线时按「没缓存」处理。
+     * 口径是**交集**：字节完整（`MediaDownloads.completeKeys`）**且**在当前账号的下载
+     * 名单里（换账号看不见别人的下载）。半截的不算，听到一半切走的不算。
      */
     val cachedTrackIds: Set<String>? = null,
     /** 当前搜索结果来自本地快照而不是 Jellyfin——界面要标明「离线搜索」，范围变小了。 */
     val isOfflineSearch: Boolean = false,
-    /** 已缓存列表（设置页进）：按专辑分组的完整副本进度。null = 还没进过这页。 */
+    /** 已下载列表（设置页进）：按专辑分组的完整副本进度。null = 还没进过这页。 */
     val cachedAlbums: List<CachedAlbum>? = null,
-    /** 缓存占用字节数 / 完整副本首数（设置页缓存区块）。 */
+    /** 下载占用字节数 / 完整副本首数（设置页「下载」区块）。 */
     val cacheBytes: Long = 0,
-    val cacheTrackCount: Int = 0,
-    /** 清空缓存提交中：按钮据此防连点。 */
-    val isCacheBusy: Boolean = false,
-    /** 缓存区块的反馈（清空完成）。null = 没有提示。 */
-    val cacheMessage: String? = null
+    val cacheTrackCount: Int = 0
 )

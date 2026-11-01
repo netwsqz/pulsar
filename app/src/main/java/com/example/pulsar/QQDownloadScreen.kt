@@ -67,10 +67,13 @@ import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.theme.Dimens
 
 /**
- * 「设置 → 下载」二级页（ADR-0006）：下载服务的全部家当。
+ * 「设置 → QQ 音乐导入」二级页（ADR-0006 / ADR-0007）：导入服务的全部家当。
  *
  * 服务状态、凭证过期横幅与重试、默认音质、文件操作密钥、曲库索引信息、下载任务列表。
  * 搜索已经搬进合并搜索页（[qqSearchSection]），这里不再有搜索框。
+ *
+ * **页面上叫「QQ 音乐导入」不叫「下载」**：那个词已经归手机上的下载功能了（ADR-0007）。
+ * 这一页做的是「把 QQ 音乐的歌弄进电脑曲库」，跟存到手机是两件事。
  */
 @Composable
 internal fun DownloadServiceScreen(
@@ -94,7 +97,7 @@ internal fun DownloadServiceScreen(
     ) {
         item(key = "title") {
             Text(
-                "下载服务",
+                "QQ 音乐导入",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.padding(bottom = Dimens.SpaceSmall)
             )
@@ -379,7 +382,7 @@ private fun FileOpsKeyCard(
 @Composable
 private fun ServiceStatusCard(state: QQDownloadUiState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
-        Text("QQ 下载服务", style = MaterialTheme.typography.titleMedium)
+        Text("QQ 音乐导入服务", style = MaterialTheme.typography.titleMedium)
         if (state.serviceUrl.isBlank()) {
             Text(
                 "等待服务器地址：登录 Jellyfin 后会自动连接同机的下载服务。",

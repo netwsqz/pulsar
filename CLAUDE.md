@@ -97,20 +97,24 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 **USB 驱动约定**：libusb 等时泵跑在专用线程，不在 Main/IO dispatcher 上。格式协商失败时回退系统输出，不抛异常。暂停用静音门而非 stopStream，避免 EBUSY。
 
-### 离线与本地缓存
+### 离线与本地下载
 
 两个**不同**的东西，别混（术语定义见 `CONTEXT.md`）：
 
-- **曲库快照 `LibrarySnapshot.kt`**：手机上的「曲库里有哪些歌」清单（JSON，`filesDir/library-snapshot.json`）。**只在线下兜底，不在线上抢活**——能连上 Jellyfin 时一律以服务器为准，请求失败才顶上。覆盖发现 / 全部音乐 / 专辑 + 离线搜索；**播放列表不在快照里**。
-- **音频缓存 `MediaCache.kt`**：播放时自动留下的原文件副本（`SimpleCache`，目录 `filesDir/media_cache`，**不是 `cacheDir`**——后者会被系统清掉）。上限 5 GB，超了自动淘汰最久没听的。**只有完整副本才算数**（`isCompleteCopy`：听到一半切走的按「没缓存」处理）。
+- **曲库快照 `LibrarySnapshot.kt`**：手机上的「曲库里有哪些歌」清单（JSON，`filesDir/library-snapshot.json`）。**只在线下兜底，不在线上抢活**——能连上 Jellyfin 时一律以服务器为准，请求失败才顶上。覆盖发现 / 全部音乐 / 专辑 + 离线搜索；**播放列表不在快照里**，除非那个列表被下载过（已下载列表另存一份本地清单）。
+- **下载 `MediaDownloads.kt`**（原 `MediaCache.kt`）：**用户主动**存到手机上的原文件副本（`SimpleCache`，目录 `filesDir/media_cache`，**不是 `cacheDir`**——后者会被系统清掉）。**播放链路纯只读，绝不写盘**（`CacheDataSource.Factory.setCacheWriteDataSinkFactory(null)`）；写盘只有一条路：`CacheWriter` + `createDataSourceForDownloading()`。**没有自动淘汰**（`NoOpCacheEvictor`），没有总量上限，没有一键清空。**只有完整副本才算数**（`isCompleteCopy`）。
 
-关键约定：
+关键约定（ADR-0007 / ADR-0008）：
 
-- `JellyfinUiState.isOffline` 是全局离线态；`goOffline()` 由**任意**网络请求的 `Network` 错误触发（探活/标灰全 App 共用），不是某一节自己的事。
-- 离线时没完整副本的曲目**标灰不可播**（`cachedTrackIds` 为 `null` = 还不知道，别标灰）。离线搜索会置 `isOfflineSearch`，界面必须标明「离线搜索」。
+- `JellyfinUiState.isOffline` 是全局离线态；`goOffline()` 由**任意**网络请求的 `Network` 错误触发（探活/离线可见性全 App 共用），不是某一节自己的事。
+- **离线时曲库各屏只显示已下载的东西**（ADR-0008），不再「全量 + 标灰」——置灰那套 UI 已整体删除。过滤是**界面层派生**（`offlineVisibleLibrary()`，纯函数）：原始 `tracks/albums/...` 保持全量，回在线自动恢复，别去改 state（探活回在线时「歌曲」页不会重拉，改 state 会让列表永久缩水）。
+- 专辑**有一首已下载就显示**；详情页只列已下载曲目并隐藏下载按钮；离线搜索只搜已下载（`isOfflineSearch` 时必须标明）。`cachedTrackIds` 为 `null` = 还不知道（在线），界面不筛。
+- 离线时**播放队列不动**；`isPlayable` / `unplayableReason` 只服务队列里遗留的未下载歌与新点播守门。
 - `PulsarApplication.mediaCacheStore` 是**进程级单例**：`SimpleCache` 对同一目录只允许一个实例，且界面（查副本/报占用）与播放服务共用它。**服务销毁时不能释放它**。
-- 主动退出登录清空缓存；只是 token 过期（会话失效）不清。
-- **Media3 `SimpleCache` 三个坑**：①残条目调 `isCached(-1)` 会抛 `IllegalArgumentException`；②构造失败不会立刻崩溃而是延迟；③清空时必须跳过正在播放的 key。
+- **退出登录不清下载**；token 过期（会话失效）也不清。只有曲库快照会清。
+- **下载按「名单」记账**（`DownloadLedger`，DataStore）：删除只删当初下载的那批，服务器后来新增的歌不受影响。**名单 ≠ 状态**——算不算「已下载」永远看字节（`ContentMetadata` 总长 + `isCached`）。
+- 下载归属按「服务器地址 + 用户 ID」隔离，但**音频字节共享**（缓存键是播放 URL，不带用户 ID）：两个账号下过同一首，谁删都算删。
+- **Media3 `SimpleCache` 三个坑**：①残条目调 `isCached(-1)` 会抛 `IllegalArgumentException`；②构造失败不会立刻崩溃而是延迟；③删资源时要跳过正在播放的 key。
 
 ### UI 层
 
@@ -189,5 +193,9 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 
 - `0001` 文件管理走 PC 伴生服务，不走 Jellyfin API（改文件内嵌标签才是真改）
 - `0002` 删除 = 移到回收站，可恢复
-- `0003` 缓存是副本，可以自动淘汰，不受「不删用户数据」约束
+- `0003` 缓存是副本，可以自动淘汰，不受「不删用户数据」约束（**部分被 0007 取代**）
 - `0004` UI 参考 Auxio，但**只取设计规格、不取代码**（Auxio 是 GPL-3.0 + View/XML，Pulsar 是 Compose）
+- `0005` 主题色板由封面鲜艳色推导，预设色只做兜底
+- `0006` 搜索合并（曲库 + QQ 音乐），QQ 下载降为设置二级页
+- `0007` **下载取代自动缓存**：用户手动下载、永不自动删、播放链路纯只读（取代 0003 的自动淘汰部分）
+- `0008` **离线只显示已下载**：取消「全量 + 标灰」，过滤在界面层派生（部分取代 0007 的离线可见性口径）

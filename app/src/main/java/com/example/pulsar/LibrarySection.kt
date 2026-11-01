@@ -11,7 +11,7 @@ internal sealed interface LibrarySection {
     data object Genres : LibrarySection
     data object Playlists : LibrarySection
     data object Search : LibrarySection
-    /** 下载服务页（ADR-0006）：从「设置 → 下载」进入，不再占顶层 chip。 */
+    /** QQ 音乐导入页（ADR-0006 / ADR-0007）：从「设置 → QQ 音乐导入」进入，不再占顶层 chip。 */
     data object DownloadService : LibrarySection
     data object Settings : LibrarySection
     data object CachedCopies : LibrarySection
@@ -30,8 +30,8 @@ internal sealed interface LibrarySection {
  * 顶层导航顺序与文案（工单 04）：对齐 Auxio 的 tab 语义——发现 + Songs / Albums / Artists /
  * Genres / Playlists。
  *
- * 只放「曲库的浏览维度」。QQ 下载是「往曲库里加东西」的工具，已降级为设置里的二级页
- * （ADR-0006），不在此列。详情页 / 搜索 / 设置 / 已缓存同样从别处进入，不是顶层页签。
+ * 只放「曲库的浏览维度」。QQ 音乐导入是「往曲库里加东西」的工具，已降级为设置里的二级页
+ * （ADR-0006），不在此列。详情页 / 搜索 / 设置 / 已下载同样从别处进入，不是顶层页签。
  * 文案跟着 [LibrarySection] 放这里，避免 chip 和占位页各写一份标题。
  */
 internal val TopLevelSections: List<Pair<LibrarySection, String>> = listOf(

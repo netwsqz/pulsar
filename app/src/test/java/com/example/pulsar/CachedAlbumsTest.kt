@@ -5,7 +5,7 @@ import com.example.pulsar.domain.model.Track
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** 已缓存列表的分组规则：把「有完整副本的歌」按专辑归组（CONTEXT.md「已缓存列表」）。 */
+/** 已下载列表的分组规则：把「有完整副本的歌」按专辑归组（CONTEXT.md「已下载列表」）。 */
 class CachedAlbumsTest {
     private val trackA1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
     private val trackA2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
@@ -14,7 +14,7 @@ class CachedAlbumsTest {
     private val albumB = Album("a2", "Album B", "Artist Y", trackCount = null, imageTag = null)
 
     @Test
-    fun `按专辑分组并统计缓存进度，按歌手加专辑名排序`() {
+    fun `按专辑分组并统计下载进度，按歌手加专辑名排序`() {
         val result = groupCachedByAlbum(
             tracks = listOf(trackA1, trackA2, trackB1),
             albums = listOf(albumB, albumA),
@@ -22,11 +22,22 @@ class CachedAlbumsTest {
         )
         assertEquals(
             listOf(
-                CachedAlbum(albumA, cachedCount = 1, totalCount = 2),
-                CachedAlbum(albumB, cachedCount = 1, totalCount = 1)
+                CachedAlbum(albumA, tracks = listOf(trackA1), totalCount = 2),
+                CachedAlbum(albumB, tracks = listOf(trackB1), totalCount = 1)
             ),
             result
         )
+    }
+
+    @Test
+    fun `展开用的曲目列表只含已下载的那些，没下载的不进来`() {
+        val result = groupCachedByAlbum(
+            tracks = listOf(trackA1, trackA2),
+            albums = listOf(albumA),
+            cachedTrackIds = setOf("t2")
+        )
+        // 展开后逐首删只能看见真的在盘上的那首；总数仍是 2（界面显示 1/2）
+        assertEquals(listOf(CachedAlbum(albumA, tracks = listOf(trackA2), totalCount = 2)), result)
     }
 
     @Test
@@ -36,17 +47,21 @@ class CachedAlbumsTest {
             albums = listOf(albumA, albumB),
             cachedTrackIds = setOf("t3")
         )
-        assertEquals(listOf(CachedAlbum(albumB, cachedCount = 1, totalCount = 1)), result)
+        assertEquals(listOf(CachedAlbum(albumB, tracks = listOf(trackB1), totalCount = 1)), result)
     }
 
     @Test
-    fun `曲库专辑列表里配不上的专辑名不显示（点不了详情页）`() {
+    fun `曲库专辑列表里配不上的专辑从曲目反推，不再整行丢掉`() {
+        // 回归：快照里常常只有曲目表、没有专辑列表，配不上就丢会让「下载完的专辑」整页空白。
         val result = groupCachedByAlbum(
             tracks = listOf(trackA1, trackB1),
             albums = listOf(albumB),
             cachedTrackIds = setOf("t1", "t3")
         )
-        assertEquals(listOf(CachedAlbum(albumB, cachedCount = 1, totalCount = 1)), result)
+        assertEquals(listOf("Album A", "Album B"), result.map { it.album.name })
+        // 配得上的仍用真对象（有 id、能显示封面），反推的 id 退回专辑名。
+        assertEquals(listOf("Album A", albumB.id), result.map { it.album.id })
+        assertEquals(listOf(1, 1), result.map { it.tracks.size })
     }
 
     @Test

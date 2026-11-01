@@ -1,5 +1,6 @@
 package com.example.pulsar
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
@@ -29,6 +30,8 @@ import java.io.IOException
 
 private const val SEARCH_DEBOUNCE_MS = 300L
 
+private const val TAG = "JellyfinViewModel"
+
 /** 离线探活间隔：网一回来 App 自己回在线，用户不用做任何操作（用户故事 13）。 */
 internal const val OFFLINE_RETRY_INTERVAL_MS = 15_000L
 
@@ -42,12 +45,14 @@ class JellyfinViewModel(
     private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     /** 曲库文件操作的 API 工厂（删除/改名走 PC 伴生服务，与 Jellyfin 会话无关）。测试注入 Fake。 */
     private val libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
-    /** 手机本地音频副本（离线能听）。null = 没有缓存能力，一切照常走网络。 */
-    private val mediaCache: MediaCache? = null,
+    /** 手机本地音频下载（离线能听）。null = 没有下载能力，一切照常走网络。 */
+    private val mediaDownloads: MediaDownloads? = null,
     /** 曲库快照：断网时撑起界面。null = 没有离线兜底。 */
     private val snapshotRepository: LibrarySnapshotRepository? = null,
     /** 服务器地址历史：登录页下拉选 + 登录成功后记录。null = 无历史。 */
-    private val serverUrlHistory: ServerUrlHistory? = null
+    private val serverUrlHistory: ServerUrlHistory? = null,
+    /** 下载名单：存量副本迁移（工单 07）写这里。null = 不迁移。 */
+    private val downloadLedgerStore: DownloadLedgerStore? = null
 ) : ViewModel() {
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
@@ -74,6 +79,9 @@ class JellyfinViewModel(
     /** 曲库快照的内存副本：离线兜底与覆写共用，避免每次都读盘。 */
     private var snapshot: LibrarySnapshot? = null
 
+    /** 整张专辑的下载正在删：防连点。只在发起线程读写（见 [deleteAlbumCopies]）。 */
+    private var isDeletingDownloads = false
+
     private val _playbackTracks = MutableStateFlow<Map<String, Track>>(emptyMap())
     val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
 
@@ -95,7 +103,23 @@ class JellyfinViewModel(
         restoreSavedLogin()
         // 地址历史只服务登录页：现在就拉，登录表单随时可显示下拉。
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(serverUrlHistory = serverUrlHistory?.load().orEmpty())
+            // **先把值读出来再碰 _state**。写成 `_state.value = _state.value.copy(x = load())`
+            // 会踩跨挂起点的读-改-写：Kotlin 先求 receiver `_state.value`，那是进入挂起点
+            // **之前**的一份快照；等读盘回来 copy 时，会话恢复已经写好的 serverUrl 会被
+            // 这份旧快照盖回空串（真机实测：曲库正常但 serverUrl 为空，下载按钮一直禁用）。
+            val loaded = serverUrlHistory?.load().orEmpty()
+            _state.value = _state.value.copy(serverUrlHistory = loaded)
+        }
+        // 剔除历史遗留的「无归属」下载名单条目（serverUrl 为空，永远匹配不上任何账号，
+        // 界面上看不见却占着名单）。正常情况这里是一次纯读，只有真存在坏条目才写回。
+        viewModelScope.launch(dispatcher) {
+            try {
+                (downloadLedgerStore as? DataStoreDownloadLedgerStore)?.pruneUnattributed()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // 清理失败不影响任何事：坏条目本来就匹配不上，顶多下次启动再试
+            }
         }
     }
 
@@ -161,9 +185,11 @@ class JellyfinViewModel(
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
                     sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
                     serverUrlHistory?.record(current.serverUrl)
-                    _state.value = _state.value.copy(
-                        serverUrlHistory = serverUrlHistory?.load() ?: _state.value.serverUrlHistory
-                    )
+                    // 同 init 里那条：先取值再碰 _state，别让挂起点前的旧快照盖掉新状态。
+                    val history = serverUrlHistory?.load()
+                    if (history != null) {
+                        _state.value = _state.value.copy(serverUrlHistory = history)
+                    }
                     // 登录成功 = **整份替换**快照，不沿用旧的：快照里可能还躺着上一个账号的
                     // 专辑列表（token 过期不清快照是铁律 5），merge 进来就是跨账号串数据。
                     // 专辑/发现页之后随用户浏览逐屏补全。
@@ -239,11 +265,11 @@ class JellyfinViewModel(
     /**
      * 断网启动的兜底：拿本地会话 + 曲库快照直接进主页面，**乐观地**当作会话仍然有效
      * （离线时本来也验证不了）。真失效了，探活的第一次 401 会照常走 [expireSession]
-     * 收场——而会话过期不碰缓存（铁律 5）。
+     * 收场——而会话过期不碰下载（铁律 5）。
      */
     private suspend fun restoreFromSnapshotOffline(saved: SavedSession): Boolean {
         val loaded = snapshotRepository?.load() ?: return false
-        // 曲目表是快照的骨架：没有它，「全部音乐」和标灰判定都无从谈起，等于没兜底。
+        // 曲目表是快照的骨架：没有它，「全部音乐」和离线可见性判定都无从谈起，等于没兜底。
         if (loaded.tracks.isEmpty()) return false
         val source = apiFactory.create(saved.serverUrl)
         snapshot = loaded
@@ -252,10 +278,10 @@ class JellyfinViewModel(
         authorizationSink.activeAuthorization = source.authorizationHeader(saved.accessToken)
         _state.value = _state.value.copy(isLoading = false, isRestoring = false)
         applySnapshot(loaded)
-        // 标灰集合先算完再进离线态，别让界面在未知集合上拦住能播的歌。
+        // 已下载集合先算完再进离线态，别让界面在未知集合上筛掉能播的歌。
         _state.value = _state.value.copy(
             isOffline = true,
-            cachedTrackIds = computeCachedTrackIds(),
+            cachedTrackIds = computeDownloadedTrackIds(),
             errorMessage = null
         )
         startOfflineRetry()
@@ -285,8 +311,6 @@ class JellyfinViewModel(
         loginJob = null
         stopOfflineRetry()
         invalidateSessionRequests()
-        // 缓存键要趁 dataSource 还在时算好：清完会话 streamUrl 就拿不到了。
-        val keepKeys = setOfNotNull(_currentTrack.value?.let(::cacheKey))
         session = null
         dataSource = null
         authorizationSink.activeAuthorization = null
@@ -296,12 +320,11 @@ class JellyfinViewModel(
         // 退回登录表单：只清「这次会话」的东西。地址历史是本地数据、跟账号无关，留着——
         // 否则 _state.value = JellyfinUiState() 会把它一起清空，登录页的地址下拉就没了。
         _state.value = JellyfinUiState(serverUrlHistory = _state.value.serverUrlHistory)
-        // 主动退出 = 清空手机上的副本与快照（换账号不串数据）。缓存层出问题也不能
-        // 挡住退出登录本身（铁律 1、工单 06）——两个 clear 实现自己吞异常。
-        // 正在播的那首保留：退出登录不该把正在听的歌拦腰打断。
+        // 主动退出只清快照（换账号不串曲库清单）。**下载不清**——那是用户主动存的
+        // （ADR-0007 / 用户故事 16）；按账号隔离可见性归工单 08。清快照失败也不挡退出登录。
         viewModelScope.launch(dispatcher) {
             sessionStore.clear()
-            clearLocalCopyAndSnapshot(keepKeys)
+            clearLocalCopyAndSnapshot()
         }
     }
 
@@ -312,18 +335,22 @@ class JellyfinViewModel(
     }
 
     /**
-     * 这首歌**现在**能不能放。离线时只有完整副本才能放（半截的也算不能，用户故事 9）；
+     * 这首歌**现在**能不能放。离线时只有**已下载**的才能放（半截的也算不能，用户故事 9）；
      * 在线一律能放。给 [playTracks] 那类入口用的守门判断。
+     *
+     * 「已下载」= 字节完整 且 在当前账号的下载名单里，见 [computeDownloadedTrackIds]。
      */
     fun isPlayable(track: Track): Boolean =
         !_state.value.isOffline || _state.value.cachedTrackIds?.contains(track.id) == true
 
     /**
-     * 离线时点没缓存的歌：返回不能放的原因（给界面弹提示用），可放返回 null。
-     * 明确告诉用户「这首歌没缓存」，而不是转圈或「网络错误」（工单 03）。
+     * 离线时点没下载的歌：返回不能放的原因（给界面弹提示用），可放返回 null。
+     * 明确告诉用户「这首歌没有下载」，而不是转圈或「网络错误」（工单 03）。
+     *
+     * 文案保持原样：UI 侧另一处兜底话术与它成对（工单 06 统一改词，别只改一边）。
      */
     fun unplayableReason(track: Track): String? =
-        if (isPlayable(track)) null else "这首歌没有缓存，联网后才能播放"
+        if (isPlayable(track)) null else "这首歌没有下载，联网后才能播放"
 
     fun albumCover(album: Album): JellyfinRequest? = coverRequest(album.id, album.imageTag)
     fun playlistCover(playlist: Playlist): JellyfinRequest? = coverRequest(playlist.id, playlist.imageTag)
@@ -531,7 +558,7 @@ class JellyfinViewModel(
                     onFailure = { error ->
                         when (error) {
                             is JellyfinError.Unauthorized -> expireSession()
-                            // 断网照旧进离线态（探活/标灰全 App 共用），不是这一节自己的事
+                            // 断网照旧进离线态（探活/离线可见性全 App 共用），不是这一节自己的事
                             is JellyfinError.Network -> goOffline(needsNetwork = false)
                             // 其余失败：这一节缺席，界面不再为它显示骨架（否则永远转圈）
                             else -> _state.value = _state.value.copy(
@@ -561,6 +588,12 @@ class JellyfinViewModel(
     }
 
     fun loadPlaylists() {
+        // 离线：只显示「下载过的」播放列表（工单 08 / CONTEXT「已下载列表清单」）。
+        // 放在幂等守卫之前——在线拉过的全量列表不能挡着离线筛选。
+        if (_state.value.isOffline) {
+            viewModelScope.launch(dispatcher) { showOfflinePlaylists() }
+            return
+        }
         if (_state.value.playlists != null) return
         loadLibrary(
             needsNetwork = true,
@@ -571,12 +604,121 @@ class JellyfinViewModel(
 
     fun loadPlaylistTracks(playlist: Playlist) {
         if (_state.value.selectedPlaylist?.id == playlist.id && _state.value.playlistTracks != null) return
+        // 离线：已下载过的从本地清单里读，没下载过的照旧「需要联网」
+        if (_state.value.isOffline) {
+            viewModelScope.launch(dispatcher) { showOfflinePlaylistTracks(playlist) }
+            return
+        }
         loadLibrary(
             needsNetwork = true,
             before = { _state.value.copy(isLoading = true, errorMessage = null, selectedPlaylist = playlist, playlistTracks = null) },
             request = { src, currentSession -> src.getPlaylistTracks(currentSession.userId, currentSession.accessToken, playlist.id) },
-            success = { tracks -> _state.value.copy(isLoading = false, playlistTracks = tracks) }
+            success = { tracks ->
+                // 在线拿到曲目表 = 顺手把「已下载列表清单」刷新一份（列表名 + 曲目表）
+                rememberDownloadedPlaylist(playlist, tracks)
+                _state.value.copy(isLoading = false, playlistTracks = tracks)
+            }
         )
+    }
+
+    /**
+     * 离线时的播放列表列表：只显示当前账号下载过的（用户故事 13）。
+     *
+     * 一个都没下载过就保持 `playlists == null`，并明说「需要联网」——界面据此照旧
+     * 显示那句提示，而不是误报「暂无播放列表」。
+     */
+    private suspend fun showOfflinePlaylists() {
+        val owned = downloadedPlaylistListings()
+        if (owned.isEmpty()) {
+            _state.value = _state.value.copy(
+                isLoading = false,
+                errorMessage = "播放列表需要联网才能查看"
+            )
+            return
+        }
+        _state.value = _state.value.copy(
+            isLoading = false,
+            playlists = owned.map { it.toPlaylist() },
+            errorMessage = null
+        )
+    }
+
+    /** 离线时打开播放列表：已下载的从本地清单读，未下载的明说需要联网。 */
+    private suspend fun showOfflinePlaylistTracks(playlist: Playlist) {
+        val listing = downloadedPlaylistListings().firstOrNull { it.id == playlist.id }
+        if (listing == null) {
+            _state.value = _state.value.copy(
+                isLoading = false,
+                selectedPlaylist = playlist,
+                playlistTracks = null,
+                errorMessage = "这个播放列表没有下载，需要联网才能查看"
+            )
+            return
+        }
+        // 曲目表变了：先把曲目表放进 state，再重算已下载集合（knownTracks 要能看到它们），
+        // 别拿旧集合去拦能放的歌
+        _state.value = _state.value.copy(
+            isLoading = false,
+            selectedPlaylist = playlist,
+            playlistTracks = listing.tracks,
+            errorMessage = null
+        )
+        _state.value = _state.value.copy(cachedTrackIds = computeDownloadedTrackIds())
+    }
+
+    /**
+     * 当前账号可见的「已下载列表清单」：快照里的条目**且**名单里还留着这个列表
+     * （名单删了，本地清单也不该再露出来）。
+     *
+     * 名单不可用（没注入 / 读失败）时不过滤——跟「按账号隔离」同一套兜底口径。
+     */
+    private suspend fun downloadedPlaylistListings(): List<DownloadedPlaylist> {
+        val loaded = loadSnapshot() ?: return emptyList()
+        val currentSession = session ?: return emptyList()
+        val mine = loaded.downloadedPlaylistsFor(_state.value.serverUrl, currentSession.userId)
+        val store = downloadLedgerStore ?: return mine
+        val ownedIds = store.entriesFor(_state.value.serverUrl, currentSession.userId)
+            .filter { it.kind == DownloadKind.PLAYLIST }
+            .map { it.id }
+            .toSet()
+        return mine.filter { it.id in ownedIds }
+    }
+
+    /**
+     * 把「列表名 + 曲目表」记进本地清单（工单 08）。**只记名单里有的列表**——
+     * 没下载过的列表离线照旧「需要联网」，存下来只会让用户以为能听。
+     *
+     * 下载成功时（工单 05 的按钮）与在线打开列表详情时都调它；重复调只是覆盖同名条目。
+     */
+    fun rememberDownloadedPlaylist(playlist: Playlist, tracks: List<Track>) {
+        viewModelScope.launch(dispatcher) { writeDownloadedPlaylist(playlist, tracks) }
+    }
+
+    private suspend fun writeDownloadedPlaylist(playlist: Playlist, tracks: List<Track>) {
+        val store = downloadLedgerStore ?: return
+        val currentSession = session ?: return
+        val serverUrl = _state.value.serverUrl
+        val downloaded = store.entriesFor(serverUrl, currentSession.userId)
+            .any { it.kind == DownloadKind.PLAYLIST && it.id == playlist.id }
+        if (!downloaded) return
+        val previous = loadSnapshot() ?: LibrarySnapshot()
+        val entry = DownloadedPlaylist(
+            id = playlist.id,
+            name = playlist.name,
+            serverUrl = serverUrl,
+            userId = currentSession.userId,
+            trackCount = playlist.trackCount ?: tracks.size,
+            imageTag = playlist.imageTag,
+            tracks = tracks
+        )
+        val next = previous.copy(
+            downloadedPlaylists = previous.downloadedPlaylists
+                .filterNot { it.serverUrl == serverUrl && it.userId == currentSession.userId && it.id == playlist.id } +
+                entry
+        )
+        if (next == previous) return
+        snapshot = next
+        snapshotRepository?.save(next)
     }
 
     /**
@@ -997,11 +1139,19 @@ class JellyfinViewModel(
         else -> "操作失败，请稍后重试"
     }
 
-    // ── 本地缓存与离线（工单 01/02/03/05/06）─────────────────────────
-    // 缓存是增强不是依赖（铁律 1）：这一节的所有失败都只表现为「没有离线能力」，
+    // ── 存量副本 ────────────────────────────────────────────────────
+    //
+    // 不做迁移（ADR-0007 的「升级时扫一次反推名单」已撤销）：老版本的自动缓存副本
+    // 和那一批名单已经由用户手动清掉，从零开始。理由见 ADR-0007 的 Comments。
+    //
+    // 这里保留一个「清理残留」的入口：老副本可能还躺在 files/media_cache 里（用户没手动删），
+    // 它们不属于任何下载、界面上也看不见，但不能让它们静默占着几个 G。
+
+    // ── 下载与离线（工单 01/02/03/05/06/08）────────────────────────
+    // 下载是增强不是依赖（铁律 1）：这一节的所有失败都只表现为「没有离线能力」，
     // 绝不冒泡成播放失败或界面报错。
 
-    /** 缓存键 = 播放流 URL（token 只走 header 不进 URL，所以键里没有凭据）。 */
+    /** 下载键 = 播放流 URL（token 只走 header 不进 URL，所以键里没有凭据）。 */
     private fun cacheKey(track: Track): String? = streamUrl(track)
 
     /** 曲库快照：第一次用到时读盘，之后走内存副本。 */
@@ -1022,7 +1172,9 @@ class JellyfinViewModel(
         val next = LibrarySnapshot(
             tracks = current.tracks ?: previous?.tracks.orEmpty(),
             albums = current.albums ?: previous?.albums.orEmpty(),
-            discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty()
+            discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty(),
+            // 已下载列表清单不来自服务器：这是本地攒的，重建快照时原样带过去
+            downloadedPlaylists = previous?.downloadedPlaylists.orEmpty()
         )
         if (next == previous) return
         snapshot = next
@@ -1032,7 +1184,12 @@ class JellyfinViewModel(
     /** 登录成功时的整份替换快照：旧账号的数据一个字段都不留（换账号不串数据）。 */
     private suspend fun replaceSnapshot(tracks: List<Track>) {
         val repo = snapshotRepository ?: return
-        val next = LibrarySnapshot(tracks = tracks)
+        val currentSession = session
+        // 已下载列表清单也按账号隔离：只留当前账号那几条，别的账号的一个不带。
+        // 从盘上读（而不是只用内存副本）：会话过期后重登时内存里可能还没加载过。
+        val mine = loadSnapshot()?.downloadedPlaylists.orEmpty()
+            .filter { currentSession != null && it.serverUrl == _state.value.serverUrl && it.userId == currentSession.userId }
+        val next = LibrarySnapshot(tracks = tracks, downloadedPlaylists = mine)
         snapshot = next
         repo.save(next)
     }
@@ -1050,7 +1207,7 @@ class JellyfinViewModel(
 
     /**
      * 专辑详情页的离线兜底：快照里没有「专辑 → 曲目」的索引，按专辑名从全部曲目里挑。
-     * 代价是同名专辑（不同歌手）会混在一起——离线时这些歌没缓存照样标灰，换来的是
+     * 代价是同名专辑（不同歌手）会混在一起——离线时这些歌没下载就不显示（ADR-0008），换来的是
      * 不用为快照多存一份几乎重复的曲目表。
      */
     private fun offlineAlbumTracks(loaded: LibrarySnapshot): List<Track>? {
@@ -1059,28 +1216,59 @@ class JellyfinViewModel(
     }
 
     /**
-     * 算出「哪些歌有完整副本」（一次 IO 往返拿全量键，再跟曲目表批量比对）。
-     * 失败 = 判不出来 = 全部按没缓存处理，绝不把异常抛给界面（铁律 1）。
+     * 算出「哪些歌**已下载**」（离线可见性用：离线时界面上只显示这一批，ADR-0008）。
+     * **两个概念求交集**，别混：
      *
-     * 只在**进离线态之前**算一次：isOffline 一翻 true 界面马上要用它标灰，拿未算完的
-     * null 硬撑会把有副本的歌也拦成「没缓存」——对能播的歌说谎比等一下更糟。
+     * 1. **字节真相**（`completeKeys` / `hasCompleteCopy`）：这首歌在不在盘上。半截的不算。
+     *    判定永远是字节真相，不是名单真相（spec 铁律 3）。
+     * 2. **可见性**（下载名单里属于当前账号的 `trackIds`）：当前账号有没有「拥有」它。
+     *    下载键只带服务器地址、不带用户 ID，所以光看字节分不出是谁下的；
+     *    换账号后要看不见上一个账号的下载（用户故事 17），只能靠名单筛。
+     *
+     * 名单没注入 / 读不出来时**退化成只看字节真相**——没有名单就无从判断归属，
+     * 此时宁可多显示也不误筛（跟「判不出来就全按不能放」的旧口径相反：那条是字节层
+     * 整体坏掉，这里是可见性层缺信息）。
+     *
+     * 失败 = 判不出来 = 全部按没下载处理，绝不把异常抛给界面（铁律 1）。
+     *
+     * 只在**进离线态之前**算一次：isOffline 一翻 true 界面马上要用它筛列表，拿未算完的
+     * null 硬撑会把能放的歌也拦成「没下载」——对能播的歌说谎比等一下更糟。
      * 在线时不需要知道（一律能放），所以不提前算。
      */
-    private suspend fun computeCachedTrackIds(): Set<String> {
-        val cache = mediaCache ?: return emptySet()
-        val cachedKeys = try {
-            cache.completeKeys()
+    private suspend fun computeDownloadedTrackIds(): Set<String> {
+        val downloads = mediaDownloads ?: return emptySet()
+        val completeKeys = try {
+            downloads.completeKeys()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             emptySet()
         }
+        val visible = visibleDownloadedTrackIds()
         return knownTracks().filter { track ->
-            cacheKey(track)?.let { it in cachedKeys } == true
+            (visible == null || track.id in visible) &&
+                cacheKey(track)?.let { it in completeKeys } == true
         }.map { it.id }.toSet()
     }
 
-    /** 当前可能出现在界面上的所有曲目（去重）。标灰判定要覆盖每一屏。 */
+    /**
+     * 当前账号下载名单里的曲目 id。null = 没有名单可用（未注入 / 读失败），
+     * 调用方据此跳过可见性过滤。
+     */
+    private suspend fun visibleDownloadedTrackIds(): Set<String>? {
+        val store = downloadLedgerStore ?: return null
+        val currentSession = session ?: return null
+        val entries = try {
+            store.entriesFor(_state.value.serverUrl, currentSession.userId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            return null
+        }
+        return entries.flatMap { it.trackIds }.toSet()
+    }
+
+    /** 当前可能出现在界面上的所有曲目（去重）。离线可见性判定要覆盖每一屏。 */
     private fun knownTracks(): List<Track> {
         val current = _state.value
         return buildList {
@@ -1100,7 +1288,7 @@ class JellyfinViewModel(
         val loaded = loadSnapshot()
         if (loaded != null) applySnapshot(loaded)
         // 快照连「全部音乐」都撑不起来（没有快照 / 刚被 login 清掉）：没有可显示的库，
-        // 退回「连不上服务器」+ 登录表单，跟没有缓存功能时的行为一致——空骨架更糟。
+        // 退回「连不上服务器」+ 登录表单，跟没有离线能力时的行为一致——空骨架更糟。
         if (_state.value.tracks == null) {
             _state.value = _state.value.copy(
                 isLoading = false,
@@ -1108,8 +1296,8 @@ class JellyfinViewModel(
             )
             return
         }
-        // 标灰集合先算完再进离线态（见 [computeCachedTrackIds]）。
-        val cached = computeCachedTrackIds()
+        // 已下载集合先算完再进离线态（见 [computeDownloadedTrackIds]）。
+        val cached = computeDownloadedTrackIds()
         _state.value = _state.value.copy(
             isLoading = false,
             isOffline = true,
@@ -1222,56 +1410,30 @@ class JellyfinViewModel(
         offlineRetryJob = null
     }
 
-    /** 拉缓存占用（进设置页时调）。 */
+    /** 拉下载占用（进设置页时调）。 */
     fun loadCacheStats() {
         viewModelScope.launch(dispatcher) { refreshCacheStats() }
     }
 
-    /** 缓存统计（设置页卡片）：占用 + 完整副本首数。 */
+    /** 下载统计（设置页卡片）：占用 + 完整副本首数。 */
     private suspend fun refreshCacheStats() {
-        val cache = mediaCache ?: return
-        _state.value = _state.value.copy(
-            cacheBytes = cache.usedBytes(),
-            cacheTrackCount = cache.completeCount()
-        )
+        val downloads = mediaDownloads ?: return
+        // 先算完再写 state：这两个调用都会挂起，别在挂起点前攥着 _state 的旧快照。
+        val bytes = downloads.usedBytes()
+        val count = downloads.completeCount()
+        _state.value = _state.value.copy(cacheBytes = bytes, cacheTrackCount = count)
     }
 
-    /**
-     * 清空手机上的副本（界面已二次确认）。只动手机本地：没网、PC 服务没开都照常成功（铁律 3）。
-     * 正在播的那首**保留**：清空不该把正在听的歌从播放流底下抽走（离线时表现为中途断播）。
-     */
-    fun clearCache() {
-        val cache = mediaCache ?: return
-        if (_state.value.isCacheBusy) return
-        val keepCurrent = setOfNotNull(_currentTrack.value?.let(::cacheKey))
-        viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isCacheBusy = true, cacheMessage = null)
-            cache.clear(keepKeys = keepCurrent)
-            _state.value = _state.value.copy(
-                isCacheBusy = false,
-                cacheBytes = cache.usedBytes(),
-                cacheTrackCount = cache.completeCount(),
-                cacheMessage = if (keepCurrent.isEmpty()) {
-                    "已清空手机上的副本，电脑里的歌一首没动"
-                } else {
-                    "已清空手机上的副本（正在播的那首先留着），电脑里的歌一首没动"
-                },
-                // 刚清完只剩正在播的一首；离线时标灰集合直接重算（不用逐首猜）。
-                cachedTrackIds = if (_state.value.isOffline) computeCachedTrackIds() else _state.value.cachedTrackIds
-            )
-        }
-    }
-
-    /** 删歌成功顺带清掉这首的副本（工单 06）。失败不影响删歌结果（铁律 1）。 */
+    /** 删歌成功顺带清掉这首的下载（工单 06）。失败不影响删歌结果（铁律 4）。 */
     private fun removeCachedCopy(track: Track) {
-        val cache = mediaCache ?: return
+        val downloads = mediaDownloads ?: return
         val key = cacheKey(track) ?: return
-        viewModelScope.launch(dispatcher) { cache.remove(key) }
+        viewModelScope.launch(dispatcher) { downloads.remove(key) }
     }
 
     /**
-     * 已缓存列表（设置页进）：按专辑分组显示有完整副本的歌。进页面时重拉一次——
-     * 播放随时在攒副本，进页时算的才是当下。曲库没到位（恢复会话中/恢复失败）按
+     * 已下载列表（设置页进）：按专辑分组显示有完整副本的歌。进页面时重拉一次——
+     * 下载随时在跑，进页时算的才是当下。曲库没到位（恢复会话中/恢复失败）按
      * 空列表处理：列表页转圈没有尽头，空态是更诚实的占位。
      */
     fun loadCachedAlbums() {
@@ -1292,49 +1454,131 @@ class JellyfinViewModel(
     }
 
     /**
-     * 删掉一张专辑所有歌的手机副本（界面已二次确认）。正在播的那首**保留**（同
-     * [clearCache]：不能把正在听的歌从播放流底下抽走）。只动手机本地（铁律 3），
-     * 失败静默（铁律 1）——删完重算，列表说的永远是当下。
+     * 删掉单首的下载（已下载页展开后逐首删）。正在播的那首不删——不能把正在听的歌
+     * 从播放流底下抽走。只动手机本地（铁律 5），失败静默（铁律 4）。
      */
-    fun deleteAlbumCopies(album: Album) {
-        val cache = mediaCache ?: return
+    fun deleteDownloadedTrack(track: Track) {
+        val downloads = mediaDownloads ?: return
         val tracks = _state.value.tracks ?: return
-        // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
-        if (_state.value.isCacheBusy) return
-        _state.value = _state.value.copy(isCacheBusy = true)
-        val keepCurrent = setOfNotNull(_currentTrack.value?.let(::cacheKey))
-        val keys = tracks.filter { it.album == album.name }
-            .mapNotNull { cacheKey(it) }
-            .filter { it !in keepCurrent }
+        if (_currentTrack.value?.id == track.id) return
+        val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
-            keys.forEach { cache.remove(it) }
+            downloads.remove(key)
             refreshCachedAlbums(tracks)
             refreshCacheStats()
-            _state.value = _state.value.copy(isCacheBusy = false)
         }
     }
 
-    /** 重算已缓存列表。专辑对象从专辑页拿（没加载过就退快照）按专辑名配对。 */
+    /**
+     * 删掉一张专辑的下载（界面已二次确认）。**按名单删**（用户故事 10）：只删当初下过的
+     * 那批（[DownloadLedgerStore] 里这条 entry 的 `trackIds`），服务器后来往专辑里新增的
+     * 歌不在名单里，不受影响。正在播的那首**保留**。
+     *
+     * 名单里找不到这条（迁移失败 / 没注入名单）时退回「当前列表里已有完整副本的那几首」——
+     * 只删真在盘上的，绝不按专辑名把全部曲目一锅端。只动手机本地（铁律 5），
+     * 失败静默（铁律 4）——删完重算，列表说的永远是当下。
+     */
+    fun deleteAlbumCopies(album: Album) {
+        val downloads = mediaDownloads ?: return
+        val tracks = _state.value.tracks ?: return
+        // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
+        if (isDeletingDownloads) return
+        isDeletingDownloads = true
+        viewModelScope.launch(dispatcher) {
+            try {
+                val trackIds = downloadTrackIdsFor(album, tracks)
+                val playingId = _currentTrack.value?.id
+                val keys = downloadKeysToDelete(
+                    trackIds = trackIds,
+                    tracks = tracks,
+                    playingTrackId = playingId,
+                    streamUrl = ::streamUrl
+                )
+                keys.forEach { downloads.remove(it) }
+                // 名单跟着改（跟专辑页的删除按钮同一口径）：删干净就整条去掉，
+                // 留了正在播的那首就只留它。不回写的话，同一个动作在两处会得到两种结果。
+                removeLedgerEntry(album, trackIds.filter { it == playingId })
+                refreshCachedAlbums(tracks)
+                refreshCacheStats()
+            } finally {
+                isDeletingDownloads = false
+            }
+        }
+    }
+
+    /**
+     * 删掉名单里这张专辑的那一条。[keepTrackIds] 非空时只把它留下（正在播的那首），
+     * 其余整条移除。找不到对应条目（迁移失败等）就什么都不做。
+     */
+    private suspend fun removeLedgerEntry(album: Album, keepTrackIds: List<String>) {
+        val store = downloadLedgerStore ?: return
+        val currentSession = session ?: return
+        try {
+            val entries = store.entriesFor(_state.value.serverUrl, currentSession.userId)
+            val entry = entries.firstOrNull {
+                it.kind == DownloadKind.ALBUM && (it.id == album.id || it.name == album.name)
+            } ?: return
+            val others = store.load().entries.filterNot { it == entry }
+            store.replaceAll(
+                if (keepTrackIds.isEmpty()) others else others + entry.copy(trackIds = keepTrackIds)
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // 名单写不进去不影响删除本身：字节已经删了，界面按字节真相重算
+        }
+    }
+
+    /**
+     * 这张专辑当初下过哪些曲目。名单是唯一依据；找不到这条时退回「已有完整副本的歌」，
+     * 保证删得掉、又不会把服务器新增的歌算进来。
+     */
+    private suspend fun downloadTrackIdsFor(album: Album, tracks: List<Track>): List<String> {
+        val store = downloadLedgerStore
+        val currentSession = session
+        if (store != null && currentSession != null) {
+            val entries = try {
+                store.entriesFor(_state.value.serverUrl, currentSession.userId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                emptyList()
+            }
+            // id 之外再按名字兜一次：迁移来的老条目 id 是专辑名（历史遗留，可能还有）。
+            val entry = entries.firstOrNull {
+                it.kind == DownloadKind.ALBUM && (it.id == album.id || it.name == album.name)
+            }
+            if (entry != null) return entry.trackIds
+        }
+        val downloads = mediaDownloads ?: return emptyList()
+        return tracks.filter { it.album == album.name }
+            .filter { track -> cacheKey(track)?.let { downloads.hasCompleteCopy(it) } == true }
+            .map { it.id }
+    }
+
+    /** 重算已下载列表。专辑对象从专辑页拿（没加载过就退快照）按专辑名配对。 */
     private suspend fun refreshCachedAlbums(tracks: List<Track>) {
-        val cached = computeCachedTrackIds()
+        val cached = computeDownloadedTrackIds()
         val albums = _state.value.albums ?: loadSnapshot()?.albums.orEmpty()
         _state.value = _state.value.copy(
             cachedAlbums = groupCachedByAlbum(tracks, albums, cached),
-            // 离线时标灰集合跟着删副本走：删掉的那首马上变成「没缓存」不能放。
+            // 离线时已下载集合跟着删下载走：删掉的那首马上从列表里消失。
             cachedTrackIds = if (_state.value.isOffline) cached else _state.value.cachedTrackIds
         )
     }
 
-    /** 退出登录时清空手机上的副本与快照。两个实现都不抛，清不掉也不挡退出登录。 */
-    private suspend fun clearLocalCopyAndSnapshot(keepKeys: Set<String>) {
-        mediaCache?.clear(keepKeys = keepKeys)
+    /**
+     * 退出登录时清快照。**下载不清**（ADR-0007 / 用户故事 16：那是用户主动存的）——
+     * 按账号隔离可见性是工单 08 的事。
+     */
+    private suspend fun clearLocalCopyAndSnapshot() {
         snapshotRepository?.clear()
         snapshot = null
     }
 
     /**
-     * 会话失效（token 过期）。**不碰缓存与快照**（铁律 5）：一过期就清 5 GB 太亏，
-     * 重登回来缓存还在。
+     * 会话失效（token 过期）。**不碰下载与快照**：下载是用户主动存的，一过期就清太亏，
+     * 重登回来还在（ADR-0007）。
      */
     private fun expireSession() {
         loginGeneration++

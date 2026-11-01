@@ -571,8 +571,11 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 播放数据源：手机本地副本（缓存）套在原始网络源外面——命中读本地、未命中边读边写，
-     * LRU 淘汰由 `SimpleCache` 自己管，不自己造轮子。
+     * 播放数据源：已下载的副本套在原始网络源外面——命中读本地、未命中直接走网络。
+     *
+     * **纯只读**（ADR-0007）：`setCacheWriteDataSinkFactory(null)` 让 `CacheDataSource`
+     * 进入只读模式，播放一个字节都不写盘。想存东西只有一条路——下载
+     * （`CacheWriter` + `createDataSourceForDownloading()`，它不受这里的只读标记影响）。
      *
      * [CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR] 是 spec 铁律 1 的落点：读缓存出错就
      * 退回网络。缓存层的问题绝不能变成播不了歌。
@@ -585,6 +588,7 @@ class PlaybackService : MediaSessionService() {
         .setUpstreamDataSourceFactory(
             AuthHttpDataSourceFactory { (application as PulsarApplication).activeAuthorization }
         )
+        .setCacheWriteDataSinkFactory(null)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
     private fun capturePlayerState(oldPlayer: ExoPlayer): PlayerRebuildState {

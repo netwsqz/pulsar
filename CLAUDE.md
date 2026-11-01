@@ -149,7 +149,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 - **PC 侧 `E:\nsmic\server\qqmusic_service.py`**（FastAPI，端口 8900，`start.bat` 手动启动）：包装 `E:\music` 的 `qmc2`/`qqmusic_downloader` 现成函数（**只调用不修改**）。单工作线程 + `queue.Queue` 串行下载，每首 sleep 1s 防风控；`process_song` 的 print 噪音用 `redirect_stdout` 捕获存 job，最终路径从 `-> ...` 行解析；连续 3 次「拿不到下载链接」→ `credential_expired`，等 App 端触发 `/api/credential/retry` 重提（需 QQ 音乐客户端运行中）。**落盘 `E:\file\Te_Music`**（Jellyfin 音乐库目录，实时监控开启，落盘即入库）。
 - **Android `data/qqdownload/`**：`QQDownloadApi`（接口）/ `QQDownloadDataSource`（Ktor 实现，错误映射 `QQDownloadError`：`ServiceUnreachable`/`CredentialExpired`/`Http`/`InvalidResponse`）；`QQDownloadSettings`（接口）/ `QQDownloadPreferences`（DataStore：服务地址 + 默认音质）。
 - **`QQDownloadViewModel`**：与 `JellyfinViewModel` 完全独立（服务地址单独持久化，不参与 Jellyfin 会话生命周期）。搜索 300ms 防抖；任务轮询（有活跃任务时 2s 间隔，出错即停）；`pollGeneration`/`searchGeneration` 防过期协程。
-- **UI `QQDownloadScreen.kt`**（独立文件）：导航 `LibrarySection.QQDownload`，顶部玻璃岛有「QQ 下载」chip。未连接显示服务地址设置卡；凭证过期显示横幅 + 重试按钮。专辑行两个图标按钮：选曲（弹窗勾选部分曲目，默认全不选，`song_mids` 走 `/api/download/album`）和整张下载。**服务地址会从 Jellyfin 地址自动推导**（同机、端口 8900），用户一般不用手填；`ServerUrlHistory` 记录登录过的服务器地址供登录页下拉回填。
+- **UI `QQDownloadScreen.kt`**（独立文件）：导航 `LibrarySection.DownloadService`，从「设置 → QQ 音乐导入」进入（ADR-0006），不占顶部页签。未连接显示服务地址设置卡；凭证过期显示横幅 + 重试按钮。专辑行两个图标按钮：选曲（弹窗勾选部分曲目，默认全不选，`song_mids` 走 `/api/download/album`）和整张下载。**服务地址会从 Jellyfin 地址自动推导**（同机、端口 8900），用户一般不用手填；`ServerUrlHistory` 记录登录过的服务器地址供登录页下拉回填。
 - 凭证（QQ cookie）只在 PC 侧内存与 `E:\music\qqmusic_cred.json`，**App 不接触 cookie**，接口不回传。
 - **整专下载任务必须带歌名**：`qmc2.get_album_songs()` 只返回 mid 不带歌名（且 `E:\music` 不许改），所以服务里用自写的 `_album_song_details()`（同一底层接口、多取 `songInfo.name`）入队带 `title`，否则 App 任务列表回退显示内部 mid。
 

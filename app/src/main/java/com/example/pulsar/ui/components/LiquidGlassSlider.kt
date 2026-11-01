@@ -134,7 +134,7 @@ private const val HeadGlowDragAlpha = 0.35f
  * 液态玻璃胶囊进度条。
  *
  * 视觉两件套（**刻意不做独立拇指**）：
- * 1) **轨道** = [liquidGlass] 采样 [backdrop]（模糊 + 透镜 + 高光），表面再叠一层半透明
+ * 1) **轨道** = [GlassPanel] 采样 [backdrop]（模糊 + 透镜 + 高光），表面再叠一层半透明
  *    [LiquidGlassSliderColors.trackSurface] 保证可读性 —— 玻璃里透出背后的封面 / 列表；
  * 2) **已播** = 从左侧起的胶囊填充 + 横向渐变（前端更亮），前端叠一团柔光 —— 读作「液体涨上来」。
  *
@@ -186,27 +186,16 @@ internal fun LiquidGlassSlider(
     val headGlowAlpha = colors.glow.alpha * (HeadGlowIdleAlpha + HeadGlowDragAlpha * dragIntensity)
     val capsuleShape = RoundedCornerShape(percent = 50)
 
-    // 轨道：有采样源就做真玻璃，没有就退化成半透明胶囊（视觉稍逊，但绝不会出现「一片空」）。
-    val trackModifier = if (backdrop != null) {
-        Modifier.liquidGlass(
-            backdrop = backdrop,
-            surface = colors.trackSurface,
-            shape = capsuleShape,
-            // 透镜按胶囊高度收窄：面板级的 14/28dp 用在这条 28dp 高的胶囊上会糊成一片。
-            // 模糊不跟着收 —— 全 App 统一，玻璃才像同一种材质。
-            lensRefraction = height * 0.35f,
-            lensDepth = height * 0.7f
-        )
-    } else {
-        Modifier.clip(capsuleShape).background(colors.trackSurface)
-    }
-
-    Box(
-        modifier
+    // 轨道：有采样源就做真玻璃，没有就退化成半透明胶囊（GlassPanel 内部处理，视觉稍逊，
+    // 但绝不会出现「一片空」）。透镜按胶囊高度收窄：面板级的 14/28dp 用在这条 28dp 高的胶囊上
+    // 会糊成一片；模糊不跟着收 —— 全 App 统一，玻璃才像同一种材质。
+    GlassPanel(
+        backdrop = backdrop,
+        surface = colors.trackSurface,
+        modifier = modifier
             .fillMaxWidth()
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
-            .then(trackModifier)
             .pointerInput(enabled, valueRange) {
                 if (!enabled) return@pointerInput
                 // 本次手势是否还没走到正常结束（抬手回调还没发出去）。
@@ -251,7 +240,10 @@ internal fun LiquidGlassSlider(
                         onValueChangeCancelled()
                     }
                 }
-            }
+            },
+        shape = capsuleShape,
+        lensRefraction = height * 0.35f,
+        lensDepth = height * 0.7f
     ) {
         // 已播填充：从左侧起的胶囊，前端更亮 + 一团柔光 → 「液体涨上来」。
         // 柔光画在 clip 之前，因此可以溢出到未播轨道上一点点，读作液体头部的光晕。

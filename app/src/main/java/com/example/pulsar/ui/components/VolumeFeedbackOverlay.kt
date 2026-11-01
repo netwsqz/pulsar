@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -73,7 +74,8 @@ internal fun VolumeFeedbackOverlay(
     }
 }
 
-/** 横向胶囊本体：左数字、右填充条，材质与顶部玻璃岛同款（模糊 + 透镜 + 高光）。 */
+/** 横向胶囊本体：左数字、右填充条，材质与顶部玻璃岛同款（模糊 + 透镜 + 高光）。
+ * 前景色由 [GlassPanel] 统一给 onSurface：深色主题下数字不再是默认黑。 */
 @Composable
 private fun VolumeFeedbackCapsule(percent: Int, backdrop: Backdrop?, accent: Color) {
     // 可读性表面色：非组合的 onDrawSurface 里读不到 MaterialTheme，先取出来（同 GlassChipBar）。
@@ -83,57 +85,52 @@ private fun VolumeFeedbackCapsule(percent: Int, backdrop: Backdrop?, accent: Col
     // 复用进度条的换算（已单测）：0..100 映射到 0..1，脏值一律给 0。
     val fraction = sliderFraction(percent.toFloat(), 0f, 100f)
 
-    val surfaceModifier = if (backdrop != null) {
-        // 与顶部玻璃岛同源（liquidGlass 默认值）：浮窗就浮在它正下方，两者材质必须连成一套。
-        Modifier.liquidGlass(
-            backdrop = backdrop,
-            surface = glassSurface.copy(alpha = 0.8f),
-            shape = capsuleShape
-        )
-    } else {
-        // 拿不到采样源就退化成纯半透明胶囊：视觉稍逊，但绝不会出现「一片空」。
-        Modifier.clip(capsuleShape).background(glassSurface.copy(alpha = 0.95f))
-    }
-
-    Row(
+    // 与顶部玻璃岛同源（liquidGlass 默认值）：浮窗就浮在它正下方，两者材质必须连成一套。
+    // backdrop 为 null 时 GlassPanel 退化成同色平板，绝不会出现「一片空」。
+    GlassPanel(
+        backdrop = backdrop,
+        surface = glassSurface.copy(alpha = 0.8f),
         modifier = Modifier
             .width(VolumeFeedbackWidth)
-            .height(VolumeFeedbackHeight)
-            .then(surfaceModifier)
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .height(VolumeFeedbackHeight),
+        shape = capsuleShape
     ) {
-        Text(
-            text = "$percent",
-            modifier = Modifier.widthIn(min = VolumeFeedbackNumberWidth),
-            textAlign = TextAlign.Start,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1
-        )
-        Spacer(Modifier.width(10.dp))
-        // 空槽用 onSurface 的低透明度而不是 surface 同色系：叠在 80% 的玻璃表面上时，
-        // 同色系几乎看不见槽的边界，深浅主题还会各偏一次。
-        Box(
-            Modifier
-                .weight(1f)
-                .height(8.dp)
-                .clip(capsuleShape)
-                .background(scheme.onSurface.copy(alpha = 0.18f))
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (fraction > 0f) {
-                Box(
-                    Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(fraction)
-                        .clip(capsuleShape)
-                        .background(
-                            Brush.horizontalGradient(
-                                0f to accent.copy(alpha = 0.65f),
-                                1f to accent
+            Text(
+                text = "$percent",
+                modifier = Modifier.widthIn(min = VolumeFeedbackNumberWidth),
+                textAlign = TextAlign.Start,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1
+            )
+            Spacer(Modifier.width(10.dp))
+            // 空槽用 onSurface 的低透明度而不是 surface 同色系：叠在 80% 的玻璃表面上时，
+            // 同色系几乎看不见槽的边界，深浅主题还会各偏一次。
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(8.dp)
+                    .clip(capsuleShape)
+                    .background(scheme.onSurface.copy(alpha = 0.18f))
+            ) {
+                if (fraction > 0f) {
+                    Box(
+                        Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(fraction)
+                            .clip(capsuleShape)
+                            .background(
+                                Brush.horizontalGradient(
+                                    0f to accent.copy(alpha = 0.65f),
+                                    1f to accent
+                                )
                             )
-                        )
-                )
+                    )
+                }
             }
         }
     }

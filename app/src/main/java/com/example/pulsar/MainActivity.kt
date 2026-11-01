@@ -4,12 +4,12 @@ import android.app.Application
 import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
+import com.example.pulsar.ui.components.GlassPanel
 import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.components.VolumeFeedback
 import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.glassBarSliderColors
-import com.example.pulsar.ui.components.liquidGlass
 import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.CoverTheme
@@ -1360,6 +1360,9 @@ private fun MusicLibraryScreen(
                     .padding(top = GlassIslandTopSpacing + 8.dp, start = 16.dp, end = 16.dp),
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                // 材质 / 锚点的统一归工单 04；这里先补前景色：带 alpha 的 surface 匹配不上
+                // contentColorFor，不显式给就会落回默认黑色，深色主题下整条不可读。
+                contentColor = MaterialTheme.colorScheme.onSurface,
                 tonalElevation = 2.dp,
                 shadowElevation = 8.dp
             ) {
@@ -1464,102 +1467,106 @@ private fun GlassChipBar(
     LaunchedEffect(selectedIndex) {
         if (selectedIndex in requesters.indices) requesters[selectedIndex].bringIntoView()
     }
-    Row(
+    // 玻璃面前景色由 GlassPanel 统一提供（onSurface）：深色主题下 chip 图标不再是默认黑。
+    // 选中 chip 的 onPrimary 标签由 glassChipColors 显式设置，不受影响。
+    GlassPanel(
+        backdrop = backdrop,
+        // 表面色比播放条更实：岛下压着滚动的曲库，太透会看不清 chip 文字。
+        surface = glassSurface.copy(alpha = 0.8f),
         modifier = modifier
-            .liquidGlass(
-                backdrop = backdrop,
-                // 表面色比播放条更实：岛下压着滚动的曲库，太透会看不清 chip 文字。
-                surface = glassSurface.copy(alpha = 0.8f)
-            )
-            .height(Dimens.TouchTargetMedium)
-            .padding(horizontal = Dimens.SpaceSmall),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
-        // chip 分组可横向滑动的区域：两侧叠加渐变遮罩提示"还能划"，避免用户以为只有这几个按钮。
-        Box(Modifier.weight(1f).fillMaxHeight()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .horizontalScroll(chipScrollState),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
-            ) {
-                TopLevelSections.forEachIndexed { index, (target, label) ->
-                    val selected = section == target
-                    FilterChip(
-                        selected = selected,
-                        onClick = { onSelectSection(target) },
-                        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                        colors = glassChipColors(selected = selected),
-                        border = glassChipBorder(),
-                        modifier = Modifier.bringIntoViewRequester(requesters[index])
+        Row(
+            modifier = Modifier
+                .height(Dimens.TouchTargetMedium)
+                .padding(horizontal = Dimens.SpaceSmall),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
+        ) {
+            // chip 分组可横向滑动的区域：两侧叠加渐变遮罩提示"还能划"，避免用户以为只有这几个按钮。
+            Box(Modifier.weight(1f).fillMaxHeight()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .horizontalScroll(chipScrollState),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
+                ) {
+                    TopLevelSections.forEachIndexed { index, (target, label) ->
+                        val selected = section == target
+                        FilterChip(
+                            selected = selected,
+                            onClick = { onSelectSection(target) },
+                            label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            colors = glassChipColors(selected = selected),
+                            border = glassChipBorder(),
+                            modifier = Modifier.bringIntoViewRequester(requesters[index])
+                        )
+                    }
+                }
+                // 左侧渐变遮罩：还能往左滑时显示。
+                if (chipScrollState.canScrollBackward) {
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterStart)
+                            .fillMaxHeight()
+                            .width(Dimens.SpaceMedium)
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(glassSurface.copy(alpha = 0.8f), glassSurface.copy(alpha = 0f))
+                                )
+                            )
+                    )
+                }
+                // 右侧渐变遮罩：还能往右滑时显示。
+                if (chipScrollState.canScrollForward) {
+                    Box(
+                        Modifier
+                            .align(Alignment.CenterEnd)
+                            .fillMaxHeight()
+                            .width(Dimens.SpaceMedium)
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(glassSurface.copy(alpha = 0f), glassSurface.copy(alpha = 0.8f))
+                                )
+                            )
                     )
                 }
             }
-            // 左侧渐变遮罩：还能往左滑时显示。
-            if (chipScrollState.canScrollBackward) {
-                Box(
-                    Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxHeight()
-                        .width(Dimens.SpaceMedium)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(glassSurface.copy(alpha = 0.8f), glassSurface.copy(alpha = 0f))
-                            )
-                        )
+            // 搜索：放大镜图标，进入搜索页时高亮为品牌色。
+            IconButton(
+                onClick = onShowSearch,
+                modifier = Modifier.size(Dimens.TouchTargetSmall)
+            ) {
+                Icon(
+                    Icons.Filled.Search,
+                    contentDescription = "搜索音乐",
+                    tint = if (section == LibrarySection.Search) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        LocalContentColor.current
+                    }
                 )
             }
-            // 右侧渐变遮罩：还能往右滑时显示。
-            if (chipScrollState.canScrollForward) {
-                Box(
-                    Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxHeight()
-                        .width(Dimens.SpaceMedium)
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(glassSurface.copy(alpha = 0f), glassSurface.copy(alpha = 0.8f))
-                            )
-                        )
+            IconButton(
+                onClick = onShowSettings,
+                modifier = Modifier.size(Dimens.TouchTargetSmall)
+            ) {
+                Icon(
+                    Icons.Filled.Settings,
+                    contentDescription = "设置",
+                    tint = if (section == LibrarySection.Settings) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        LocalContentColor.current
+                    }
                 )
             }
-        }
-        // 搜索：放大镜图标，进入搜索页时高亮为品牌色。
-        IconButton(
-            onClick = onShowSearch,
-            modifier = Modifier.size(Dimens.TouchTargetSmall)
-        ) {
-            Icon(
-                Icons.Filled.Search,
-                contentDescription = "搜索音乐",
-                tint = if (section == LibrarySection.Search) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    LocalContentColor.current
-                }
-            )
-        }
-        IconButton(
-            onClick = onShowSettings,
-            modifier = Modifier.size(Dimens.TouchTargetSmall)
-        ) {
-            Icon(
-                Icons.Filled.Settings,
-                contentDescription = "设置",
-                tint = if (section == LibrarySection.Settings) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    LocalContentColor.current
-                }
-            )
-        }
-        IconButton(
-            onClick = onSignOut,
-            modifier = Modifier.size(Dimens.TouchTargetSmall)
-        ) {
-            Icon(Icons.Filled.ExitToApp, contentDescription = "退出登录")
+            IconButton(
+                onClick = onSignOut,
+                modifier = Modifier.size(Dimens.TouchTargetSmall)
+            ) {
+                Icon(Icons.Filled.ExitToApp, contentDescription = "退出登录")
+            }
         }
     }
 }
@@ -1950,14 +1957,21 @@ private fun AddToQueueMenu(
                     modifier = Modifier.width(240.dp),
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                    // 带 alpha 的 surface 匹配不上 contentColorFor，不给就会落回默认黑色：
+                    // 深色主题下菜单文字全黑（工单 15 会把整个菜单换成同窗玻璃）。
+                    contentColor = MaterialTheme.colorScheme.onSurface,
                     shadowElevation = 16.dp,
                     tonalElevation = 2.dp,
                     border = BorderStroke(
                         0.5.dp,
-                        // 高光描边：浅色主题 0.6 营造玻璃质感；深色主题降到 0.25，避免过亮刺眼。
-                        // 保留白色（不换 onSurface）：这是**菜单玻璃的高光**，不是文字色，
+                        // 深色主题：白色低透的高光描边，是**菜单玻璃的高光**而不是文字色，
                         // 跟着封面换色会变成一层彩色描边，反而不像玻璃。
-                        Color.White.copy(alpha = if (isSystemInDarkTheme()) 0.25f else 0.6f)
+                        // 浅色主题：白描边叠白底等于没有边界，改用色板的 outlineVariant。
+                        if (isSystemInDarkTheme()) {
+                            Color.White.copy(alpha = 0.25f)
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant
+                        }
                     )
                 ) {
                     Column(Modifier.fillMaxWidth()) {
@@ -4027,11 +4041,12 @@ private fun MiniPlayerBar(
     } else 0f
 
     // 液态玻璃容器。这里是**全 App 玻璃材质的基准**（模糊 / 透镜 / 圆角的默认值都取自此处），
-    // 其余玻璃面统一走 liquidGlass，别再各写各的数字。
-    Box(
-        modifier
-            .fillMaxWidth()
-            .liquidGlass(backdrop = backdrop, surface = glassSurface.copy(alpha = 0.55f))
+    // 其余玻璃面统一走 GlassPanel，别再各写各的数字；前景色也由它统一提供，
+    // 歌名/时间/面板文字在深色主题下不会再变成默认黑。
+    GlassPanel(
+        backdrop = backdrop,
+        surface = glassSurface.copy(alpha = 0.55f),
+        modifier = modifier.fillMaxWidth()
     ) {
         Column {
             // 迷你条（始终可见）

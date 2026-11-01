@@ -48,9 +48,10 @@ private val VolumeFeedbackNumberWidth = 28.dp
  * 音量反馈浮窗：独占模式下音量键被 App 截获，系统自己的音量条不会弹（见
  * docs/usb-volume-key-interception.md §11.3），这里补上唯一的视觉反馈。
  *
- * 位置由调用方给（顶部玻璃岛正下方），本组件只管「长得像什么 + 什么时候在」。
+ * 位置由调用方给（底部播放条上方，与 Snackbar 同一个底部锚点栈），本组件只管
+ * 「长得像什么 + 什么时候在」。
  *
- * **不吃触摸**：整棵子树不带任何手势修饰符，可见的那 1.5 秒里手指仍能点穿它底下的玻璃岛。
+ * **不吃触摸**：整棵子树不带任何手势修饰符，可见的那 1.5 秒里手指仍能点穿它底下的内容。
  *
  * @param state 显示窗口，来自 [VolumeFeedback]；[VolumeFeedbackState.percent] 在淡出期间仍有效。
  * @param backdrop 采样源。传 `null` 时降级为不采样背景的纯半透明胶囊（零风险）。
@@ -85,7 +86,7 @@ private fun VolumeFeedbackCapsule(percent: Int, backdrop: Backdrop?, accent: Col
     // 复用进度条的换算（已单测）：0..100 映射到 0..1，脏值一律给 0。
     val fraction = sliderFraction(percent.toFloat(), 0f, 100f)
 
-    // 与顶部玻璃岛同源（liquidGlass 默认值）：浮窗就浮在它正下方，两者材质必须连成一套。
+    // 与玻璃岛 / 播放条同源（liquidGlass 默认值）：全 App 玻璃材质必须连成一套。
     // backdrop 为 null 时 GlassPanel 退化成同色平板，绝不会出现「一片空」。
     GlassPanel(
         backdrop = backdrop,

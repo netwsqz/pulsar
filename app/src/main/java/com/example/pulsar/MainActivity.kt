@@ -9,6 +9,7 @@ import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.components.VolumeFeedback
 import com.example.pulsar.ui.components.VolumeFeedbackOverlay
+import com.example.pulsar.ui.components.VolumeFeedbackState
 import com.example.pulsar.ui.components.glassBarSliderColors
 import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
@@ -71,6 +72,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -985,8 +987,12 @@ private fun MusicLibraryScreen(
     }
     // 全屏播放页开关：迷你播放条点击打开，收起按钮 / 返回键关闭。
     var showNowPlaying by remember { mutableStateOf(false) }
-    // 迷你播放条小展开面板开关：展开时 Snackbar 上移让位。
-    var playerExpanded by remember { mutableStateOf(false) }
+    // 底部浮层锚点栈（工单 04）：迷你条实测高度（折叠 64 / 展开时含整个小面板）。
+    // Snackbar 与音量胶囊都锚在「导航栏 inset + 这个高度 + 外边距」，不再用固定 80/320dp 猜。
+    // 首帧还没测到时用 PlayerDockHeight 兜底——它本来就等于折叠态高度，所以看不到跳动。
+    // 这里只声明状态、不在本层读值：展开动画每帧都会刷新它，读点放在浮层小组件内部，
+    // 否则整个主界面会跟着每帧重组。
+    val playerDockHeight = remember { mutableStateOf(Dimens.PlayerDockHeight) }
     // 全屏播放页打开次数编号：作为 NowPlayingScreen 的 key，每次打开强制重建组合，
     // 页内手势状态（dragOffset 等）从零开始，不会被上一次退出残留污染。
     var nowPlayingSession by remember { mutableStateOf(0) }
@@ -1279,7 +1285,7 @@ private fun MusicLibraryScreen(
                 nowPlayingSession++
                 showNowPlaying = true
             },
-            onExpandedChange = { playerExpanded = it },
+            onDockHeightChange = { playerDockHeight.value = it },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
@@ -1288,14 +1294,11 @@ private fun MusicLibraryScreen(
                     vertical = Dimens.FloatingVerticalMargin
                 )
         )
-        // Snackbar 提示（悬浮在播放条上方，显示「已添加到播放队列」反馈）；
-        // 小展开面板展开时上移让位（面板含进度/队列约 320dp 高）。
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 80.dp + if (playerExpanded) 320.dp else 0.dp)
-                .padding(horizontal = Dimens.FloatingHorizontalMargin)
+        // Snackbar 提示：锚在迷你播放条上方（底部浮层栈，工单 04）。
+        // 高度用实测值，小展开面板展开时跟着逐帧上移，不再固定抬 320dp。
+        DockAnchoredSnackbar(
+            dockHeight = playerDockHeight,
+            hostState = snackbarHostState
         )
         // 全屏播放页：盖在所有内容最上层，从底部滑入 / 滑出。
         // session 编号作为 key：下滑手势收起时 dragOffset 停在松手位置不归零（供 exit 从松手处
@@ -1333,40 +1336,39 @@ private fun MusicLibraryScreen(
                 )
             }
         }
-        // 音量浮窗：按音量键时从顶部玻璃岛正下方冒出来的液态玻璃胶囊。
+        // 音量浮窗：按音量键时从**底部**冒出来的液态玻璃胶囊（与 Snackbar 同一个底部锚点栈）。
+        // 曾经挂在顶部玻璃岛下方，多选条一起来就把它完全盖住；移到底部后两者互不遮挡。
         // 声明在全屏播放页**之后** = 压在全屏页之上（全屏页背景不透明，先声明就被它盖住了）；
         // 用 backdrop 采样它下面的内容，所以又必须在记进 backdrop 的那层之外——本层正是。
         // 独占关闭时不会弹：那时音量键根本不进 App（ForegroundVolumeKeys 一律放行给系统）。
-        VolumeFeedbackOverlay(
+        DockAnchoredVolumeFeedback(
+            dockHeight = playerDockHeight,
             state = volumeFeedback,
             backdrop = backdrop,
-            accent = coverAccentAnimated,
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = Dimens.GlassIslandTopSpacing + Dimens.FloatingVerticalMargin)
+            accent = coverAccentAnimated
         )
-        // 多选操作条（工单 05）：玻璃岛正下方悬浮，「全选」只选当前页面的列表。
+        // 多选操作条（工单 04）：固定在玻璃岛下方，材质 / 圆角 / 高度与玻璃岛一致。
+        // 顶部槽位只放导航与选择，底部槽位只放瞬时反馈（Snackbar / 音量胶囊）——互不打架。
         if (state.multiSelectIds.isNotEmpty()) {
-            Surface(
+            GlassPanel(
+                backdrop = backdrop,
+                // 与玻璃岛同 alpha：条下面压着滚动曲库，太透会看不清按钮文字。
+                surface = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .statusBarsPadding()
                     .padding(
                         top = Dimens.GlassIslandTopSpacing + Dimens.FloatingVerticalMargin,
-                        start = 16.dp,
-                        end = 16.dp
-                    ),
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                // 材质 / 锚点的统一归工单 04；这里先补前景色：带 alpha 的 surface 匹配不上
-                // contentColorFor，不显式给就会落回默认黑色，深色主题下整条不可读。
-                contentColor = MaterialTheme.colorScheme.onSurface,
-                tonalElevation = 2.dp,
-                shadowElevation = 8.dp
+                        start = Dimens.FloatingHorizontalMargin,
+                        end = Dimens.FloatingHorizontalMargin
+                    )
+                    .fillMaxWidth()
+                    .height(Dimens.SelectionBarHeight)
             ) {
                 Row(
-                    Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
+                    Modifier
+                        .fillMaxSize()
+                        .padding(start = Dimens.SpaceMedium, end = Dimens.SpaceTiny),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
@@ -1376,15 +1378,20 @@ private fun MusicLibraryScreen(
                     Spacer(Modifier.weight(1f))
                     TextButton(
                         onClick = { viewModel.selectAllTracks(currentListTracks.map { it.id }) },
-                        enabled = currentListTracks.isNotEmpty()
+                        enabled = currentListTracks.isNotEmpty(),
+                        modifier = Modifier.height(Dimens.TouchTargetSmall)
                     ) { Text("全选") }
-                    TextButton(onClick = viewModel::clearMultiSelect) { Text("取消") }
+                    TextButton(
+                        onClick = viewModel::clearMultiSelect,
+                        modifier = Modifier.height(Dimens.TouchTargetSmall)
+                    ) { Text("取消") }
                     TextButton(
                         onClick = {
                             // 同一个确认框：目标换成勾选的全部曲目
                             deleteTarget = currentListTracks.filter { it.id in state.multiSelectIds }
                         },
-                        enabled = state.multiSelectIds.isNotEmpty() && !state.isFileOpsBusy
+                        enabled = state.multiSelectIds.isNotEmpty() && !state.isFileOpsBusy,
+                        modifier = Modifier.height(Dimens.TouchTargetSmall)
                     ) { Text("删除", color = MaterialTheme.colorScheme.error) }
                 }
             }
@@ -1439,6 +1446,61 @@ private fun MusicLibraryScreen(
         },
         onDismissRename = { renameTarget = null },
         onDismissDelete = { deleteTarget = emptyList() }
+    )
+}
+
+/**
+ * 底部浮层栈（工单 04）的公共锚点：导航栏 inset + 播放条高度 + 两段外边距。
+ *
+ * 实测高度只含玻璃条本身（不含它的 8dp 外边距），所以补两次 [Dimens.FloatingVerticalMargin]：
+ * 一次是播放条距屏幕的下边距，一次是浮层与播放条之间的空隙。
+ *
+ * 读 [dockHeight] 发生在调用方（两个浮层小组件）的组合作用域，展开动画不会拖着主界面每帧重组。
+ */
+private fun Modifier.bottomDockAnchor(dockHeight: State<Dp>): Modifier = this
+    // 先躲开导航栏（手势约 24dp、三键约 48dp），再抬到播放条上方；
+    // 固定底距在两种导航模式下会各被挡住一截。
+    .navigationBarsPadding()
+    .padding(bottom = dockHeight.value + Dimens.FloatingVerticalMargin * 2)
+
+/**
+ * 底部浮层栈（工单 04）成员一：Snackbar，锚在迷你播放条上方。
+ *
+ * 播放条高度以 [State] 传入、在这里才读值：小展开面板的展开/收起动画每帧都会刷新它，
+ * 若在 `PulsarApp` 本体里读，整个主界面会跟着每帧重组。
+ */
+@Composable
+private fun BoxScope.DockAnchoredSnackbar(
+    dockHeight: State<Dp>,
+    hostState: SnackbarHostState
+) {
+    SnackbarHost(
+        hostState = hostState,
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .bottomDockAnchor(dockHeight)
+            .padding(horizontal = Dimens.FloatingHorizontalMargin)
+    )
+}
+
+/**
+ * 底部浮层栈（工单 04）成员二：音量胶囊。与 Snackbar 共用锚点，所以多选条占据顶部槽位时
+ * 两者依然同时可见。读 [dockHeight] 的原因同 [DockAnchoredSnackbar]。
+ */
+@Composable
+private fun BoxScope.DockAnchoredVolumeFeedback(
+    dockHeight: State<Dp>,
+    state: VolumeFeedbackState,
+    backdrop: Backdrop,
+    accent: Color
+) {
+    VolumeFeedbackOverlay(
+        state = state,
+        backdrop = backdrop,
+        accent = accent,
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .bottomDockAnchor(dockHeight)
     )
 }
 
@@ -3996,12 +4058,15 @@ private fun MiniPlayerBar(
     sharedTransitionScope: SharedTransitionScope,
     fullScreenOpen: Boolean,
     onOpenFullScreen: () -> Unit = {},
-    onExpandedChange: (Boolean) -> Unit = {},
+    /**
+     * 上报迷你条（含小展开面板）的实测高度：底部浮层栈（Snackbar / 音量胶囊）靠它锚到条上方。
+     * 展开/收起动画期间会逐帧回调，这是预期值——浮层跟着面板一起平滑上移。
+     */
+    onDockHeightChange: (Dp) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // 小展开面板开关：右侧箭头按钮切换；展开/收起变化上报给外部（Snackbar 让位等）。
+    // 小展开面板开关：右侧箭头按钮切换。
     var expanded by remember { mutableStateOf(false) }
-    LaunchedEffect(expanded) { onExpandedChange(expanded) }
     val controller = controllerState.controller
     val hasMedia = controller != null && controllerState.durationMs > 0
     // 进度状态：拖动中显示拖动值，松手才 seek，避免边拖边跳。
@@ -4046,6 +4111,8 @@ private fun MiniPlayerBar(
     val controlView = LocalView.current
     // 可读性表面色：非组合的 onDrawSurface 里不能读 MaterialTheme，先取出来。
     val glassSurface = MaterialTheme.colorScheme.surface
+    // 上报实测高度要把像素换算成 dp。
+    val density = LocalDensity.current
     // 底部细进度线的比例：直接按轮询到的位置/时长算（拖动同步由展开面板的进度条负责）；
     // 时长未知（<=0）整条显示未播色。
     val miniProgressFraction = if (controllerState.durationMs > 0) {
@@ -4058,7 +4125,13 @@ private fun MiniPlayerBar(
     GlassPanel(
         backdrop = backdrop,
         surface = glassSurface.copy(alpha = 0.55f),
-        modifier = modifier.fillMaxWidth()
+        modifier = modifier
+            .fillMaxWidth()
+            // 实测高度（像素 → dp）：折叠态是整个条，展开态连小面板一起算，
+            // 所以底部浮层栈不用知道面板里有什么、有没有展开，跟着这个数走即可。
+            .onGloballyPositioned { coordinates ->
+                onDockHeightChange(with(density) { coordinates.size.height.toDp() })
+            }
     ) {
         Column {
             // 迷你条（始终可见）

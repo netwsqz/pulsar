@@ -51,6 +51,9 @@ internal object Dimens {
     /** 迷你播放条折叠态高度。浮层锚点栈（工单 04）首帧拿不到实测高度时用它兜底。 */
     val PlayerDockHeight = 64.dp
 
+    /** 多选操作条高度：规格 §2 要求与玻璃岛同高，所以直接跟随岛高，不另写数字。 */
+    val SelectionBarHeight = GlassIslandHeight
+
     /** 迷你播放条封面尺寸。 */
     val PlayerDockCover = 40.dp
 

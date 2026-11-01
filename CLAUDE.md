@@ -140,6 +140,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 - **`AlbumCover`**：Coil `AsyncImage`，`ImageRequest.Builder` 手动 `addHeader("Authorization", ...)`（从 `JellyfinRequest.headers` 取），`ColorPainter` 做 placeholder/error。
 - **`PlayerControls`** / `rememberMediaController`：播放控制与控制器状态轮询（500ms）。
 - **多选**：`JellyfinUiState.multiSelectIds`（空 = 非多选）。非空时 `TrackRow` 点击 = 勾选、顶部出现批量操作条。多选模式下隐藏行尾「更多」按钮。
+- **浮层锚点栈**：顶部槽位只放导航与选择（玻璃岛、多选条），底部槽位只放瞬时反馈（Snackbar、音量胶囊）。Snackbar 与音量胶囊共用 `Modifier.bottomDockAnchor`（导航栏 inset + 迷你条实测高度 + 外边距）；迷你条用 `onGloballyPositioned` 上报高度（展开面板自然计入），首帧用 `PlayerDockHeight` 兜底。多选条固定在玻璃岛下方、走 `GlassPanel`。**不要再写固定底距（80/320dp 那类）。**
 
 ### QQ 音乐下载集成 `server/` + `data/qqdownload/`
 

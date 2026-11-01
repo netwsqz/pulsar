@@ -63,6 +63,9 @@ internal object Dimens {
     /** 队列行的最小高度（触摸目标，工单 05 消费）。 */
     val QueueRowMinHeight = 48.dp
 
+    /** 展开面板里播放队列列表的最大高度：队列再长也只占固定高度，其余靠列表自己滚。 */
+    val QueueListMaxHeight = 240.dp
+
     /** 长按菜单的安全区与内容内边距（阴影需要同宽的安全区，两处共用这一个值）。 */
     val MenuEdgePadding = 16.dp
 

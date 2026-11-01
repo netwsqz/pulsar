@@ -132,8 +132,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material.icons.filled.SkipNext
-import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
@@ -4022,7 +4020,8 @@ private fun MiniPlayerCover(
 ) {
     Box(Modifier.size(Dimens.PlayerDockCover)) {
         if (track == null) {
-            Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant))
+            // 空态直接复用 AlbumCover 的空占位（8dp 圆角 + 阴影），不再是一个直角灰块。
+            AlbumCover(request = null, contentDescription = null, modifier = Modifier.fillMaxSize())
         } else {
             AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
                 val coverScope = this
@@ -4043,7 +4042,7 @@ private fun MiniPlayerCover(
     }
 }
 
-/** 底部播放浮岛：折叠时显示封面 + 歌名 + 播放/暂停 + 下一首；点整条打开全屏播放页，右侧箭头切换小展开面板。 */
+/** 底部播放浮岛：折叠时只显示封面 + 歌名/歌手 + 播放/暂停 + 展开（切歌走整条横滑或全屏页）；点整条打开全屏播放页，右侧箭头切换小展开面板。 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MiniPlayerBar(
@@ -4068,7 +4067,12 @@ private fun MiniPlayerBar(
     // 小展开面板开关：右侧箭头按钮切换。
     var expanded by remember { mutableStateOf(false) }
     val controller = controllerState.controller
-    val hasMedia = controller != null && controllerState.durationMs > 0
+    // 播放/暂停：有媒体项（队列非空）才可用。队列为空时按钮置灰、点了没反应。
+    // 不用 durationMs > 0 判断——刚起播、时长还没上报时按钮会先灰一下。
+    // 队列快照在轮询与 onMediaItemTransition 两处刷新，点歌后按钮立刻可用。
+    val hasMedia = controller != null && controllerState.queue.isNotEmpty()
+    // 进度条额外要求已知时长，否则 valueRange 没有意义。
+    val canSeek = hasMedia && controllerState.durationMs > 0
     // 进度状态：拖动中显示拖动值，松手才 seek，避免边拖边跳。
     val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
     var sliderPosition by remember { mutableStateOf(0f) }
@@ -4165,7 +4169,10 @@ private fun MiniPlayerBar(
                             onDragCancel = { accumulatedDrag = 0f }
                         )
                     }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(
+                        horizontal = Dimens.SpaceMidMedium,
+                        vertical = Dimens.SpaceSmall
+                    ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // 专辑封面：与全屏页大封面同 key 的 sharedBounds，打开/收起时跨布局飞行。
@@ -4176,7 +4183,7 @@ private fun MiniPlayerBar(
                     sharedTransitionScope = sharedTransitionScope,
                     visible = !fullScreenOpen
                 )
-                Spacer(Modifier.width(12.dp))
+                Spacer(Modifier.width(Dimens.SpaceMidMedium))
                 // 歌名 · 歌手
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -4203,47 +4210,39 @@ private fun MiniPlayerBar(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                // 上一首
-                IconButton(
-                    onClick = {
-                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        controller?.seekToPrevious()
-                    },
-                    enabled = controller != null,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(Icons.Filled.SkipPrevious, contentDescription = "播放上一首歌曲")
-                }
-                // 播放/暂停
-                IconButton(
-                    onClick = {
-                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        controller?.let { if (it.isPlaying) it.pause() else it.play() }
-                    },
-                    enabled = controller != null,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        if (controllerState.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = if (controllerState.isPlaying) "暂停播放" else "开始播放"
-                    )
-                }
-                // 下一首
-                IconButton(
-                    onClick = {
-                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        controller?.seekToNext()
-                    },
-                    enabled = controller != null,
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(Icons.Filled.SkipNext, contentDescription = "播放下一首歌曲")
+                // 折叠态只留播放/暂停与展开：上一首/下一首走全屏页或整条横滑手势（见上方 pointerInput）。
+                // 播放/暂停：没有媒体项时置灰，点击无反应。
+                // 禁用按钮自己**不消费**点击，会漏给整条（打开全屏页）；无媒体时盖一层透明热区
+                // 把点击吃掉，保证「点了确实没反应」。
+                Box {
+                    IconButton(
+                        onClick = {
+                            controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            controller?.let { if (it.isPlaying) it.pause() else it.play() }
+                        },
+                        enabled = hasMedia,
+                        modifier = Modifier.size(Dimens.TouchTargetSmall)
+                    ) {
+                        Icon(
+                            if (controllerState.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (controllerState.isPlaying) "暂停播放" else "开始播放"
+                        )
+                    }
+                    if (!hasMedia) {
+                        Box(
+                            Modifier
+                                .matchParentSize()
+                                .pointerInput(Unit) {
+                                    awaitEachGesture { awaitFirstDown().consume() }
+                                }
+                        )
+                    }
                 }
                 // 展开/收起小面板（more = 展开更多内容，less = 收起更少内容）；进全屏页走点整条或面板里的全屏按钮
                 IconButton(
                     onClick = { expanded = !expanded },
                     enabled = controller != null,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(Dimens.TouchTargetSmall)
                 ) {
                     Icon(
                         if (expanded) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
@@ -4265,10 +4264,10 @@ private fun MiniPlayerBar(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = Dimens.SpaceMedium, vertical = Dimens.SpaceSmall)
                         // 面板内容（含播放队列）超出屏幕时整体可滚动，避免底部浮岛被裁掉。
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                 ) {
                     // 进度条 + 时间：与全屏播放页同款液态玻璃胶囊（采样同一个 backdrop，
                     // 玻璃条后面就是曲库内容），配色走「浅色玻璃条」预设。
@@ -4289,7 +4288,7 @@ private fun MiniPlayerBar(
                         onValueChangeCancelled = { isDragging = false },
                         valueRange = 0f..durationSec,
                         backdrop = backdrop,
-                        enabled = hasMedia,
+                        enabled = canSeek,
                         colors = glassBarSliderColors(accentColor),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -4305,7 +4304,7 @@ private fun MiniPlayerBar(
                         IconButton(
                             onClick = { onPlaybackModeChange(playbackMode.next()) },
                             enabled = controller != null,
-                            modifier = Modifier.size(48.dp)
+                            modifier = Modifier.size(Dimens.TouchTargetSmall)
                         ) {
                             Icon(
                                 playbackModeIcon(playbackMode),
@@ -4316,7 +4315,7 @@ private fun MiniPlayerBar(
                     }
                     // 输出信息：走 USB 小尾巴还是系统默认 + 当前采样率 + 位深。
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        modifier = Modifier.fillMaxWidth().padding(top = Dimens.SpaceTiny),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -4333,14 +4332,16 @@ private fun MiniPlayerBar(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(top = 8.dp)
-                            .clickable { queueExpanded = !queueExpanded }
-                            .padding(vertical = 4.dp),
+                            .padding(top = Dimens.SpaceSmall)
+                            // 整行可点，热区至少 48dp；内边距不再决定热区大小。
+                            .heightIn(min = Dimens.QueueRowMinHeight)
+                            .clickable { queueExpanded = !queueExpanded },
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = "播放队列（${queue.size} 首）",
-                            style = MaterialTheme.typography.titleSmall,
+                            // 分区标题用 titleMedium（SemiBold），与队列项的 titleSmall 拉开字号/字重层级。
+                            style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.weight(1f)
                         )
                         Icon(
@@ -4368,7 +4369,7 @@ private fun MiniPlayerBar(
                                 state = lazyListState,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 240.dp)
+                                    .heightIn(max = Dimens.QueueListMaxHeight)
                                     .wrapContentHeight()
                             ) {
                                 items(queue, key = { it.id }) { item ->
@@ -4376,6 +4377,8 @@ private fun MiniPlayerBar(
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
+                                                // 队列行也是触摸目标：整行至少 48dp 可点。
+                                                .heightIn(min = Dimens.QueueRowMinHeight)
                                                 .background(
                                                     if (dragging) MaterialTheme.colorScheme.secondaryContainer
                                                     else Color.Transparent,
@@ -4394,7 +4397,7 @@ private fun MiniPlayerBar(
                                                     controller?.seekToDefaultPosition(index)
                                                     controller?.play()
                                                 }
-                                                .padding(vertical = 4.dp),
+                                                .padding(vertical = Dimens.SpaceTiny),
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Box(
@@ -4432,7 +4435,7 @@ private fun MiniPlayerBar(
                                                     controller?.removeMediaItem(queue.indexOfFirst { it.id == item.id })
                                                 },
                                                 enabled = controller != null,
-                                                modifier = Modifier.size(40.dp)
+                                                modifier = Modifier.size(Dimens.TouchTargetSmall)
                                             ) {
                                                 Icon(Icons.Filled.Close, contentDescription = "从队列中移除此歌曲", Modifier.size(16.dp))
                                             }
@@ -4457,7 +4460,7 @@ private fun MiniPlayerBar(
                 .fillMaxWidth()
                 .height(3.dp)
                 // 玻璃条是 20dp 圆角，不裁剪的话进度线两端会悬出圆角外，这里用同款底圆角收边。
-                .clip(RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp))
+                .clip(RoundedCornerShape(bottomStart = Dimens.CornerExtraLarge, bottomEnd = Dimens.CornerExtraLarge))
                 .background(miniTrackColor.copy(alpha = 0.22f))
         ) {
             if (miniProgressFraction > 0f) {
@@ -4690,6 +4693,9 @@ private fun rememberMediaController(
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                     playbackError = null
                     status = controllerStatus(current, playbackError)
+                    // 队列快照同步刷新：播放键的可用性（队列是否为空）与队列面板不能等下一轮
+                    // 500ms 轮询才更新，否则点歌后的第一拍按钮还是灰的。
+                    queue = current.queueSnapshot()
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {

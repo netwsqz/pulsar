@@ -121,7 +121,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 **页面级 Composable 集中在 `MainActivity.kt`（约 4400 行）**；`NowPlayingScreen.kt`（播放页）与 `QQDownloadScreen.kt` 是独立文件。**主题、设计 token、通用组件、领域模型已拆分**：
 
 - `ui/theme/Dimens.kt`：**全局设计 token 的唯一出处**（间距 4/8/12/16/20/24、触摸目标 48/56/64、圆角 16/20）。新 UI 一律取这里的常量，不写魔法 dp。数值量纲参考 Auxio，但**不是抄代码**（见 ADR-0004）。
-- `ui/components/LiquidGlass.kt`：**液态玻璃材质的唯一出处**（`liquidGlass` Modifier：模糊 + 透镜 + 高光）。全 App 的玻璃面都走它，别再各写各的模糊/透镜数字。
+- `ui/components/LiquidGlass.kt`：**液态玻璃材质的唯一出处**（`liquidGlass` Modifier：模糊 + 透镜 + 高光）。**玻璃面统一走 `GlassPanel`**——它先把前景色提供成 `onSurface` 再套 `liquidGlass`，不要再直接调 `liquidGlass` 或各写各的模糊/透镜数字。全屏播放页 `NowPlayingScreen` 的两处圆钮是已知例外（spec 明确不做那一页）。
 - `ui/components/`：`LiquidGlassSlider`、`SurfaceCard`、`VolumeFeedback` / `VolumeFeedbackOverlay` 等可复用组件。
 - `ui/theme/CoverPalette.kt` + `CoverTheme.kt`：**按专辑封面取色**染主题（Pulsar 的特色，不是 Auxio 的做法）。取色失败回退默认渐变。
 - `ui/theme/ThemePalette.kt`（工单 10 起）：**种子色 → 完整 M3 ColorScheme** 的纯函数推导。主题色板由当前播放封面的鲜艳色推导，手动预设色只做兜底（见 ADR-0005）。**不要引入 `material-color-utilities` 系依赖**——material3 1.4.0 没有公开的种子色 API，第三方坐标要么要求 Gradle 9.8、要么是 JVM 21 变体。

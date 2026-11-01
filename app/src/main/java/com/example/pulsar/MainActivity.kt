@@ -6,6 +6,8 @@ import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import com.example.pulsar.ui.components.GlassPanel
 import com.example.pulsar.ui.components.LiquidGlassSlider
+import com.example.pulsar.ui.components.MediaRowLayout
+import com.example.pulsar.ui.components.MediaRowText
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.components.VolumeFeedback
 import com.example.pulsar.ui.components.VolumeFeedbackOverlay
@@ -388,8 +390,10 @@ private fun ErrorState(
     modifier: Modifier = Modifier,
     onRetry: (() -> Unit)? = null
 ) {
+    // 撑满宽度 + 居中：空态/错误态在 LazyColumn item 里也要从一侧到另一侧居中，
+    // 不能只在自身固有宽度里居中（spec §5）。调用方不用再各自传 fillMaxWidth。
     Column(
-        modifier = modifier.padding(Dimens.SpaceMedium),
+        modifier = modifier.fillMaxWidth().padding(Dimens.SpaceMedium),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
@@ -402,7 +406,7 @@ private fun ErrorState(
         Text(
             text = message,
             color = MaterialTheme.colorScheme.error,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            textAlign = TextAlign.Center
         )
         onRetry?.let { retry ->
             TextButton(onClick = retry) { Text("重新加载") }
@@ -416,7 +420,7 @@ private fun EmptyState(
     modifier: Modifier = Modifier
 ) {
     Column(
-        modifier = modifier.padding(Dimens.SpaceMedium),
+        modifier = modifier.fillMaxWidth().padding(Dimens.SpaceMedium),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
@@ -428,16 +432,18 @@ private fun EmptyState(
         )
         Text(
             text = message,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
         )
     }
 }
-/** 离线过滤生效时标题下的一行小字（ADR-0008）：解释歌为什么变少了。 */
+/** 离线过滤生效时标题下的一行小字（ADR-0008）：解释歌为什么变少了。
+ * 字号跟行内歌手副标题一致（bodySmall）——离线提示比副标题还小就看不清（spec §11）。 */
 @Composable
 private fun OfflineNoticeText(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = modifier
     )
@@ -638,8 +644,8 @@ private fun SkeletonBox(
 private fun cardBorderColor(): Color =
     MaterialTheme.colorScheme.onSurface.copy(alpha = if (isSystemInDarkTheme()) 0.10f else 0.08f)
 
-/** 曲目列表的灰色波浪骨架：与 [TrackRow] 同款排布（48dp 圆角封面 + 标题/作者两条灰条
- * + 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
+/** 曲目列表的灰色波浪骨架：与 [TrackRow] 共用 [MediaRowLayout]（48/12/48 槽位 + 8dp 内边距 +
+ * 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
  * "这个页面正在加载"，而不是一片空白或"暂无内容"的空态文案。
  * [trailingSpace] 为 true 时给行尾「更多」按钮留出同样的 48dp 位——歌曲页 / 发现页的
  * 真实行有该按钮，不留位加载完文字列会突然变窄；播放列表等无按钮的列表传 false。 */
@@ -652,32 +658,26 @@ private fun TrackListSkeleton(
     val shimmer = rememberSkeletonShimmer()
     // 8dp / 4dp 是组件自身尺寸（与 AlbumCover 默认圆角、灰条圆角一致），按工单 01 约定不进 Dimens。
     val coverShape = RoundedCornerShape(8.dp)
+    val trailingSlot: (@Composable () -> Unit)? = if (trailingSpace) ({ }) else null
     Column(modifier) {
         repeat(count) { index ->
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceSmall),
-                verticalAlignment = Alignment.CenterVertically
+            MediaRowLayout(
+                leading = {
+                    SkeletonBox(Modifier.size(Dimens.TouchTargetSmall).clip(coverShape), progress = shimmer)
+                },
+                trailing = trailingSlot,
+                showDivider = index != count - 1
             ) {
-                SkeletonBox(Modifier.size(Dimens.TouchTargetSmall).clip(coverShape), progress = shimmer)
-                Spacer(Modifier.width(Dimens.SpaceMidMedium))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
-                    SkeletonBox(
-                        Modifier.fillMaxWidth(0.55f).height(14.dp),
-                        progress = shimmer,
-                        shape = RoundedCornerShape(4.dp)
-                    )
-                    SkeletonBox(
-                        Modifier.fillMaxWidth(0.35f).height(11.dp),
-                        progress = shimmer,
-                        shape = RoundedCornerShape(4.dp)
-                    )
-                }
-                if (trailingSpace) Spacer(Modifier.width(Dimens.TouchTargetSmall))
-            }
-            if (index != count - 1) {
-                HorizontalDivider(
-                    modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
-                    color = MaterialTheme.colorScheme.outlineVariant
+                SkeletonBox(
+                    Modifier.fillMaxWidth(0.55f).height(14.dp),
+                    progress = shimmer,
+                    shape = RoundedCornerShape(4.dp)
+                )
+                Spacer(Modifier.height(Dimens.SpaceTiny))
+                SkeletonBox(
+                    Modifier.fillMaxWidth(0.35f).height(11.dp),
+                    progress = shimmer,
+                    shape = RoundedCornerShape(4.dp)
                 )
             }
         }
@@ -1087,6 +1087,7 @@ private fun MusicLibraryScreen(
                     LibrarySection.Tracks -> TracksContent(
                         state = state,
                         tracks = tracks,
+                        title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
                         controllerState = controllerState,
                         coverFor = viewModel::trackCover,
@@ -1683,6 +1684,7 @@ private fun glassChipBorder() = BorderStroke(
 private fun TracksContent(
     state: JellyfinUiState,
     tracks: List<Track>,
+    title: String,
     offlineNotice: String?,
     controllerState: ControllerState,
     coverFor: (Track) -> JellyfinRequest?,
@@ -1705,7 +1707,8 @@ private fun TracksContent(
         ),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
-        item { Text("你的音乐", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
+        // 标题和顶部页签同一出处（TopLevelSections），不再写「你的音乐」（spec §11）。
+        item { Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
         offlineNotice?.let { notice ->
             item { OfflineNoticeText(notice) }
         }
@@ -1795,128 +1798,126 @@ private fun TrackRow(
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
     var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     val multiSelect = LocalMultiSelect.current
+    val multiSelectActive = multiSelect?.active == true
+    // 分隔线起点跟着实际前槽走（spec §5）：多选 = 勾选框 48 + 4 + 封面 48 + 12 = 112dp，
+    // 从文字左缘开始、不穿过勾选框；无多选 / 序号槽 = 48 + 12 = 60dp，从封面右缘开始。
+    val leadingWidth = if (multiSelectActive) {
+        Dimens.TouchTargetSmall + Dimens.SpaceTiny + Dimens.TouchTargetSmall
+    } else {
+        Dimens.TouchTargetSmall
+    }
     // 长按与「更多」按钮共用同一个菜单，锚点不同而已。
     fun openMenuAt(point: IntOffset) {
         menuOffset = point
         showMenu = true
     }
-    Column(modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
-                .combinedClickable(
-                    // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）。
-                    onClick = {
-                        if (multiSelect?.active == true) multiSelect.onToggle(track.id) else onClick()
-                    },
-                    onLongClick = {
-                        // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
-                        val windowOffset = rowWindowOffset + lastDownOffset
-                        openMenuAt(IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt()))
-                    }
-                )
-                // 轻量触点观察：只记下最近一次按下的局部坐标，不消费事件，不干扰 combinedClickable 的手势判定。
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        lastDownOffset = down.position
-                    }
-                }
-                .onGloballyPositioned { coordinates ->
-                    rowWindowOffset = coordinates.positionInWindow()
-                    rowSize = coordinates.size
-                }
-                .padding(vertical = Dimens.SpaceSmall),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // 多选模式：行首勾选框只做指示，勾选动作在整行点击上。
-            if (multiSelect?.active == true) {
-                Checkbox(
-                    checked = track.id in multiSelect.selected,
-                    onCheckedChange = null
-                )
-                Spacer(Modifier.width(Dimens.SpaceTiny))
-            }
-            if (leadingNumber != null) {
-                // 专辑详情：序号列与下方封面槽同高，右对齐贴着标题（Apple Music 的曲目行）。
-                // 末尾留 8dp：序号往左收一点，不顶死在标题前。
-                Box(
-                    Modifier.size(Dimens.TouchTargetSmall).padding(end = Dimens.SpaceSmall),
-                    contentAlignment = Alignment.CenterEnd
-                ) {
-                    Text(
-                        "$leadingNumber",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (isCurrent) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        }
-                    )
-                }
-            } else {
-                Box {
-                    AlbumCover(cover, track.title, Modifier.size(Dimens.TouchTargetSmall))
-                    // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
-                    // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
-                    if (isCurrent) {
-                        PlayingIndicatorOverlay(
-                            isPlaying = isPlaying,
-                            modifier = Modifier
-                                .matchParentSize()
-                                .clip(RoundedCornerShape(8.dp)) // 与 AlbumCover 默认圆角一致
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.width(Dimens.SpaceMidMedium))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    track.title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致。
-                    color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    track.artist,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+    val trailingSlot: (@Composable () -> Unit)? = if (onAddToQueue != null && !multiSelectActive) {
+        {
             // Auxio 列表项的「更多」按钮：与长按弹同一个菜单（工单 05）。
             // 锚点取行右端中部，菜单照样贴着按钮弹；多选模式下整行是勾选语义，不显示。
-            if (onAddToQueue != null && multiSelect?.active != true) {
-                IconButton(
-                    onClick = {
-                        openMenuAt(
-                            IntOffset(
-                                rowWindowOffset.x.toInt() + rowSize.width,
-                                rowWindowOffset.y.toInt() + rowSize.height / 2
-                            )
+            IconButton(
+                onClick = {
+                    openMenuAt(
+                        IntOffset(
+                            rowWindowOffset.x.toInt() + rowSize.width,
+                            rowWindowOffset.y.toInt() + rowSize.height / 2
                         )
-                    },
-                    modifier = Modifier.size(Dimens.TouchTargetSmall)
-                ) {
-                    Icon(
-                        Icons.Filled.MoreVert,
-                        contentDescription = "更多操作：${track.title}",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
+                },
+                modifier = Modifier.size(Dimens.TouchTargetSmall)
+            ) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = "更多操作：${track.title}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
-        // 分隔线从封面右缘开始：封面下方不画线，行之间更干净。
-        if (showDivider) {
-            HorizontalDivider(
-                modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
-                color = MaterialTheme.colorScheme.outlineVariant
+    } else {
+        null
+    }
+    MediaRowLayout(
+        modifier = modifier,
+        rowModifier = Modifier
+            // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
+            .combinedClickable(
+                // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）。
+                onClick = {
+                    if (multiSelectActive) multiSelect?.onToggle(track.id) else onClick()
+                },
+                onLongClick = {
+                    // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
+                    val windowOffset = rowWindowOffset + lastDownOffset
+                    openMenuAt(IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt()))
+                }
             )
-        }
+            // 轻量触点观察：只记下最近一次按下的局部坐标，不消费事件，不干扰 combinedClickable 的手势判定。
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    lastDownOffset = down.position
+                }
+            }
+            .onGloballyPositioned { coordinates ->
+                rowWindowOffset = coordinates.positionInWindow()
+                rowSize = coordinates.size
+            },
+        leadingWidth = leadingWidth,
+        showDivider = showDivider,
+        leading = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 多选模式：行首勾选框只做指示，勾选动作在整行点击上。
+                // 显式给 48dp：勾选框热区（也是分隔线与文字列的对齐基准）不小于触摸目标。
+                if (multiSelectActive) {
+                    Checkbox(
+                        checked = multiSelect?.selected?.contains(track.id) == true,
+                        onCheckedChange = null,
+                        modifier = Modifier.size(Dimens.TouchTargetSmall)
+                    )
+                    Spacer(Modifier.width(Dimens.SpaceTiny))
+                }
+                if (leadingNumber != null) {
+                    // 专辑详情：序号列与下方封面槽同高，右对齐贴着标题（Apple Music 的曲目行）。
+                    // 末尾留 8dp：序号往左收一点，不顶死在标题前。
+                    Box(
+                        Modifier.size(Dimens.TouchTargetSmall).padding(end = Dimens.SpaceSmall),
+                        contentAlignment = Alignment.CenterEnd
+                    ) {
+                        Text(
+                            "$leadingNumber",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (isCurrent) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+                } else {
+                    Box {
+                        AlbumCover(cover, track.title, Modifier.size(Dimens.TouchTargetSmall))
+                        // 正在播放指示：封面叠一层淡深色遮罩，浅色封面上均衡器条也看得清。
+                        // 遮罩必须跟着封面一起裁圆角——matchParentSize 是方块，不裁四角会盖到封面圆角外面。
+                        if (isCurrent) {
+                            PlayingIndicatorOverlay(
+                                isPlaying = isPlaying,
+                                modifier = Modifier
+                                    .matchParentSize()
+                                    .clip(RoundedCornerShape(8.dp)) // 与 AlbumCover 默认圆角一致
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        trailing = trailingSlot
+    ) {
+        MediaRowText(
+            title = track.title,
+            subtitle = track.artist,
+            // 当前曲目标题用品牌色，与播放队列面板的高亮风格一致。
+            titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified
+        )
     }
     // 长按弹出菜单：Popup 作为独立窗口渲染，动画在菜单内容上的 graphicsLayer 进行。
     if (showMenu) {
@@ -3291,7 +3292,8 @@ private fun SearchSectionHeader(title: String) {
     )
 }
 
-/** 搜索结果里的专辑 / 播放列表行：小封面 + 名称 + 副标题，点击进详情；视觉与 TrackRow 保持一致。 */
+/** 搜索结果里的专辑 / 播放列表行（艺术家列表也用它）：和 [TrackRow] 共用 [MediaRowLayout]
+ * 的槽位与分隔线基准，标题/副标题走 [MediaRowText]（工单 07）。 */
 @Composable
 private fun SearchResultRow(
     cover: JellyfinRequest?,
@@ -3301,38 +3303,13 @@ private fun SearchResultRow(
     showDivider: Boolean,
     modifier: Modifier = Modifier
 ) {
-    Column(modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(vertical = Dimens.SpaceSmall),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            AlbumCover(cover, title, Modifier.size(Dimens.TouchTargetSmall))
-            Spacer(Modifier.width(Dimens.SpaceMidMedium))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    title,
-                    style = MaterialTheme.typography.bodyLarge,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-        if (showDivider) {
-            HorizontalDivider(
-                modifier = Modifier.padding(start = Dimens.TouchTargetSmall + Dimens.SpaceMidMedium),
-                color = MaterialTheme.colorScheme.outlineVariant
-            )
-        }
+    MediaRowLayout(
+        modifier = modifier,
+        rowModifier = Modifier.clickable(onClick = onClick),
+        showDivider = showDivider,
+        leading = { AlbumCover(cover, title, Modifier.size(Dimens.TouchTargetSmall)) }
+    ) {
+        MediaRowText(title = title, subtitle = subtitle)
     }
 }
 

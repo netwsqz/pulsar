@@ -63,6 +63,12 @@ internal object Dimens {
     /** 队列行的最小高度（触摸目标，工单 05 消费）。 */
     val QueueRowMinHeight = 48.dp
 
+    /**
+     * 列表行最小高度（spec §5）：前槽 48 + 上下各 8dp 内边距。
+     * 歌曲 / 搜索 / 播放列表 / 艺术家行和骨架共用，保证加载完成行高不跳。
+     */
+    val MediaRowMinHeight = 64.dp
+
     /** 展开面板里播放队列列表的最大高度：队列再长也只占固定高度，其余靠列表自己滚。 */
     val QueueListMaxHeight = 240.dp
 

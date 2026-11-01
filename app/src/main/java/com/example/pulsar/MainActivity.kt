@@ -119,7 +119,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fullscreen
@@ -130,12 +129,12 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
@@ -1503,9 +1502,14 @@ private fun BoxScope.DockAnchoredVolumeFeedback(
 }
 
 /**
- * 顶部玻璃岛：悬浮的液态玻璃面板（与播放条同款：四角圆角 + 模糊 + 透镜 + 高光），
- * 装「发现 / 歌曲 / 专辑 / 艺术家 / 播放列表」与搜索 / 设置 / 退出按钮。
- * chip 分组可横向滑动（分区多了会挤不下），滑动区域两侧有渐变提示，选中项切换时自动滚入可见区。
+ * 顶部玻璃岛（工单 06）：悬浮的液态玻璃面板（与播放条同款：四角圆角 + 模糊 + 透镜 + 高光）。
+ *
+ * 三段式布局，从左到右：搜索（48dp）→ 可横滑页签（`weight(1f)`）→「更多」（48dp）。
+ * 页签顺序与文案只由 [TopLevelSections] 决定，不在这里写死；超出宽度可横向滑动，
+ * 选中项切换时自动滚入可见区，两侧渐变提示「还能划」。
+ *
+ * 设置 / 退出登录收进「更多」菜单，不再和页签抢宽度；退出登录先弹确认，取消即保持登录。
+ * 已下载列表与 QQ 音乐导入仍从设置页进入（ADR-0006 / ADR-0007），不另开全局入口。
  */
 @Composable
 private fun GlassChipBar(
@@ -1526,6 +1530,9 @@ private fun GlassChipBar(
     LaunchedEffect(selectedIndex) {
         if (selectedIndex in requesters.indices) requesters[selectedIndex].bringIntoView()
     }
+    // 「更多」菜单与退出确认：确认前不碰会话，取消 = 什么都没发生。
+    var moreMenuExpanded by remember { mutableStateOf(false) }
+    var confirmSignOut by remember { mutableStateOf(false) }
     // 玻璃面前景色由 GlassPanel 统一提供（onSurface）：深色主题下 chip 图标不再是默认黑。
     // 选中 chip 的 onPrimary 标签由 glassChipColors 显式设置，不受影响。
     GlassPanel(
@@ -1541,7 +1548,22 @@ private fun GlassChipBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
         ) {
-            // chip 分组可横向滑动的区域：两侧叠加渐变遮罩提示"还能划"，避免用户以为只有这几个按钮。
+            // 左：搜索。放大镜图标，进入搜索页时高亮为品牌色。
+            IconButton(
+                onClick = onShowSearch,
+                modifier = Modifier.size(Dimens.TouchTargetSmall)
+            ) {
+                Icon(
+                    Icons.Filled.Search,
+                    contentDescription = "搜索音乐",
+                    tint = if (section == LibrarySection.Search) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        LocalContentColor.current
+                    }
+                )
+            }
+            // 中：chip 分组可横向滑动的区域：两侧叠加渐变遮罩提示"还能划"，避免用户以为只有这几个按钮。
             Box(Modifier.weight(1f).fillMaxHeight()) {
                 Row(
                     modifier = Modifier
@@ -1591,42 +1613,51 @@ private fun GlassChipBar(
                     )
                 }
             }
-            // 搜索：放大镜图标，进入搜索页时高亮为品牌色。
-            IconButton(
-                onClick = onShowSearch,
-                modifier = Modifier.size(Dimens.TouchTargetSmall)
-            ) {
-                Icon(
-                    Icons.Filled.Search,
-                    contentDescription = "搜索音乐",
-                    tint = if (section == LibrarySection.Search) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        LocalContentColor.current
-                    }
-                )
-            }
-            IconButton(
-                onClick = onShowSettings,
-                modifier = Modifier.size(Dimens.TouchTargetSmall)
-            ) {
-                Icon(
-                    Icons.Filled.Settings,
-                    contentDescription = "设置",
-                    tint = if (section == LibrarySection.Settings) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        LocalContentColor.current
-                    }
-                )
-            }
-            IconButton(
-                onClick = onSignOut,
-                modifier = Modifier.size(Dimens.TouchTargetSmall)
-            ) {
-                Icon(Icons.Filled.ExitToApp, contentDescription = "退出登录")
+            // 右：「更多」。只收设置和退出登录；菜单项先关菜单再动作，避免菜单盖在新页面上。
+            Box {
+                IconButton(
+                    onClick = { moreMenuExpanded = true },
+                    modifier = Modifier.size(Dimens.TouchTargetSmall)
+                ) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "更多")
+                }
+                DropdownMenu(
+                    expanded = moreMenuExpanded,
+                    onDismissRequest = { moreMenuExpanded = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("设置") },
+                        onClick = {
+                            moreMenuExpanded = false
+                            onShowSettings()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("退出登录") },
+                        onClick = {
+                            moreMenuExpanded = false
+                            confirmSignOut = true
+                        }
+                    )
+                }
             }
         }
+    }
+    if (confirmSignOut) {
+        AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            title = { Text("退出登录？") },
+            text = { Text("退出后需要重新登录。已下载的歌曲会保留在手机上。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmSignOut = false
+                    onSignOut()
+                }) { Text("退出登录") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSignOut = false }) { Text("取消") }
+            }
+        )
     }
 }
 

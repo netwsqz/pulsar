@@ -631,8 +631,9 @@ private fun cardBorderColor(): Color =
 /** 曲目列表的灰色波浪骨架：与 [TrackRow] 共用 [MediaRowLayout]（48/12/48 槽位 + 8dp 内边距 +
  * 从封面右缘起的分隔线），共用一份扫光进度。会话恢复期间用它填满列表，视觉上是
  * "这个页面正在加载"，而不是一片空白或"暂无内容"的空态文案。
- * [trailingSpace] 为 true 时给行尾「更多」按钮留出同样的 48dp 位——歌曲页 / 发现页的
- * 真实行有该按钮，不留位加载完文字列会突然变窄；播放列表等无按钮的列表传 false。 */
+ * [trailingSpace] 为 true 时给行尾「更多」按钮留出同样的 48dp 位——歌曲页 / 发现页 /
+ * 播放列表详情的真实行有该按钮，不留位加载完文字列会突然变窄；播放列表列表页（行尾无按钮）
+ * 传 false。 */
 @Composable
 private fun TrackListSkeleton(
     count: Int = 6,
@@ -1178,7 +1179,8 @@ private fun MusicLibraryScreen(
                         state = state,
                         playlist = s.playlist,
                         playlistTracks = visible.playlistTracks,
-                        hideDownloadButton = state.isOffline,
+                        isOffline = state.isOffline,
+                        offlineNotice = offlineNotice,
                         coverFor = viewModel::trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
@@ -2847,37 +2849,6 @@ private fun AlbumsContent(
     }
 }
 
-/** 专辑/播放列表详情页加载骨架：复刻真实头部结构（120dp 封面方块 + 右侧两根文字条），
- * 下方 6 个与 TrackRow 同构的占位行（48dp 方块 + 两根文字条）。专辑与播放列表详情共用。 */
-@Composable
-private fun AlbumDetailSkeleton(modifier: Modifier = Modifier) {
-    val shimmer = rememberSkeletonShimmer()
-    Column(modifier.fillMaxSize()) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            SkeletonBox(Modifier.size(120.dp), progress = shimmer, shape = RoundedCornerShape(8.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SkeletonBox(Modifier.fillMaxWidth(0.7f).height(16.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
-                SkeletonBox(Modifier.fillMaxWidth(0.5f).height(14.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
-            }
-        }
-        Column(Modifier.padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            repeat(6) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    SkeletonBox(Modifier.size(48.dp), progress = shimmer, shape = RoundedCornerShape(8.dp))
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        SkeletonBox(Modifier.fillMaxWidth(0.9f).height(16.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
-                        SkeletonBox(Modifier.fillMaxWidth(0.5f).height(12.dp), progress = shimmer, shape = RoundedCornerShape(4.dp))
-                    }
-                }
-            }
-        }
-    }
-}
-
 @Composable
 private fun AlbumDetailContent(
     state: JellyfinUiState,
@@ -3336,7 +3307,8 @@ private fun PlaylistDetailContent(
     state: JellyfinUiState,
     playlist: Playlist,
     playlistTracks: List<Track>?,
-    hideDownloadButton: Boolean,
+    isOffline: Boolean,
+    offlineNotice: String?,
     coverFor: (Track) -> JellyfinRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
@@ -3347,63 +3319,144 @@ private fun PlaylistDetailContent(
     streamUrl: (Track) -> String?,
     modifier: Modifier = Modifier
 ) {
-    // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
-    Column(
-        modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 16.dp).padding(top = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+    // 与专辑详情同一套头部语言（spec §6）：大封面 + 居中标题 + 播放全部/随机 + 下载；
+    // 区别只有专辑带封面色晕，播放列表保持本色背景。
+    // 整页一个 LazyColumn：真实头部永远是第一项，加载时只在下面接曲目骨架行，
+    // 不会再先画一个假头部再换掉（工单 09）。
+    val trackList = playlistTracks.orEmpty()
+    val playable = trackList.isNotEmpty()
+    LazyColumn(
+        // 详情页顶部玻璃岛已隐藏：只让出状态栏高度。
+        modifier.fillMaxSize().statusBarsPadding(),
+        contentPadding = PaddingValues(
+            start = Dimens.SpaceMedium,
+            end = Dimens.SpaceMedium,
+            top = Dimens.SpaceMedium,
+            bottom = Dimens.BottomContentInset
+        ),
+        // 曲目行之间保持原来的 4dp：与下方骨架的 rowSpacing 一致，加载完成不跳。
+        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            AlbumCover(playlistCoverFor(playlist), playlist.name, Modifier.size(120.dp))
-            Column {
-                Text(playlist.name, style = MaterialTheme.typography.titleLarge)
-                Text(
-                    playlist.trackCount?.let { "$it 首" } ?: "播放列表",
-                    style = MaterialTheme.typography.bodyMedium
+        item(key = "header") {
+            Column(
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                AlbumCover(
+                    playlistCoverFor(playlist),
+                    playlist.name,
+                    Modifier.fillMaxWidth(0.62f).aspectRatio(1f),
+                    cornerRadius = Dimens.CornerLarge
                 )
+                Spacer(Modifier.height(Dimens.SpaceLarge))
+                Text(
+                    playlist.name,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    // 长列表名最多两行：头部在 LazyColumn 里会随页面滚走，
+                    // 不再像固定头部那样把曲目列表挤没。
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(Dimens.SpaceTiny))
+                Text(
+                    "播放列表",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(Dimens.SpaceTiny))
+                Text(
+                    // 曲目数与下方实际行数同源：已加载用列表长度，未加载才退回服务端计数。
+                    // 「已下载」口径只在真正过滤了列表时用（offlineNotice 非空），
+                    // 免得下载名单还没算出来时把全量当成已下载。
+                    playlistSummary(playlist, playlistTracks, isOfflineView = offlineNotice != null),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(Dimens.SpaceMedium))
+                Row(horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
+                    Button(
+                        onClick = { onPlayTrack(trackList, trackList.first().id) },
+                        enabled = playable
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(Dimens.SpaceSmall))
+                        Text("播放全部")
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            val shuffled = trackList.shuffled()
+                            onPlayTrack(shuffled, shuffled.first().id)
+                        },
+                        enabled = playable
+                    ) {
+                        Icon(Icons.Filled.Shuffle, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(Dimens.SpaceSmall))
+                        Text("随机播放")
+                    }
+                }
                 // 下载（工单 05）：曲目还没加载时按钮禁用（target 为 null）。
                 // 离线时藏起来（ADR-0008）：下不了，且列表里已经全是下载过的。
-                if (!hideDownloadButton) {
-                    Spacer(Modifier.height(Dimens.SpaceSmall))
+                if (!isOffline) {
+                    Spacer(Modifier.height(Dimens.SpaceMidMedium))
                     DownloadActionButton(
                         kind = DownloadKind.PLAYLIST,
                         id = playlist.id,
                         name = playlist.name,
-                        tracks = playlistTracks.orEmpty(),
+                        tracks = trackList,
                         serverUrl = state.serverUrl,
                         streamUrl = streamUrl,
                         currentTrackId = currentTrackId
                     )
                 }
+                offlineNotice?.let { notice ->
+                    Spacer(Modifier.height(Dimens.SpaceMidMedium))
+                    OfflineNoticeText(notice)
+                }
+                Spacer(Modifier.height(Dimens.SpaceLarge))
             }
         }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                playlistTracks == null && state.isLoading -> AlbumDetailSkeleton(Modifier.fillMaxSize())
-                playlistTracks == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                playlistTracks.orEmpty().isEmpty() -> EmptyState(
-                    if (hideDownloadButton) "离线 · 这个播放列表还没有下载的歌曲" else "该播放列表暂无歌曲"
-                )
-                else -> {
-                    val trackList = playlistTracks.orEmpty()
-                    LazyColumn(
-                        Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
-                            TrackRow(
-                                track = track,
-                                cover = coverFor(track),
-                                onClick = { onPlayTrack(trackList, track.id) },
-                                onAddToQueue = { onAddToQueue(track) },
-                                showDivider = index != trackList.lastIndex,
-                                isCurrent = currentTrackId == track.id,
-                                isPlaying = isPlaying,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
+        when {
+            // 离线读取本地下载清单期间给骨架；别先闪一句「没有下载」再变成曲目。
+            playlistTracks == null && (state.isLoading || (isOffline && state.errorMessage == null)) ->
+                item(key = "skeleton") {
+                    // 只补曲目行骨架，头部已在上面；行首是封面槽、尾部留「更多」占位，
+                    // 与真实 TrackRow 同构，加载完成不跳。
+                    TrackListSkeleton(
+                        count = 6,
+                        trailingSpace = true,
+                        rowSpacing = Dimens.SpaceTiny,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
+            // 离线且这个列表没下载过：这是视图边界，不是网络错误。
+            // 重试必然失败，所以只给说明型空态，不给重试按钮（工单 09）。
+            playlistTracks == null && isOffline -> item(key = "offline-empty") {
+                EmptyState("离线 · 这个播放列表没有下载，需要联网才能查看")
+            }
+            playlistTracks == null && state.errorMessage != null -> item(key = "error") {
+                ErrorState(state.errorMessage, onRetry = onRetry)
+            }
+            trackList.isEmpty() -> item(key = "empty") {
+                EmptyState(
+                    if (offlineNotice != null) "离线 · 这个播放列表还没有下载的歌曲" else "该播放列表暂无歌曲"
+                )
+            }
+            else -> itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
+                TrackRow(
+                    track = track,
+                    cover = coverFor(track),
+                    onClick = { onPlayTrack(trackList, track.id) },
+                    onAddToQueue = { onAddToQueue(track) },
+                    showDivider = index != trackList.lastIndex,
+                    isCurrent = currentTrackId == track.id,
+                    isPlaying = isPlaying,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

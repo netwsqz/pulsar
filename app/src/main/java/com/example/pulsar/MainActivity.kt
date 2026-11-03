@@ -154,6 +154,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -267,6 +268,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -2322,24 +2324,66 @@ private fun DiscoverContent(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 换一批按钮转圈动画：请求进行中持续旋转，结束后停在当前角度。
-    val infiniteTransition = rememberInfiniteTransition(label = "discoverRefreshRotation")
-    val refreshRotation by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(800, easing = LinearEasing)),
-        label = "discoverRefreshRotationValue"
-    )
+    // 换一批按钮转圈（spec §9）：**只在加载时**转，停的时候补到最近的 360° 整倍数再停。
+    // 不用 rememberInfiniteTransition——它只要被组合就一直在跑动画帧（报告 #70，空转耗电），
+    // 而且以前是 isLoading 一落 false 就把 rotate 摘掉，图标从当前角度瞬间回正（报告 #30）。
+    val refreshRotation = remember { Animatable(0f) }
+    val albumsLoading = state.isLoading
+    LaunchedEffect(albumsLoading) {
+        if (albumsLoading) {
+            // 一直转到被取消（albumsLoading 翻回 false）为止：把当前角度当成新起点，连续转圈不跳。
+            while (true) {
+                refreshRotation.animateTo(
+                    refreshRotation.value + 360f,
+                    animationSpec = tween(800, easing = LinearEasing)
+                )
+            }
+        } else {
+            // 停下时补完整圈：目标取「下一个不小于当前角度的 360° 整倍数」，视觉上仍然在转、
+            // 只是不再有下一次——不会突然回正。转完把角度归一化回 [0,360)，免得刷一天刷成大数。
+            val target = ceil(refreshRotation.value / 360f) * 360f
+            refreshRotation.animateTo(target, animationSpec = tween(240, easing = LinearEasing))
+            refreshRotation.snapTo(refreshRotation.value % 360f)
+        }
+    }
     // 每日推荐：按当天日期稳定随机挑 4 首（同一天内跨重启不变）。
     // 下拉刷新递增变体编号，立刻换一批（挑选是纯本地计算，不等网络）。
     var picksVariant by rememberSaveable { mutableStateOf(0) }
     val dailyPicks = remember(tracks, picksVariant) {
         discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
     }
+    // 这一页到底有哪些节（工单 12 / spec §7）：三节服务器历史离线时整个不显示，
+    // 整页空态也是从这里来——不能像以前那样直接读原始 state 字段（报告 #22）。
+    //
+    // 这里传的是 `state.isOffline` 而不是 `isOfflineFiltered`，两个不是一回事，别换：
+    // · `isOfflineFiltered` = 离线**且**已算出已下载 id 集合，表示"列表真的被筛过了"。
+    //   下面「离线 · 只显示已下载」的提示和专辑空态用它——只在真筛过时才敢这么说。
+    // · `state.isOffline` = 就是断网了。三节历史的隐藏规则是「离线就不显示」，
+    //   与 id 集合算没算出来无关（spec §7：这是组合条件，不走 `VisibleLibrary` 过滤）。
+    val sections = discoverSections(
+        dailyPicks = dailyPicks,
+        recentlyPlayed = state.recentlyPlayed,
+        mostPlayed = state.mostPlayed,
+        recentlyAdded = state.recentlyAdded,
+        discoverAlbums = discoverAlbums,
+        isOffline = state.isOffline,
+        tracksLoaded = state.tracks != null,
+        isLoading = state.isLoading
+    )
     // 下拉刷新：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段放行幂等守卫），
     // 每日推荐是本地计算，递增变体编号立刻换一批。
     // 离线时不发网络请求（必然失败）：只重排本地的每日推荐与专辑墙（ADR-0008）。
     val pullRefreshState = rememberPullToRefreshState()
+    // 刷新圈要落在状态栏和玻璃岛下方（报告 #23）。PullToRefreshBox 从自己的顶边排版，
+    // 而它整个铺在屏幕顶端（父层只有 navigationBarsPadding），所以默认位置会被状态栏和玻璃岛盖住。
+    //
+    // 修法用 indicator 自带的 `maxDistance`，而不是再加一层 padding：indicator 会**自己**
+    // 按拖拽进度从顶边往下平移，平移上限就是这个 `maxDistance`（默认值只够到状态栏附近）。
+    // 再叠固定 padding 就成双重偏移——拖到底时会被顶到离岛很远的下方。
+    // 把上限提到「状态栏 + 玻璃岛占位（岛高 + 上下外边距）」，落位正好露出在岛下面（spec §2）。
+    val refreshIndicatorDistance = with(LocalDensity.current) {
+        (WindowInsets.statusBars.getTop(this) + Dimens.GlassIslandTopSpacing.toPx()).toDp()
+    }
     PullToRefreshBox(
         isRefreshing = state.isDiscoverRefreshing,
         onRefresh = {
@@ -2347,6 +2391,14 @@ private fun DiscoverContent(
             if (!isOfflineFiltered) onRefresh()
         },
         state = pullRefreshState,
+        indicator = {
+            PullToRefreshDefaults.Indicator(
+                state = pullRefreshState,
+                isRefreshing = state.isDiscoverRefreshing,
+                modifier = Modifier.align(Alignment.TopCenter),
+                maxDistance = refreshIndicatorDistance
+            )
+        },
         modifier = modifier.fillMaxSize()
     ) {
     LazyColumn(
@@ -2360,46 +2412,57 @@ private fun DiscoverContent(
         ),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
-        // 三节历史来自服务端，各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
+        // 三节服务器历史来自服务端，各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
         // 还没拉到且这一节没失败时显示横滑骨架——失败过的不再转圈（否则永远等下去）。
+        //
+        // **离线时这三节整节不组合**（连骨架和空态都不给，spec §7）：数据留在 state 里，回在线自动回来。
+        // 「要不要画」= 有内容（[DiscoverSections] 判的，报告 #22）或 该给骨架——两者都不成立才整节缺席。
         fun historyLoading(section: String) =
             !state.isOffline && section !in state.discoverFailedSections
-        item(key = "recentlyPlayed") {
-            DiscoverTrackStrip(
-                title = "最近播放",
-                tracks = state.recentlyPlayed,
-                showSkeleton = historyLoading("recentlyPlayed"),
-                trackCoverFor = trackCoverFor,
-                onPlayTrack = onPlayTrack,
-                onAddToQueue = onAddToQueue,
-                currentTrackId = currentTrackId,
-                isPlaying = isPlaying
-            )
+        if (sections.showRecentlyPlayed || historyLoading("recentlyPlayed")) {
+            item(key = "recentlyPlayed") {
+                DiscoverTrackStrip(
+                    title = "最近播放",
+                    tracks = state.recentlyPlayed,
+                    showSkeleton = historyLoading("recentlyPlayed"),
+                    trackCoverFor = trackCoverFor,
+                    onPlayTrack = onPlayTrack,
+                    onAddToQueue = onAddToQueue,
+                    currentTrackId = currentTrackId,
+                    isPlaying = isPlaying
+                )
+            }
         }
-        item(key = "mostPlayed") {
-            DiscoverTrackStrip(
-                title = "最常播放",
-                tracks = state.mostPlayed,
-                showSkeleton = historyLoading("mostPlayed"),
-                trackCoverFor = trackCoverFor,
-                onPlayTrack = onPlayTrack,
-                onAddToQueue = onAddToQueue,
-                currentTrackId = currentTrackId,
-                isPlaying = isPlaying
-            )
+        if (sections.showMostPlayed || historyLoading("mostPlayed")) {
+            item(key = "mostPlayed") {
+                DiscoverTrackStrip(
+                    title = "最常播放",
+                    tracks = state.mostPlayed,
+                    showSkeleton = historyLoading("mostPlayed"),
+                    trackCoverFor = trackCoverFor,
+                    onPlayTrack = onPlayTrack,
+                    onAddToQueue = onAddToQueue,
+                    currentTrackId = currentTrackId,
+                    isPlaying = isPlaying
+                )
+            }
         }
-        item(key = "recentlyAdded") {
-            DiscoverAlbumStrip(
-                title = "最近添加",
-                albums = state.recentlyAdded,
-                showSkeleton = historyLoading("recentlyAdded"),
-                onOpenAlbum = onOpenAlbum,
-                coverFor = coverFor
-            )
+        if (sections.showRecentlyAdded || historyLoading("recentlyAdded")) {
+            item(key = "recentlyAdded") {
+                DiscoverAlbumStrip(
+                    title = "最近添加",
+                    albums = state.recentlyAdded,
+                    showSkeleton = historyLoading("recentlyAdded"),
+                    onOpenAlbum = onOpenAlbum,
+                    coverFor = coverFor
+                )
+            }
         }
         // 三节历史全部失败、且确实没东西可显示：单节失败是静默缺席（不打扰），全挂了才给一次错误 + 重试。
         // 有旧数据时（后台静默刷新失败）不弹错误——屏幕上还好好的，弹错误反而吓人。
-        if (state.discoverFailedSections.size == 3 &&
+        // 离线时不判：那三节本来就不显示，谈不上"加载失败"。
+        if (!state.isOffline &&
+            state.discoverFailedSections.size == 3 &&
             state.recentlyPlayed == null && state.mostPlayed == null && state.recentlyAdded == null
         ) {
             item(key = "historyError") {
@@ -2414,15 +2477,21 @@ private fun DiscoverContent(
             item(key = "offlineNotice") { OfflineNoticeText("离线 · 只显示已下载") }
         }
         if (state.tracks == null) {
-            // 会话还没恢复完：灰色波浪占位。不能走下面的"登录后这里会推荐…"空态文案——
-            // 那是"确实没有内容"，而这里是"还在连"，两者语义完全不同。
+            // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
+            // 而这里是"还在连"，两者语义完全不同。
             item(key = "dailySkeleton") {
                 TrackListSkeleton(count = 3, trailingSpace = true, modifier = Modifier.padding(top = Dimens.SpaceTiny))
             }
-        } else if (dailyPicks.isEmpty() && tracks.isEmpty()) {
+        } else if (!sections.showDailyPicks && sections.hasAnySection) {
+            // 每日推荐没内容、但这一页别处还有东西可看（比如专辑墙有内容）：
+            // 就地给一行小字说明为什么这一节是空的。
+            //
+            // **整页都空的时候这里不写**（报告 #25）：那由页面底部的空态独占
+            // （`hasAnySection` 为 false 时走下面 `discoverEmpty`），
+            // 否则同一个页面上会出现上下两段一模一样的提示。
             item(key = "dailyEmpty") {
                 Text(
-                    if (isOfflineFiltered) "离线 · 手机里还没有下载的歌曲" else "登录后这里会推荐当天的歌曲",
+                    discoverEmptyNotice(isOffline = state.isOffline).message(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
@@ -2455,7 +2524,7 @@ private fun DiscoverContent(
                         Icon(
                             Icons.Filled.Refresh,
                             contentDescription = "换一批专辑",
-                            modifier = if (state.isLoading) Modifier.rotate(refreshRotation) else Modifier
+                            modifier = Modifier.rotate(refreshRotation.value)
                         )
                     }
                 }
@@ -2495,18 +2564,15 @@ private fun DiscoverContent(
                 }
             }
         }
-        // 整页都没有可看的内容（登录了、服务端也确实没歌）：给一句明确空态，而不是一片空白。
-        val hasAnySection = dailyPicks.isNotEmpty() ||
-            state.recentlyPlayed.orEmpty().isNotEmpty() ||
-            state.mostPlayed.orEmpty().isNotEmpty() ||
-            state.recentlyAdded.orEmpty().isNotEmpty() ||
-            discoverAlbums.orEmpty().isNotEmpty()
-        if (state.tracks != null && !hasAnySection && !state.isLoading) {
+        // 整页都没有可看的内容（登录了、服务端也确实没歌 / 离线且一首都没下载）：
+        // 给一句明确空态，而不是一片空白。判定走 discoverSections（报告 #22）——
+        // 离线时三节历史的残留缓存**不算**「有内容」，否则整页空态永远不出现。
+        //
+        // **空态全页只此一处**（报告 #25）：上面的 `dailyEmpty` 分支在整页空时会自动让位。
+        // 文案里的入口必须真实存在（报告 #26）：搜索页是真的，「设置里刷新曲库」压根没有。
+        if (sections.showPageEmpty) {
             item(key = "discoverEmpty") {
-                EmptyState(
-                    if (isOfflineFiltered) "离线 · 手机里还没有下载的歌曲"
-                    else "曲库还是空的——去搜索页搜歌并下载，或在设置里刷新曲库"
-                )
+                EmptyState(discoverEmptyNotice(isOffline = state.isOffline).message())
             }
         }
     }
@@ -2604,15 +2670,20 @@ private fun DiscoverAlbumStrip(
     }
 }
 
-/** 横滑 section 的骨架：三张与真卡同宽的占位（封面方块 + 两根文字条）。 */
+/** 横滑 section 的骨架：三张与真卡同宽的占位（封面方块 + 两根文字条）。
+ *
+ * 用**不滚动**的 [LazyRow]：普通 `Row` 在宽度不够时会把子项**压窄**（报告 #24——3×140+2×12=444dp
+ * 塞不进 328dp 的内容宽，第三张被压成一条），而 LazyRow 保持子项自身宽度、由视口裁切，
+ * 第三张露出大半截——与真卡横滑时被屏幕裁掉一部分的样子一致（用户故事 52）。 */
 @Composable
 private fun DiscoverStripSkeleton() {
     val shimmer = rememberSkeletonShimmer()
-    Row(
+    LazyRow(
         modifier = Modifier.padding(top = Dimens.SpaceSmall),
-        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+        userScrollEnabled = false
     ) {
-        repeat(3) {
+        items(3) {
             Column(Modifier.width(DiscoverCardWidth)) {
                 SkeletonBox(
                     Modifier.fillMaxWidth().aspectRatio(1f),

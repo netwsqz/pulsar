@@ -4,6 +4,18 @@ import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.Track
 
 /**
+ * 离线视图的曲目摘要文案，专辑详情与播放列表详情共用（工单 10）：写成「已下载 N 首 · 共 M 首」。
+ *
+ * [visible] 是列表实际显示的行数；[serverTotal] 是服务端给的曲目总数。服务端计数可能滞后
+ * （比已下载的还少）：总数不能小于实际显示行数，否则会出现「已下载 4 首 · 共 3 首」这种对不上的
+ * 摘要。服务端没给总数时就按可见数算。
+ */
+internal fun downloadedTrackSummary(visible: Int, serverTotal: Int?): String {
+    val total = serverTotal?.coerceAtLeast(visible) ?: visible
+    return "已下载 $visible 首 · 共 $total 首"
+}
+
+/**
  * 播放列表详情头部的曲目摘要（工单 09）。
  *
  * 计数必须和列表实际显示的行数同源：曲目已加载时用 [tracks] 的长度，只有没加载时才退回
@@ -20,7 +32,5 @@ internal fun playlistSummary(
     if (tracks == null) return playlist.trackCount?.let { "$it 首" } ?: "播放列表"
     val visible = tracks.size
     if (!isOfflineView) return "$visible 首"
-    // 服务端计数可能滞后（比已下载的还少）：总数不能小于实际显示行数。
-    val total = playlist.trackCount?.coerceAtLeast(visible) ?: visible
-    return "已下载 $visible 首 · 共 $total 首"
+    return downloadedTrackSummary(visible, playlist.trackCount)
 }

@@ -74,7 +74,7 @@ class JellyfinDataSource(
                 mapOf(
                     "IncludeItemTypes" to "MusicAlbum",
                     "Recursive" to "true",
-                    // Genres 供艺术家/流派页做客户端分组（工单 06），不需要额外请求
+                    // Fields 保留 Genres（ADR-0009）：字段本身不动，只是 UI 不再有流派页。
                     "Fields" to "ChildCount,Genres",
                     "SortBy" to "SortName",
                     "SortOrder" to "Ascending"

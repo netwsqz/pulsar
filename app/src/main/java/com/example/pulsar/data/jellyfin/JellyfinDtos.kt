@@ -42,7 +42,7 @@ data class JellyfinItemDto(
     @SerialName("Artists") val artists: List<String> = emptyList(),
     @SerialName("RunTimeTicks") val runTimeTicks: Long? = null,
     @SerialName("ImageTags") val imageTags: Map<String, String> = emptyMap(),
-    /** 流派列表（请求要带 Fields=Genres）。艺术家/流派页按它做客户端分组。 */
+    /** 流派列表（请求要带 Fields=Genres）。流派页已删除（ADR-0009）：字段保留、UI 不再引用。 */
     @SerialName("Genres") val genres: List<String> = emptyList(),
     @SerialName("Type") val type: String? = null,
     @SerialName("IsFolder") val isFolder: Boolean? = null,

@@ -112,6 +112,8 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
@@ -508,7 +510,17 @@ private fun LibraryGroupsContent(
     }
 }
 
-/** 艺术家详情（工单 06）：标题 + 该组下的专辑网格，点专辑进专辑详情。 */
+/**
+ * 艺术家组详情（工单 06 / 11）：与专辑/播放列表详情同源——共用 [MediaDetailScaffold]，
+ * 只是内容区换成专辑网格（spec §6「艺术家组用网格变体」）。
+ *
+ * 这一页没有「播放 / 随机」语义（列的是专辑，不是曲目），所以不画操作行（`showActions = false`）；
+ * 头部其余部分（大封面、两行标题、副标题、摘要）与另外两页完全一致，摘要「N 张专辑」由
+ * [artistGroupSummary] 从网格实际卡片数算出，离线时改「已下载 N 张 · 共 M 张」。
+ *
+ * 组名按大小写不敏感匹配：显示名取「首次出现的写法」，输入顺序一变精确匹配就会失手。
+ * 数据全从已加载的 [albums] 现算，不复制一份进导航状态。
+ */
 @Composable
 private fun LibraryGroupDetailContent(
     state: JellyfinUiState,
@@ -522,47 +534,61 @@ private fun LibraryGroupDetailContent(
 ) {
     // 组名来自导航状态，专辑列表可能还在加载/刷新：按组名重新分组，找不到就显示空态。
     val group = remember(albums, groupName) {
-        // 组名按大小写不敏感匹配：显示名取「首次出现的写法」，输入顺序一变精确匹配就会失手。
         libraryGroups(albums.orEmpty())
             .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
     }
-    Column(
-        modifier.fillMaxSize().statusBarsPadding()
-            .padding(horizontal = Dimens.SpaceMedium).padding(top = Dimens.SpaceSmall),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
-            Text(groupName, style = MaterialTheme.typography.titleLarge)
-            group?.let {
-                Text(
-                    "${it.albums.size} 张专辑",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            offlineNotice?.let { notice -> OfflineNoticeText(notice) }
-        }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+    val groupAlbums = group?.albums.orEmpty()
+    // 离线视图（ADR-0008）：只在真正过滤了列表时（offlineNotice 非空）才改摘要口径、隐藏网格里
+    // 不该出现的东西——下载名单还没算出来时 albums 还是全量，不能当成「已下载」。
+    val isOfflineView = offlineNotice != null
+    // 摘要里的「共 M 张」用服务端口径：过滤前那一份（原始 state.albums）里同名的组。
+    // 离线时 `albums` 已被 offlineVisibleLibrary 滤过，拿它当总数会写成「已下载 3 张 · 共 3 张」。
+    val serverTotal = remember(state.albums, groupName) {
+        libraryGroups(state.albums.orEmpty())
+            .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
+            ?.albums?.size
+    }
+    MediaDetailScaffold(
+        // 组本身没有封面图：借组内第一张专辑的封面上大图（与艺术家列表行的做法一致）。
+        cover = groupAlbums.firstOrNull()?.let(coverFor),
+        coverDescription = groupName,
+        title = groupName,
+        subtitle = "艺术家",
+        summary = artistGroupSummary(groupAlbums, isOfflineView = isOfflineView, serverTotal = serverTotal),
+        // 艺术家组没有「播放 / 随机」语义，下面这几个参数不渲染（showActions = false）。
+        playLabel = "",
+        playable = false,
+        onPlay = {},
+        onShuffle = {},
+        // 这一页列的是专辑，没有整组下载的概念：不画下载槽。
+        download = null,
+        offlineNotice = offlineNotice,
+        // 这一页列的是专辑，没有「整组播放」语义：不画操作行（头部其余部分照常）。
+        showActions = false,
+        // 网格变体：内容区是 2 列专辑网格，头部照常跨满整行（真实头部永远画一次）。
+        gridColumns = 2,
+        contentArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+        modifier = modifier,
+        gridBody = {
             when {
-                albums == null && state.isLoading -> AlbumGridSkeleton()
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
-                group == null || group.albums.isEmpty() -> EmptyState(
-                    if (offlineNotice != null) "离线 · 这里还没有下载的专辑" else "这里还没有专辑"
-                )
-                else -> LazyVerticalGrid(
-                    columns = GridCells.Fixed(2),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                    horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
-                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-                ) {
-                    items(group.albums, key = { it.id }) { album ->
-                        AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
-                    }
+                // 骨架只画卡片、从顶部开始；换真实内容时卡片从同一位置开始，不跳（spec §5）。
+                albums == null && state.isLoading -> fullRow("skeleton") {
+                    AlbumGridSkeleton()
+                }
+                albums == null && state.errorMessage != null -> fullRow("error") {
+                    ErrorState(state.errorMessage, onRetry = onRetry)
+                }
+                groupAlbums.isEmpty() -> fullRow("empty") {
+                    EmptyState(
+                        if (isOfflineView) "离线 · 这个艺术家还没有下载的专辑" else "这里还没有专辑"
+                    )
+                }
+                else -> items(groupAlbums, key = { it.id }) { album ->
+                    AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
                 }
             }
         }
-    }
+    )
 }
 
 /** 骨架占位块的共享扫光进度（0f..1f 循环）：一处骨架屏取一次、传给它所有的占位块，
@@ -2805,18 +2831,33 @@ private fun AlbumCardSkeleton(progress: State<Float>) {
 }
 
 /** 专辑网格骨架：2 列、间距与真实网格一致，卡片与 [AlbumGridCard] 同构。
- * 专辑页与艺术家详情页共用，两处骨架不会各走各的（工单 08）。 */
+ * 专辑页与艺术家详情页共用，两处骨架不会各走各的（工单 08）。
+ *
+ * 内部用普通 `Column` + `Row` 摆 2 列网格，而不是再嵌一个 `LazyVerticalGrid`：这一块要能放进
+ * 详情骨架的网格 item 里（工单 11）——同向嵌套的可滚动容器在无界高度下会崩，而且骨架本来就
+ * 只需要画有限的几张卡。
+ *
+ * **不画假头部**（工单 10 原则）：详情页的头部（封面 + 标题 + 副标题）永远画真的，这里只管卡片。
+ */
 @Composable
-private fun AlbumGridSkeleton() {
+private fun AlbumGridSkeleton(modifier: Modifier = Modifier, cards: Int = 6) {
     val shimmer = rememberSkeletonShimmer()
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+    Column(
+        modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
-        items(6) { AlbumCardSkeleton(shimmer) }
+        // 每行两张卡：横向间距与真实网格一致。
+        repeat((cards + 1) / 2) { row ->
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
+                repeat(2) { column ->
+                    val index = row * 2 + column
+                    // 奇数张时最后一张只占一半宽，另一半点个等宽的不可见占位保住列宽。
+                    Box(Modifier.weight(1f)) {
+                        if (index < cards) AlbumCardSkeleton(shimmer)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2845,11 +2886,15 @@ private fun AlbumsContent(
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
                 albums == null && state.isLoading -> {
                     // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
-                    AlbumGridSkeleton()
+                    // 骨架在 Box 里从**顶部**开始排（默认 TopStart），不加居中——居中会让它加载完瞬移。
+                    // 底部留白与真实网格一致，最后一行不会钻到迷你播放条下面。
+                    AlbumGridSkeleton(
+                        modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.BottomContentInset)
+                    )
                 }
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState(
@@ -2886,6 +2931,10 @@ private fun AlbumsContent(
  *
  * 差异交给调用方：背景（专辑有封面色晕、播放列表没有）、播放按钮文案（「播放」/「播放全部」）、
  * 下载槽（离线时传 null 即隐藏）、曲目的骨架 / 错误 / 空态（[body]）。
+ *
+ * [showActions] 为 false 时不画「播放 / 随机播放」操作行（工单 11）：艺术家组详情列的是专辑，
+ * 没有「整页播放」这个语义，头部其余部分与专辑/播放列表完全一致。这时 [playLabel] /
+ * [playable] / [onPlay] / [onShuffle] 都不参与渲染，调用方传占位值即可。
  */
 @Composable
 private fun MediaDetailScaffold(
@@ -2900,88 +2949,151 @@ private fun MediaDetailScaffold(
     onShuffle: () -> Unit,
     download: (@Composable () -> Unit)?,
     offlineNotice: String?,
+    /** false 时不画「播放 / 随机播放」操作行（工单 11：艺术家组详情列的是专辑，没有整组播放语义）。 */
+    showActions: Boolean = true,
     /** 曲目行之间的间距；必须与骨架一致，加载完成不跳。专辑详情不额外留距（[Arrangement.spacedBy] 0）。 */
     tracksArrangement: Arrangement.Vertical = Arrangement.spacedBy(0.dp),
+    /** 头部下方的间距：曲目列表的骨架自己带行距、传 0dp；网格骨架是一张整块、传 [Dimens.SpaceMidMedium]。 */
+    contentArrangement: Arrangement.Vertical = tracksArrangement,
+    /** 网格变体（工单 11）：非 null 时内容区改用 [gridColumns] 列的网格，调用方改传 [gridBody]。
+     * 头部照常跨满整行。列表变体（专辑/播放列表）留 null，继续走 [body]。 */
+    gridColumns: Int? = null,
     background: (@Composable BoxScope.() -> Unit)? = null,
     modifier: Modifier = Modifier,
-    body: LazyListScope.() -> Unit
+    /** 网格变体的内容（艺术家组详情用）：调用方同时传 [gridColumns]。
+     * 放在 [body] 之前——尾随 lambda 永远绑到最后一个参数 [body]，列表调用方不用改写法。 */
+    gridBody: LazyGridScope.() -> Unit = {},
+    body: LazyListScope.() -> Unit = {}
 ) {
     Box(modifier.fillMaxSize()) {
         background?.invoke(this)
-        LazyColumn(
-            // 详情页顶部玻璃岛已隐藏：只让出状态栏高度。
-            Modifier.fillMaxSize().statusBarsPadding(),
-            contentPadding = PaddingValues(
-                start = Dimens.SpaceMedium,
-                end = Dimens.SpaceMedium,
-                top = Dimens.SpaceMedium,
-                bottom = Dimens.BottomContentInset
-            ),
-            verticalArrangement = tracksArrangement
-        ) {
-            item(key = "header") {
-                Column(
-                    Modifier.fillMaxWidth(),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    AlbumCover(
-                        cover,
-                        coverDescription,
-                        Modifier.fillMaxWidth(0.62f).aspectRatio(1f),
-                        cornerRadius = Dimens.CornerLarge
+        val contentPadding = PaddingValues(
+            start = Dimens.SpaceMedium,
+            end = Dimens.SpaceMedium,
+            top = Dimens.SpaceMedium,
+            bottom = Dimens.BottomContentInset
+        )
+        if (gridColumns != null) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(gridColumns),
+                modifier = Modifier.fillMaxSize().statusBarsPadding(),
+                contentPadding = contentPadding,
+                verticalArrangement = contentArrangement,
+                horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+            ) {
+                // 头部跨满整行：网格变体的头部与列表变体是同一份（抽取成 [MediaDetailHeader]）。
+                item(key = "header", span = { GridItemSpan(maxLineSpan) }) {
+                    MediaDetailHeader(
+                        cover, coverDescription, title, subtitle, summary,
+                        playLabel, playable, onPlay, onShuffle, download, offlineNotice, showActions
                     )
-                    Spacer(Modifier.height(Dimens.SpaceLarge))
-                    Text(
-                        title,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        textAlign = TextAlign.Center,
-                        // 长名字最多两行：头部在 LazyColumn 里会随页面滚走，不再把曲目列表挤没。
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                }
+                // 网格语义的 body：整屏状态块（骨架/错误/空态）用 [fullRow] 跨满整行，
+                // 免得被切成半屏宽。
+                gridBody()
+            }
+        } else {
+            LazyColumn(
+                // 详情页顶部玻璃岛已隐藏：只让出状态栏高度。
+                Modifier.fillMaxSize().statusBarsPadding(),
+                contentPadding = contentPadding,
+                verticalArrangement = contentArrangement
+            ) {
+                item(key = "header") {
+                    MediaDetailHeader(
+                        cover, coverDescription, title, subtitle, summary,
+                        playLabel, playable, onPlay, onShuffle, download, offlineNotice, showActions
                     )
-                    Spacer(Modifier.height(Dimens.SpaceTiny))
-                    Text(
-                        subtitle,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(Dimens.SpaceTiny))
-                    Text(
-                        summary,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(Dimens.SpaceMedium))
-                    Row(horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
-                        Button(onClick = onPlay, enabled = playable) {
-                            Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(Dimens.SpaceSmall))
-                            Text(playLabel)
-                        }
-                        FilledTonalButton(onClick = onShuffle, enabled = playable) {
-                            Icon(Icons.Filled.Shuffle, contentDescription = null, modifier = Modifier.size(20.dp))
-                            Spacer(Modifier.width(Dimens.SpaceSmall))
-                            Text("随机播放")
-                        }
-                    }
-                    // 下载槽（工单 05 / 10）：四态由 DownloadActionButton 自己算。离线时调用方传 null。
-                    if (download != null) {
-                        Spacer(Modifier.height(Dimens.SpaceMidMedium))
-                        download()
-                    }
-                    offlineNotice?.let { notice ->
-                        Spacer(Modifier.height(Dimens.SpaceMidMedium))
-                        OfflineNoticeText(notice)
-                    }
-                    Spacer(Modifier.height(Dimens.SpaceLarge))
+                }
+                body()
+            }
+        }
+    }
+}
+
+/** 网格里占满整行的一项（跨 [maxLineSpan] 列）：骨架屏 / 错误态 / 空态这类整屏内容用它，
+ * 免得被多列网格切成半屏宽（工单 11）。本文件内的详情骨架专用。 */
+private fun LazyGridScope.fullRow(key: String, content: @Composable () -> Unit) {
+    item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
+}
+
+/** 详情页头部（工单 10 / 11）：大封面 + 居中标题 + 副标题 + 摘要 + 可选的播放/随机操作行、
+ * 下载槽、离线提示。列表变体与网格变体共用同一份，头部永远不骨架。 */
+@Composable
+private fun MediaDetailHeader(
+    cover: JellyfinRequest?,
+    coverDescription: String?,
+    title: String,
+    subtitle: String,
+    summary: String,
+    playLabel: String,
+    playable: Boolean,
+    onPlay: () -> Unit,
+    onShuffle: () -> Unit,
+    download: (@Composable () -> Unit)?,
+    offlineNotice: String?,
+    showActions: Boolean
+) {
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        AlbumCover(
+            cover,
+            coverDescription,
+            Modifier.fillMaxWidth(0.62f).aspectRatio(1f),
+            cornerRadius = Dimens.CornerLarge
+        )
+        Spacer(Modifier.height(Dimens.SpaceLarge))
+        Text(
+            title,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            // 长名字最多两行：头部在内容流里会随页面滚走，不再把下方内容挤没。
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(Dimens.SpaceTiny))
+        Text(
+            subtitle,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(Modifier.height(Dimens.SpaceTiny))
+        Text(
+            summary,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (showActions) {
+            Spacer(Modifier.height(Dimens.SpaceMedium))
+            Row(horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
+                Button(onClick = onPlay, enabled = playable) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(Dimens.SpaceSmall))
+                    Text(playLabel)
+                }
+                FilledTonalButton(onClick = onShuffle, enabled = playable) {
+                    Icon(Icons.Filled.Shuffle, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(Dimens.SpaceSmall))
+                    Text("随机播放")
                 }
             }
-            body()
         }
+        // 下载槽（工单 05 / 10）：四态由 DownloadActionButton 自己算。离线时调用方传 null。
+        if (download != null) {
+            Spacer(Modifier.height(Dimens.SpaceMidMedium))
+            download()
+        }
+        offlineNotice?.let { notice ->
+            Spacer(Modifier.height(Dimens.SpaceMidMedium))
+            OfflineNoticeText(notice)
+        }
+        Spacer(Modifier.height(Dimens.SpaceLarge))
     }
 }
 

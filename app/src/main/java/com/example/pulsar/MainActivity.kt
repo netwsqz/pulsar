@@ -9,11 +9,19 @@ import com.example.pulsar.ui.components.GlassPanel
 import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
 import com.example.pulsar.ui.components.MediaRowText
+import com.example.pulsar.ui.components.PlayingBarCount
+import com.example.pulsar.ui.components.PlayingBarGap
+import com.example.pulsar.ui.components.PlayingBarMaxHeight
+import com.example.pulsar.ui.components.PlayingBarWidth
+import com.example.pulsar.ui.components.PlayingBarsWidth
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.components.VolumeFeedback
 import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.VolumeFeedbackState
+import com.example.pulsar.ui.components.coverScrimHeight
 import com.example.pulsar.ui.components.glassBarSliderColors
+import com.example.pulsar.ui.components.pausedPlayingBarProgress
+import com.example.pulsar.ui.components.playingBarHeight
 import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.CoverTheme
@@ -64,6 +72,7 @@ import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
@@ -197,7 +206,10 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -1997,57 +2009,79 @@ private fun TrackRow(
 
 /** 正在播放的封面指示层：淡深色遮罩 + 居中三根均衡器条。
  * 播放中：条高在 4~14dp 间循环跳动（三根相位错开，单周期 800ms）；
- * 暂停中：三根静止为固定高度（4/9/6dp），颜色转为 onSurfaceVariant。 */
+ * 暂停中：三根静止为 4/9/6dp，条改白色、遮罩压深一档，一眼看得出没在放（spec §9）。
+ *
+ * 两条性能约定（工单 14，报告 #71）：
+ * · 无限动画**只在播放时创建**——`rememberInfiniteTransition` 只要被组合就一直请求动画帧，
+ *   暂停时留在组合里等于让一个静止的封面继续跑帧；
+ * · 条高只在**绘制阶段**变（见 [drawPlayingBars]），画布尺寸恒定，不再逐帧改布局高度。 */
 @Composable
 private fun PlayingIndicatorOverlay(
     isPlaying: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // 播放中取封面主题色（与迷你条进度、全屏进度条同源）；暂停时保持中性灰，一眼看得出没在放。
-    val barColor = if (isPlaying) LocalCoverAccent.current else MaterialTheme.colorScheme.onSurfaceVariant
-    val transition = rememberInfiniteTransition(label = "playingBars")
-    // 单周期 800ms：偏慢一点，避免在列表里显得躁。
-    // InfiniteTransition 没有 animateDp 扩展，用 animateFloat 驱动 0f..1f 再映射到 4~14dp 高度。
-    val barSpec = infiniteRepeatable<Float>(
-        animation = tween<Float>(800, easing = LinearEasing),
-        repeatMode = RepeatMode.Reverse
-    )
-    val bar1 by transition.animateFloat(0f, 1f, barSpec, label = "bar1")
-    val bar2 by transition.animateFloat(
-        0f, 1f,
-        infiniteRepeatable(tween<Float>(800, easing = LinearEasing), RepeatMode.Reverse, StartOffset(400)),
-        label = "bar2"
-    )
-    val bar3 by transition.animateFloat(
-        0f, 1f,
-        infiniteRepeatable(tween<Float>(800, easing = LinearEasing), RepeatMode.Reverse, StartOffset(200)),
-        label = "bar3"
-    )
-    // 进度 0f..1f 线性映射到 4~14dp 高度。
-    fun barHeight(progress: Float): Dp = (4 + progress * 10).dp
+    // 播放中取封面主题色（与迷你条进度、全屏进度条同源）；暂停时改白色——压在深色遮罩上，
+    // 多花的封面也辨得出「停住了」。
+    val barColor = if (isPlaying) LocalCoverAccent.current else Color.White
+    // 暂停态遮罩从 0.35 提到 0.48（spec §9 的 0.45~0.5）：静止的白条要立得住。
+    val scrimAlpha = if (isPlaying) 0.35f else 0.48f
     Box(
         modifier
             // 均衡器底衬：用色板 scrim（恒黑），不写死黑色。
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.35f)),
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = scrimAlpha)),
         contentAlignment = Alignment.Center
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            PlayingBar(if (isPlaying) barHeight(bar1) else 4.dp, barColor)
-            PlayingBar(if (isPlaying) barHeight(bar2) else 9.dp, barColor)
-            PlayingBar(if (isPlaying) barHeight(bar3) else 6.dp, barColor)
+        val progress = rememberPlayingBarProgress(isPlaying)
+        // 画布固定 13×14dp（14 = 最高的一根条）：条高怎么跳，布局尺寸都不动。
+        Canvas(Modifier.size(PlayingBarsWidth, PlayingBarMaxHeight)) {
+            drawPlayingBars(progress, barColor)
         }
     }
 }
 
-/** 单根均衡器条：固定 3dp 宽，高度由外部指定。 */
+/** 三根条的归一化进度 0f..1f（按根号取）。
+ *
+ * 返回「按下标取值」的函数而不是现成高度：真正的读取（`state.value`）发生在 [drawPlayingBars]
+ * 的绘制块里，于是动画帧只引起**重绘**——既不重组，也不像以前 `Modifier.height(...)` 那样逐帧重排
+ * （滚动掉帧的根因）。
+ *
+ * 暂停分支**不组合** InfiniteTransition，直接返回静态进度（4/9/6dp），一帧动画都不跑。 */
 @Composable
-private fun PlayingBar(height: Dp, color: Color) {
-    Box(
-        Modifier
-            .width(3.dp)
-            .height(height)
-            .background(color, RoundedCornerShape(1.5.dp))
+private fun rememberPlayingBarProgress(isPlaying: Boolean): (Int) -> Float {
+    if (!isPlaying) {
+        // 暂停：静态高度 4/9/6dp，组合里连 InfiniteTransition 都没有。
+        return { index -> pausedPlayingBarProgress[index] }
+    }
+    val transition = rememberInfiniteTransition(label = "playingBars")
+    // 三根相位错开 0/400/200ms，单周期 800ms（偏慢一点，避免在列表里显得躁）。
+    val bars: List<State<Float>> = listOf(
+        transition.animateFloat(0f, 1f, playingBarSpec(startOffsetMs = 0), label = "bar1"),
+        transition.animateFloat(0f, 1f, playingBarSpec(startOffsetMs = 400), label = "bar2"),
+        transition.animateFloat(0f, 1f, playingBarSpec(startOffsetMs = 200), label = "bar3")
     )
+    return { index -> bars[index].value }
+}
+
+/** 单根条的单周期规格：800ms 一上一下（偏慢一点，避免在列表里显得躁），三根用相位错开。 */
+private fun playingBarSpec(startOffsetMs: Int) = infiniteRepeatable<Float>(
+    animation = tween<Float>(800, easing = LinearEasing),
+    repeatMode = RepeatMode.Reverse,
+    initialStartOffset = StartOffset(startOffsetMs)
+)
+
+/** 画三根条：高度在绘制阶段由 [progress] 决定，宽高与画布尺寸恒定——布局稳定，滚动不因它重排。 */
+private fun DrawScope.drawPlayingBars(progress: (Int) -> Float, color: Color) {
+    val barWidth = PlayingBarWidth.toPx()
+    val gap = PlayingBarGap.toPx()
+    repeat(PlayingBarCount) { index ->
+        val barHeight = playingBarHeight(progress(index)).toPx()
+        drawRoundRect(
+            color = color,
+            topLeft = Offset(index * (barWidth + gap), (size.height - barHeight) / 2f),
+            size = Size(barWidth, barHeight),
+            cornerRadius = CornerRadius(barWidth / 2f)
+        )
+    }
 }
 
 /** 长按弹出的上下文菜单：「添加到播放队列」+ 文件操作（改名 / 删除，可选项）。
@@ -4858,17 +4892,21 @@ internal fun AlbumCover(
         val scrimColor = MaterialTheme.colorScheme.scrim.copy(
             alpha = if (isSystemInDarkTheme()) 0.20f else 0.03f
         )
+        // 高度跟封面走：25% 封顶 32dp（工单 14 / 报告 #8）。以前固定 32dp，40dp 的迷你封面
+        // 有一大半压在暗部里。按比例算需要**实测高度**，所以走 drawWithCache 在绘制阶段算，
+        // 不用 fillMaxHeight + heightIn——两个尺寸约束叠在一起时谁裁谁由 Modifier 顺序决定，容易写反。
         Box(
             Modifier
-                .fillMaxWidth()
-                .height(32.dp)
-                .align(Alignment.BottomCenter)
-                .background(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        1f to scrimColor
+                .matchParentSize()
+                .drawWithCache {
+                    val scrimHeight = coverScrimHeight(size.height.toDp()).toPx()
+                    val brush = Brush.verticalGradient(
+                        colors = listOf(Color.Transparent, scrimColor),
+                        startY = size.height - scrimHeight,
+                        endY = size.height
                     )
-                )
+                    onDrawBehind { drawRect(brush) }
+                }
         )
     }
 }

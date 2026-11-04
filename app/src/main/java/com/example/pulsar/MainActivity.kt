@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
+import com.example.pulsar.ui.components.DeleteProgressNotice
 import com.example.pulsar.ui.components.GlassPanel
 import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
@@ -136,6 +137,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -893,6 +895,19 @@ private fun MusicLibraryScreen(
     // 离线时 playTracks 内部会跳过没下载的歌（队列里混着能放/不能放时按工单 03 口径处理）。
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
+    // 动作结果的统一 Snackbar 出口（详情页的下载按钮删除完「已删除 N 首」走它）。
+    val showMessage: (String) -> Unit = { message ->
+        snackbarScope.launch { snackbarHostState.showSnackbar(message) }
+    }
+    // 已下载列表的整张删除跑在 ViewModel 里（导航切走也不中断），结果经 state 送回来。
+    // **先消费再弹**：留在 state 里的话，转屏重建页面会把同一条提示再弹一次。
+    LaunchedEffect(state.downloadDeleteMessage) {
+        val message = state.downloadDeleteMessage ?: return@LaunchedEffect
+        viewModel.dismissDownloadDeleteMessage()
+        // 用页面级的 snackbarScope 弹：本 effect 的 key 刚变成 null 会重启，
+        // 放在 effect 里直接 showSnackbar 会被立刻取消掉。
+        snackbarScope.launch { snackbarHostState.showSnackbar(message) }
+    }
     // QQ 下载动作反馈（音质不可用 / 入队失败 / 整专跳过 N 首）走 Snackbar——那是动作反馈。
     // 搜索期失败（服务不可用 / 凭证过期）不走这里，它在搜索页 QQ 分区里常驻（ADR-0006）。
     LaunchedEffect(qqState.actionMessage) {
@@ -1226,6 +1241,7 @@ private fun MusicLibraryScreen(
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
                         streamUrl = viewModel::streamUrl,
+                        onDownloadMessage = showMessage,
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
@@ -1242,6 +1258,7 @@ private fun MusicLibraryScreen(
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
                         streamUrl = viewModel::streamUrl,
+                        onDownloadMessage = showMessage,
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
@@ -3182,6 +3199,7 @@ private fun AlbumDetailContent(
     currentTrackId: String?,
     isPlaying: Boolean,
     streamUrl: (Track) -> String?,
+    onDownloadMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
@@ -3220,7 +3238,8 @@ private fun AlbumDetailContent(
                     tracks = trackList,
                     serverUrl = state.serverUrl,
                     streamUrl = streamUrl,
-                    currentTrackId = currentTrackId
+                    currentTrackId = currentTrackId,
+                    onMessage = onDownloadMessage
                 )
             }
         },
@@ -3583,6 +3602,7 @@ private fun PlaylistDetailContent(
     currentTrackId: String?,
     isPlaying: Boolean,
     streamUrl: (Track) -> String?,
+    onDownloadMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     // 与专辑详情共用同一套页面骨架（spec §6 / 工单 10）：大封面 + 居中标题 + 播放全部/随机 + 下载。
@@ -3619,7 +3639,8 @@ private fun PlaylistDetailContent(
                     tracks = trackList,
                     serverUrl = state.serverUrl,
                     streamUrl = streamUrl,
-                    currentTrackId = currentTrackId
+                    currentTrackId = currentTrackId,
+                    onMessage = onDownloadMessage
                 )
             }
         },
@@ -4128,26 +4149,42 @@ private fun CachedCopiesContent(
                     }
                 }
                 deleteTarget?.let { target ->
+                    // 删除跑在 ViewModel 里（导航切走也不中断，破坏性操作不能删一半）：忙碌位落回
+                    // false 才算删完，这时才关框。关完由 MainActivity 统一弹「已删除 N 首」（工单 13）。
+                    val deleting = state.isDeletingDownload
+                    var deleteStarted by remember { mutableStateOf(false) }
+                    // 两个 key 都要：只看 deleting 的话，删除在一帧内跑完（或 ViewModel 直接
+                    // 提前返回、忙碌位从未变过）时本 effect 不会重跑，对话框就永远关不上了。
+                    LaunchedEffect(deleting, deleteStarted) {
+                        if (deleteStarted && !deleting) deleteTarget = null
+                    }
                     AlertDialog(
-                        onDismissRequest = { deleteTarget = null },
+                        onDismissRequest = { if (!deleting) deleteTarget = null },
                         title = { Text("删掉这张专辑的下载？") },
                         text = {
-                            Text(
-                                "将删掉《${target.album.name}》在手机上下载的 ${target.tracks.size} 首。\n" +
-                                    "歌还在电脑上一首没动；服务器后来新增的歌不会跟着删，正在播的那首会跳过。"
-                            )
+                            Column {
+                                Text(
+                                    "将删掉《${target.album.name}》在手机上下载的 ${target.tracks.size} 首。\n" +
+                                        "歌还在电脑上一首没动；服务器后来新增的歌不会跟着删，正在播的那首会跳过。"
+                                )
+                                // 删除进度（用户故事 62）：逐首删要时间，只把按钮变灰没人看得懂。
+                                if (deleting) DeleteProgressNotice()
+                            }
                         },
                         confirmButton = {
                             TextButton(
+                                enabled = !deleting,
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                ),
                                 onClick = {
-                                    val album = target.album
-                                    deleteTarget = null
-                                    viewModel.deleteAlbumCopies(album)
+                                    deleteStarted = true
+                                    viewModel.deleteAlbumCopies(target.album)
                                 }
-                            ) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                            ) { Text("删除") }
                         },
                         dismissButton = {
-                            TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+                            TextButton(enabled = !deleting, onClick = { deleteTarget = null }) { Text("取消") }
                         }
                     )
                 }

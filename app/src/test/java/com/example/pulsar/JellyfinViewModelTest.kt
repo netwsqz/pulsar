@@ -20,6 +20,7 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -1387,10 +1388,99 @@ class JellyfinViewModelTest {
         assertEquals(setOf("stream/t1"), mediaDownloads.completeKeys)
         assertTrue(mediaDownloads.removedKeys.contains("stream/t2"))
         assertEquals(1, viewModel.state.value.cacheTrackCount)
+        // 提示报的是**真删掉的副本数**：正在播的那首被跳过，所以是 1 不是 2（用户故事 62）
+        assertEquals("已删除 1 首", viewModel.state.value.downloadDeleteMessage)
         assertEquals(
             listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2)),
             viewModel.state.value.cachedAlbums
         )
+    }
+
+    @Test
+    fun `按专辑删下载：删除期间置忙碌位，删完给「已删除 N 首」`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val t2 = Track("t2", "Song A2", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 2, null)
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += listOf("stream/t1", "stream/t2")
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
+            mediaDownloads = mediaDownloads
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        viewModel.deleteAlbumCopies(albumA)
+        // 忙碌位在**发起线程**同步置位：界面这一帧就能显示进度、禁掉按钮（连点进不来）
+        assertTrue(viewModel.state.value.isDeletingDownload)
+        assertNull(viewModel.state.value.downloadDeleteMessage)
+
+        advanceUntilIdle()
+        assertFalse(viewModel.state.value.isDeletingDownload)
+        assertEquals("已删除 2 首", viewModel.state.value.downloadDeleteMessage)
+        // 界面弹完自己清掉，避免转屏/返回后再弹一次
+        viewModel.dismissDownloadDeleteMessage()
+        assertNull(viewModel.state.value.downloadDeleteMessage)
+    }
+
+    @Test
+    fun `按专辑删下载：连点第二次直接返回，不重复删也不重复报`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 1, null)
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
+            mediaDownloads = mediaDownloads
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        viewModel.deleteAlbumCopies(albumA)
+        viewModel.deleteAlbumCopies(albumA)
+        advanceUntilIdle()
+
+        // 第二次被守卫挡在门外：只剩第一次那一遍的删除记录
+        assertEquals(listOf("stream/t1"), mediaDownloads.removedKeys)
+        assertEquals("已删除 1 首", viewModel.state.value.downloadDeleteMessage)
+        assertFalse(viewModel.state.value.isDeletingDownload)
+    }
+
+    @Test
+    fun `删到一半退出登录：提示不落到新会话上，字节照删`() = runTest {
+        val t1 = Track("t1", "Song A1", "Artist X", "Album A", 1000L, null)
+        val albumA = Album("a1", "Album A", "Artist X", 1, null)
+        val mediaDownloads = FakeMediaDownloads()
+        mediaDownloads.completeKeys += "stream/t1"
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
+            mediaDownloads = mediaDownloads
+        )
+        advanceUntilIdle()
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        // 把删除卡在「算完缓存键、正删字节」的一刻——真机上这一段也会被会话失效插队
+        val gate = CompletableDeferred<Unit>()
+        mediaDownloads.removeGate = gate
+        viewModel.deleteAlbumCopies(albumA)
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.isDeletingDownload)
+
+        viewModel.signOut()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        // 字节照删（本地数据，与界面在展示哪个会话无关）……
+        assertTrue(mediaDownloads.removedKeys.contains("stream/t1"))
+        // ……但结果不写进新会话的 state：提示不该飘在登录页上
+        assertFalse(viewModel.state.value.isDeletingDownload)
+        assertNull(viewModel.state.value.downloadDeleteMessage)
     }
 
     @Test
@@ -2086,6 +2176,10 @@ class JellyfinViewModelTest {
         val completeKeys = mutableSetOf<String>()
         val removedKeys = mutableListOf<String>()
         var failAll = false
+
+        /** 非空时 [remove] 会真的挂起直到放行：复现「删到一半会话失效」的竞态。 */
+        var removeGate: CompletableDeferred<Unit>? = null
+
         override suspend fun hasCompleteCopy(key: String): Boolean {
             if (failAll) throw RuntimeException("downloads broken")
             return key in completeKeys
@@ -2108,7 +2202,11 @@ class JellyfinViewModelTest {
             onProgress(1L, 1L)
             return true
         }
-        override suspend fun remove(key: String) { removedKeys += key; completeKeys -= key }
+        override suspend fun remove(key: String) {
+            removeGate?.await()
+            removedKeys += key
+            completeKeys -= key
+        }
     }
 
     private class FakeSnapshotRepository : LibrarySnapshotRepository {

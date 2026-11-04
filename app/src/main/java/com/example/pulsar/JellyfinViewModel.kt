@@ -79,8 +79,9 @@ class JellyfinViewModel(
     /** 曲库快照的内存副本：离线兜底与覆写共用，避免每次都读盘。 */
     private var snapshot: LibrarySnapshot? = null
 
-    /** 整张专辑的下载正在删：防连点。只在发起线程读写（见 [deleteAlbumCopies]）。 */
-    private var isDeletingDownloads = false
+    /** 整张专辑的下载正在删：防连点。只在发起线程读写（见 [deleteAlbumCopies]）。
+     * 与界面上的 [JellyfinUiState.isDeletingDownload] 是两回事：这个是守卫，那个是给界面看的进度。 */
+    private var downloadDeleteInFlight = false
 
     private val _playbackTracks = MutableStateFlow<Map<String, Track>>(emptyMap())
     val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
@@ -166,6 +167,8 @@ class JellyfinViewModel(
             isSearching = false,
             isFileOpsBusy = false,
             fileOpsMessage = null,
+            isDeletingDownload = false,
+            downloadDeleteMessage = null,
             isOffline = false,
             cachedTrackIds = null,
             cachedAlbums = null,
@@ -1477,13 +1480,21 @@ class JellyfinViewModel(
      * 名单里找不到这条（迁移失败 / 没注入名单）时退回「当前列表里已有完整副本的那几首」——
      * 只删真在盘上的，绝不按专辑名把全部曲目一锅端。只动手机本地（铁律 5），
      * 失败静默（铁律 4）——删完重算，列表说的永远是当下。
+     *
+     * 进度与结果走 state（工单 13）：删除期间 [JellyfinUiState.isDeletingDownload] 为 true
+     * （确认框显示进度、禁按钮），删完写一条「已删除 N 首」到
+     * [JellyfinUiState.downloadDeleteMessage] 由界面弹掉。**跑在 viewModelScope**，
+     * 页面切走也不中断——删一半的破坏性操作最难受。
      */
     fun deleteAlbumCopies(album: Album) {
         val downloads = mediaDownloads ?: return
         val tracks = _state.value.tracks ?: return
         // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
-        if (isDeletingDownloads) return
-        isDeletingDownloads = true
+        if (downloadDeleteInFlight) return
+        downloadDeleteInFlight = true
+        // 会话代次：删除可能跨过「退出登录 / 会话过期」，结果不该写到新会话的界面上。
+        val generation = loginGeneration
+        _state.value = _state.value.copy(isDeletingDownload = true, downloadDeleteMessage = null)
         viewModelScope.launch(dispatcher) {
             try {
                 val trackIds = downloadTrackIdsFor(album, tracks)
@@ -1497,13 +1508,25 @@ class JellyfinViewModel(
                 keys.forEach { downloads.remove(it) }
                 // 名单跟着改（跟专辑页的删除按钮同一口径）：删干净就整条去掉，
                 // 留了正在播的那首就只留它。不回写的话，同一个动作在两处会得到两种结果。
+                // 名单是本地数据，与哪个会话正显示在界面上无关，所以不套代次守卫。
                 removeLedgerEntry(album, trackIds.filter { it == playingId })
-                refreshCachedAlbums(tracks)
-                refreshCacheStats()
+                // 界面状态只在会话没换过时写：会话已经换掉的话，这些结果会飘在登录页上。
+                if (generation == loginGeneration) {
+                    refreshCachedAlbums(tracks)
+                    refreshCacheStats()
+                    // 报的是**真删掉的副本数**：正在播的那首被跳过就不算它。
+                    _state.value = _state.value.copy(downloadDeleteMessage = downloadDeletedMessage(keys.size))
+                }
             } finally {
-                isDeletingDownloads = false
+                downloadDeleteInFlight = false
+                _state.value = _state.value.copy(isDeletingDownload = false)
             }
         }
+    }
+
+    /** 界面弹完「已删除 N 首」后清掉，避免转屏 / 返回后重复弹。 */
+    fun dismissDownloadDeleteMessage() {
+        _state.value = _state.value.copy(downloadDeleteMessage = null)
     }
 
     /**
@@ -1616,6 +1639,8 @@ class JellyfinViewModel(
             isSearching = false,
             isFileOpsBusy = false,
             fileOpsMessage = null,
+            isDeletingDownload = false,
+            downloadDeleteMessage = null,
             isOffline = false,
             cachedTrackIds = null,
             cachedAlbums = null,

@@ -1,6 +1,7 @@
 package com.example.pulsar
 
 import com.example.pulsar.domain.model.Track
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -8,8 +9,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 详情页下载按钮的纯逻辑（工单 05）。UI 布局本身不测（仓库没有 Compose 测试设施），
- * 这里只钉住「算下载目标 / 算要删的键 / 四态收口 / 体积估算 / 进度比例」这几条真正会算错的规则。
+ * 详情页下载按钮的纯逻辑（工单 05 / 13）。UI 布局本身不测（仓库没有 Compose 测试设施），
+ * 这里只钉住「算下载目标 / 字节真相三态 / 五态收口 / 算要删的键 / 删除提示 / 体积估算 /
+ * 进度比例」这几条真正会算错的规则。
  */
 class DownloadActionButtonTest {
 
@@ -137,17 +139,21 @@ class DownloadActionButtonTest {
         assertEquals(listOf("https://server.test/Videos/t1/stream"), keys)
     }
 
-    // ── 四态收口 ──────────────────────────────────────────────────
+    // ── 五态收口（工单 13）──────────────────────────────────────────
 
     @Test
-    fun `四态：下载中与部分失败照抄调度器，其余按字节真相`() {
+    fun `五态：下载中与部分失败照抄调度器，其余按字节真相`() {
         val downloading = DownloadState.Downloading(10, 100)
         assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = false))
         // 字节全齐也不影响进度显示（下载刚跑完的那一下）
         assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = true))
+        // 字节还没查到也照抄：下载中优先于「检查中…」，否则进度环会被顶掉
+        assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = null))
 
         val failed = DownloadState.PartiallyFailed(2)
         assertEquals(failed, resolveDownloadState(failed, allTracksComplete = false))
+        assertEquals(failed, resolveDownloadState(failed, allTracksComplete = true))
+        assertEquals(failed, resolveDownloadState(failed, allTracksComplete = null))
 
         // 字节真相优先：调度器说已下载（本次运行的旧状态）但字节不齐 → 未下载
         assertEquals(DownloadState.NotDownloaded, resolveDownloadState(DownloadState.Downloaded, false))
@@ -157,6 +163,51 @@ class DownloadActionButtonTest {
         assertEquals(DownloadState.Downloaded, resolveDownloadState(DownloadState.Canceled, true))
         assertEquals(DownloadState.NotDownloaded, resolveDownloadState(null, false))
         assertEquals(DownloadState.Downloaded, resolveDownloadState(null, true))
+    }
+
+    @Test
+    fun `五态：字节还没查完（null）就是未知态，不猜「未下载」`() {
+        // 用户故事 59：打开已下载专辑时先给「检查中…」，不先闪一个可点的「下载」
+        assertNull(resolveDownloadState(null, allTracksComplete = null))
+        assertNull(resolveDownloadState(DownloadState.NotDownloaded, allTracksComplete = null))
+        assertNull(resolveDownloadState(DownloadState.Downloaded, allTracksComplete = null))
+        assertNull(resolveDownloadState(DownloadState.Canceled, allTracksComplete = null))
+    }
+
+    @Test
+    fun `字节真相：会话没读出来是未知，target 为空或空专辑收口为未下载`() = runTest {
+        val found = DownloadTarget(
+            serverUrl = "https://server.test",
+            userId = "user-1",
+            kind = DownloadKind.ALBUM,
+            id = "album-a",
+            name = "专辑 A",
+            tracks = tracks.map { DownloadTrack(it.id, streamUrl(it)!!, streamUrl(it)!!) }
+        )
+        val empty = found.copy(tracks = emptyList())
+
+        // 会话还没读出来：不知道这份字节属于谁，保持未知（按钮显示「检查中…」）
+        assertNull(resolveAllTracksComplete(null, sessionResolved = false) { true })
+        assertNull(resolveAllTracksComplete(found, sessionResolved = false) { true })
+
+        // 会话已就绪但没有可下的目标（未登录 / 空专辑 / 算不出 URL）：收口为未下载，不能永远检查中
+        assertFalse(resolveAllTracksComplete(null, sessionResolved = true) { true }!!)
+        assertFalse(resolveAllTracksComplete(empty, sessionResolved = true) { true }!!)
+
+        // 照抄字节真相：全齐 true，缺一首 false
+        assertTrue(resolveAllTracksComplete(found, sessionResolved = true) { true }!!)
+        assertFalse(
+            resolveAllTracksComplete(found, sessionResolved = true) { it.endsWith("t2") }!!
+        )
+    }
+
+    // ── 删除结果文案（用户故事 62）────────────────────────────────────
+
+    @Test
+    fun `删除提示：删掉几首说几首，一首没删就不打扰`() {
+        assertEquals("已删除 3 首", downloadDeletedMessage(3))
+        assertNull(downloadDeletedMessage(0))
+        assertNull(downloadDeletedMessage(-1))
     }
 
     @Test

@@ -93,5 +93,15 @@ data class JellyfinUiState(
     val cachedAlbums: List<CachedAlbum>? = null,
     /** 下载占用字节数 / 完整副本首数（设置页「下载」区块）。 */
     val cacheBytes: Long = 0,
-    val cacheTrackCount: Int = 0
+    val cacheTrackCount: Int = 0,
+    /**
+     * 整张专辑的下载正在删（工单 13）。已下载列表的确认框据此显示进度、禁用按钮，
+     * 删完落回 false 才关框——删除跑在 [JellyfinViewModel] 里，页面切走也不中断。
+     */
+    val isDeletingDownload: Boolean = false,
+    /**
+     * 下载删除完成后的提示（「已删除 N 首」，用户故事 62）。界面弹完调
+     * [JellyfinViewModel.dismissDownloadDeleteMessage] 清掉，避免转屏/返回后再弹一次。
+     */
+    val downloadDeleteMessage: String? = null
 )

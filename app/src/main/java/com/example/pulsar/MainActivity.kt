@@ -20,6 +20,7 @@ import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.VolumeFeedbackState
 import com.example.pulsar.ui.components.coverScrimHeight
 import com.example.pulsar.ui.components.glassBarSliderColors
+import com.example.pulsar.ui.components.menuTopLeft
 import com.example.pulsar.ui.components.pausedPlayingBarProgress
 import com.example.pulsar.ui.components.playingBarHeight
 import com.example.pulsar.ui.theme.BrandPrimary
@@ -78,10 +79,12 @@ import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -99,11 +102,13 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
@@ -168,7 +173,6 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -191,6 +195,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -211,26 +216,26 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.coerceAtMost
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1000,6 +1005,11 @@ private fun MusicLibraryScreen(
         onToggle = viewModel::toggleMultiSelect,
         onEnter = viewModel::enterMultiSelect
     )
+    // 长按菜单状态提升到本层（工单 15）：只有这里拿得到主窗口 backdrop，菜单才能与玻璃岛同材质。
+    // TrackRow 通过 LocalTrackMenu 上报「哪首歌 + 锚点」，不再各自持有 Popup。
+    val trackMenu = remember { TrackMenuState() }
+    // 切页时收起菜单：菜单是常驻 overlay，不跟着行一起离开组合，得显式收。
+    LaunchedEffect(section) { trackMenu.dismiss() }
     // 多选模式下的「删除」按钮目标：勾选的全部曲目，进同一个确认框。
     var batchDeleteTargets by remember { mutableStateOf<List<Track>>(emptyList()) }
     // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
@@ -1094,7 +1104,9 @@ private fun MusicLibraryScreen(
         LocalTrackFileOps provides trackFileOps,
         LocalMultiSelect provides multiSelect,
         LocalCoverAccent provides coverAccentAnimated,
-        LocalOfflineActive provides state.isOffline
+        LocalOfflineActive provides state.isOffline,
+        // 长按菜单状态：TrackRow 上报锚点，菜单本体由本层渲染（工单 15）。
+        LocalTrackMenu provides trackMenu
     ) {
     SharedTransitionLayout {
         Box(Modifier.fillMaxSize().background(backgroundBrush)) {
@@ -1465,6 +1477,14 @@ private fun MusicLibraryScreen(
                 }
             }
         }
+        // 长按菜单 overlay（工单 15）：声明在最后 = 压在所有浮层之上（z 序）。
+        // 在主窗口内渲染，才能用同一个 backdrop 走 GlassPanel（Popup 是独立窗口，采样不到）。
+        TrackContextMenu(
+            state = trackMenu,
+            currentTrackId = currentTrack?.id,
+            backdrop = backdrop,
+            windowSize = LocalWindowInfo.current.containerSize
+        )
         }
     }
     }
@@ -1844,6 +1864,30 @@ private val LocalCoverAccent = compositionLocalOf { BrandPrimary }
  * 删除 / 改名（要走 PC 伴生服务，断网必然失败，ADR-0008）。 */
 private val LocalOfflineActive = compositionLocalOf { false }
 
+/** 打开长按菜单的共享状态（工单 15）：由 [MusicLibraryScreen] `remember` 一次，TrackRow 通过
+ * CompositionLocal 拿到同一个实例，只上报「哪首歌 + 锚点在哪」。
+ *
+ * 菜单从 `Popup`（独立窗口）提到主窗口 overlay 之后就**必须**由 [MusicLibraryScreen] 统一渲染——
+ * 只有它拿得到主窗口的 `backdrop`，玻璃面才有东西可采样（这是当初手写玻璃、菜单只能退化成半透明
+ * `Surface` 的技术原因）。
+ *
+ * 为什么是状态对象而不是 CompositionLocal 里直接放 lambda：lambda 每次重组都是新实例，会把所有读它的
+ * TrackRow 全部失效；播放器 500ms 轮询会持续触发主屏重组，整张列表跟着白刷。 */
+private class TrackMenuState {
+    var request by mutableStateOf<TrackMenuRequest?>(null)
+        private set
+
+    fun open(track: Track, touchPoint: IntOffset, onAddToQueue: () -> Unit) {
+        request = TrackMenuRequest(track, touchPoint, onAddToQueue)
+    }
+
+    fun dismiss() {
+        request = null
+    }
+}
+
+private val LocalTrackMenu = compositionLocalOf<TrackMenuState?> { null }
+
 /** 单曲行：小封面 + 标题（大）+ 作者（灰色小字）+ 底部灰色分隔线。取消卡片形式，列表更紧凑。
  * 当前播放曲目：标题高亮为品牌色，封面上叠一层半透明遮罩 + 均衡器跳动条（暂停时静止）。
  * 长按弹出上下文菜单（弹性缩放 + 淡入 + 锚定在长按位置，逐项错峰弹出），支持"添加到播放队列"等操作。
@@ -1863,11 +1907,9 @@ private fun TrackRow(
     leadingNumber: Int? = null,
     modifier: Modifier = Modifier
 ) {
-    var showMenu by remember { mutableStateOf(false) }
     var rowWindowOffset by remember { mutableStateOf(Offset.Zero) }
     var rowSize by remember { mutableStateOf(IntSize.Zero) }
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
-    var menuOffset by remember { mutableStateOf(IntOffset.Zero) }
     val multiSelect = LocalMultiSelect.current
     val multiSelectActive = multiSelect?.active == true
     // 分隔线起点跟着实际前槽走（spec §5）：多选 = 勾选框 48 + 4 + 封面 48 + 12 = 112dp，
@@ -1877,10 +1919,11 @@ private fun TrackRow(
     } else {
         Dimens.TouchTargetSmall
     }
-    // 长按与「更多」按钮共用同一个菜单，锚点不同而已。
+    // 长按与「更多」按钮共用同一个菜单，锚点不同而已（菜单本体在 MusicLibraryScreen 渲染）。
+    val trackMenu = LocalTrackMenu.current
     fun openMenuAt(point: IntOffset) {
-        menuOffset = point
-        showMenu = true
+        // 行没提供「加队列」时也照旧弹菜单（其余项仍可用）；动作是空操作，与旧实现一致。
+        trackMenu?.open(track, point, onAddToQueue ?: {})
     }
     val trailingSlot: (@Composable () -> Unit)? = if (onAddToQueue != null && !multiSelectActive) {
         {
@@ -1990,21 +2033,6 @@ private fun TrackRow(
             titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified
         )
     }
-    // 长按弹出菜单：Popup 作为独立窗口渲染，动画在菜单内容上的 graphicsLayer 进行。
-    if (showMenu) {
-        // 离线时长按菜单里不给「改名 / 删除」：走 PC 伴生服务，断网必然失败（ADR-0008）。
-        val fileOps = LocalTrackFileOps.current.takeUnless { LocalOfflineActive.current }
-        AddToQueueMenu(
-            touchPoint = menuOffset,
-            onAddToQueue = { onAddToQueue?.invoke() },
-            onRename = fileOps?.let { ops -> { ops.onRename(track) } },
-            onDelete = fileOps?.let { ops -> { ops.onDelete(track) } },
-            // 正在播的那首删除置灰：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
-            deleteEnabled = !isCurrent,
-            onMultiSelect = multiSelect?.let { ms -> { ms.onEnter(track.id) } },
-            onDismiss = { showMenu = false }
-        )
-    }
 }
 
 /** 正在播放的封面指示层：淡深色遮罩 + 居中三根均衡器条。
@@ -2084,146 +2112,206 @@ private fun DrawScope.drawPlayingBars(progress: (Int) -> Float, color: Color) {
     }
 }
 
-/** 长按弹出的上下文菜单：「添加到播放队列」+ 文件操作（改名 / 删除，可选项）。
- * 菜单以长按行作为锚点，尽量贴近触摸位置；外围保留阴影安全区，避免动画缩放时裁切阴影。 */
+/**
+ * 长按 / 「更多」弹出的上下文菜单（工单 15）：**主窗口内的 overlay**，不再是 `Popup` 独立窗口。
+ *
+ * 为什么要提上来：`Popup` 是独立窗口，采样不到主窗口的 `backdrop`，所以菜单只能自己画半透明
+ * `Surface`（当初手写玻璃的技术原因）。提到主窗口后菜单与玻璃岛 / 迷你条走**同一个** [GlassPanel]、
+ * 同一种材质与前景色；宽 240、行高 48、圆角 `CornerLarge`、内边距 `MenuEdgePadding` 也与其它浮层一致。
+ *
+ * overlay 要**手动补齐** `Popup` 原本免费提供的行为（spec §10）：
+ * · **点外关闭**——菜单背后铺一层全屏透明 scrim，点它即关闭；
+ * · **返回键**——[BackHandler] 关菜单（后声明于页面导航的平级声明，优先响应，不会退出页面）；
+ * · **焦点**——菜单卡片可获焦并在出现时主动请求焦点（[FocusRequester]），键盘 / 无障碍焦点落在菜单内；
+ * · **z 序**——本 overlay 在主窗口 Box 里**最后声明**，压在内容与所有浮层之上。
+ *
+ * 选中项后：动作立刻执行 + 立刻关菜单，没有退场动画（等动画播完才动作手感发黏，真机反馈）。
+ * 进入动画只有弹性缩放、没有整体淡入：菜单带阴影，同一个 layer 上跑 alpha 会让 Android 走离屏合成、
+ * 阴影在动画里闪；菜单项自己逐条淡入，整体再淡一遍看不出来。
+ *
+ * @param state 菜单状态（哪首歌 + 长按触点窗口坐标）；`request == null` 时不渲染。
+ * @param currentTrackId 当前播放曲目：正在播的那首删除项置灰（播放中的文件删了缓冲还在，bug 高发）。
+ * @param backdrop 主窗口采样源，玻璃面据此取景。
+ * @param windowSize 主窗口尺寸，用于把菜单夹在可见区内（[menuTopLeft]）。
+ */
 @Composable
-private fun AddToQueueMenu(
-    touchPoint: IntOffset,
-    onAddToQueue: () -> Unit,
-    onRename: (() -> Unit)? = null,
-    onDelete: (() -> Unit)? = null,
-    deleteEnabled: Boolean = true,
-    onMultiSelect: (() -> Unit)? = null,
-    onDismiss: () -> Unit
+private fun BoxScope.TrackContextMenu(
+    state: TrackMenuState,
+    currentTrackId: String?,
+    backdrop: Backdrop,
+    windowSize: IntSize
 ) {
-    // 整体进入动画只有弹性缩放，**没有整体淡入**：菜单带阴影，在同一个 layer 上跑 alpha 会让
-    // Android 走离屏合成，阴影在动画里闪（真机反馈）。菜单项自己本来就是逐条淡入的，整体再淡一遍看不出来。
+    // 在这里读状态（而不是在调用方读、再作为参数传进来）：菜单没开时读出来是 null，
+    // 状态一变只会让本函数重组，不会把整个主界面拖进来。
+    val request = state.request ?: return
+    val track = request.track
+    // 离线时不提供「改名 / 删除」：走 PC 伴生服务，断网必然失败（ADR-0008）。
+    val fileOps = LocalTrackFileOps.current.takeUnless { LocalOfflineActive.current }
+    val multiSelect = LocalMultiSelect.current
+    val onAddToQueue = request.onAddToQueue
+    val onDismiss = state::dismiss
+    val density = LocalDensity.current
+    val edgePaddingPx = with(density) { Dimens.MenuEdgePadding.toPx().toInt() }
+    // 主窗口是 edge-to-edge：菜单不能画到状态栏 / 导航栏底下，定位时要把两侧 inset 让出来。
+    // 这里读的是**当前窗口**的 inset（与 windowSize 同一坐标系）；读值发生在菜单打开期间，
+    // 键盘弹出改变 inset 时菜单会跟着重新夹取。
+    val insets = WindowInsets.systemBars
+    val topInsetPx = with(density) { insets.getTop(density).toInt() }
+    val bottomInsetPx = with(density) { insets.getBottom(density).toInt() }
+    // 与玻璃岛同一档表面色（0.8）：菜单同样压在滚动的曲库上，太透会看不清文字。
+    val glassSurface = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
     val menuScale = remember { Animatable(0.85f) }
-    // 选中菜单项后：动作立刻执行 + 立刻关菜单，没有退场动画。
-    // 之前等两段 120ms 动画播完才动作，手感发黏（真机反馈）。
-    fun closeAnd(action: () -> Unit) {
-        action()
-        onDismiss()
-    }
-    val shadowPaddingPx = with(LocalDensity.current) { Dimens.MenuEdgePadding.toPx().toInt() }
+    val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         menuScale.snapTo(0.85f)
         menuScale.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 650f))
     }
-    Popup(
-        popupPositionProvider = object : PopupPositionProvider {
-            override fun calculatePosition(
-                anchorBounds: IntRect,
-                windowSize: IntSize,
-                layoutDirection: LayoutDirection,
-                popupContentSize: IntSize
-            ): IntOffset {
-                val x = (touchPoint.x - shadowPaddingPx).coerceIn(
-                    0,
-                    (windowSize.width - popupContentSize.width).coerceAtLeast(0)
-                )
-                val y = (touchPoint.y - popupContentSize.height / 2).coerceIn(
-                    0,
-                    (windowSize.height - popupContentSize.height).coerceAtLeast(0)
-                )
-                return IntOffset(x, y)
-            }
-        },
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true)
-    ) {
+    // 等一帧再请求焦点：FocusRequester 要等节点完成布局才可寻址，立刻调用会拿不到焦点。
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        focusRequester.requestFocus()
+    }
+    fun closeAnd(action: () -> Unit) {
+        action()
+        onDismiss()
+    }
+    // 菜单卡片尺寸（宽固定 240，高度按项数实测）：定位要用它。
+    // 首帧量不到时整张菜单先隐身，量到后再显现——否则会先在错误位置闪一下再跳过去。
+    var menuCardSize by remember { mutableStateOf(IntSize.Zero) }
+    val measured = menuCardSize != IntSize.Zero
+    val anchor = menuTopLeft(
+        touchPoint = request.touchPoint,
+        menuSize = menuCardSize,
+        windowSize = windowSize,
+        edgePaddingPx = edgePaddingPx,
+        topInsetPx = topInsetPx,
+        bottomInsetPx = bottomInsetPx
+    )
+    Box(Modifier.fillMaxSize()) {
+        // 点外关闭：全屏透明 scrim。无涟漪、无颜色，纯命中区。
         Box(
-            modifier = Modifier.padding(Dimens.MenuEdgePadding)
+            Modifier
+                .matchParentSize()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss
+                )
+        )
+        Box(
+            modifier = Modifier
+                // anchor 是**卡片**左上角；外面还有一圈阴影安全区，所以整体往左上退一个 padding。
+                .offset { IntOffset(anchor.x - edgePaddingPx, anchor.y - edgePaddingPx) }
+                .padding(Dimens.MenuEdgePadding)
+                // 吃掉卡片自身的点击（含内边距空白区），别让它穿透到后面的 scrim 把菜单关掉。
+                // 行内按钮是更内层的 clickable，点击仍归它们。
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {}
+                )
+                .focusRequester(focusRequester)
+                .focusable()
+                .graphicsLayer {
+                    scaleX = menuScale.value
+                    scaleY = menuScale.value
+                    // 只有量到尺寸后才可见（见上）；alpha 恒为 1 时不触发离屏合成，阴影不会闪。
+                    alpha = if (measured) 1f else 0f
+                }
         ) {
-            Box(
+            GlassPanel(
+                backdrop = backdrop,
+                surface = glassSurface,
+                shape = RoundedCornerShape(Dimens.CornerLarge),
                 modifier = Modifier
-                    .graphicsLayer {
-                        scaleX = menuScale.value
-                        scaleY = menuScale.value
-                    }
+                    .width(MenuWidth)
+                    // 量卡片本身（不含阴影安全区），定位按它算。
+                    .onSizeChanged { menuCardSize = it }
             ) {
-                Surface(
-                    modifier = Modifier.width(240.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-                    // 带 alpha 的 surface 匹配不上 contentColorFor，不给就会落回默认黑色：
-                    // 深色主题下菜单文字全黑（工单 15 会把整个菜单换成同窗玻璃）。
-                    contentColor = MaterialTheme.colorScheme.onSurface,
-                    shadowElevation = 16.dp,
-                    tonalElevation = 2.dp,
-                    border = BorderStroke(
-                        0.5.dp,
-                        // 深色主题：白色低透的高光描边，是**菜单玻璃的高光**而不是文字色，
-                        // 跟着封面换色会变成一层彩色描边，反而不像玻璃。
-                        // 浅色主题：白描边叠白底等于没有边界，改用色板的 outlineVariant。
-                        if (isSystemInDarkTheme()) {
-                            Color.White.copy(alpha = 0.25f)
-                        } else {
-                            MaterialTheme.colorScheme.outlineVariant
+                Column(Modifier.fillMaxWidth()) {
+                    var menuItemVisible by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) { menuItemVisible = true }
+                    val menuView = LocalView.current
+                    fun tapFeedback() = menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    StaggeredMenuItem(
+                        visible = menuItemVisible,
+                        delayMs = 0,
+                        icon = { Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                        text = "添加到播放队列",
+                        onClick = {
+                            tapFeedback()
+                            closeAnd { onAddToQueue() }
                         }
                     )
-                ) {
-                    Column(Modifier.fillMaxWidth()) {
-                        var menuItemVisible by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) { menuItemVisible = true }
-                        // 加队列成功的轻触觉反馈。
-                        val menuView = LocalView.current
-                        fun tapFeedback() = menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    fileOps?.let { ops ->
                         StaggeredMenuItem(
                             visible = menuItemVisible,
-                            delayMs = 0,
-                            icon = { Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
-                            text = "添加到播放队列",
+                            delayMs = 40,
+                            icon = { Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                            text = "改名",
                             onClick = {
                                 tapFeedback()
-                                closeAnd(onAddToQueue)
+                                closeAnd { ops.onRename(track) }
                             }
                         )
-                        if (onRename != null) {
-                            StaggeredMenuItem(
-                                visible = menuItemVisible,
-                                delayMs = 40,
-                                icon = { Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
-                                text = "改名",
-                                onClick = {
+                        // 正在播的那首删除置灰：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
+                        val deleteEnabled = track.id != currentTrackId
+                        StaggeredMenuItem(
+                            visible = menuItemVisible,
+                            delayMs = 80,
+                            icon = {
+                                Icon(
+                                    Icons.Filled.Delete,
+                                    null,
+                                    Modifier.size(20.dp),
+                                    // 删除项一律 error 色（spec §10/§11 的「删除类操作统一 error 色」）；
+                                    // 置灰是整项降透明，颜色本身不再换成 onSurfaceVariant，免得看起来像普通项。
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            text = "删除",
+                            enabled = deleteEnabled,
+                            textColor = MaterialTheme.colorScheme.error,
+                            onClick = {
+                                if (deleteEnabled) {
                                     tapFeedback()
-                                    closeAnd(onRename)
+                                    closeAnd { ops.onDelete(track) }
                                 }
-                            )
-                        }
-                        if (onDelete != null) {
-                            StaggeredMenuItem(
-                                visible = menuItemVisible,
-                                delayMs = 80,
-                                icon = { Icon(Icons.Filled.Delete, null, Modifier.size(20.dp), tint = if (deleteEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) },
-                                text = "删除",
-                                enabled = deleteEnabled,
-                                onClick = {
-                                    if (deleteEnabled) {
-                                        tapFeedback()
-                                        closeAnd(onDelete)
-                                    }
-                                }
-                            )
-                        }
-                        if (onMultiSelect != null) {
-                            StaggeredMenuItem(
-                                visible = menuItemVisible,
-                                delayMs = 120,
-                                icon = { Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
-                                text = "多选",
-                                onClick = {
-                                    tapFeedback()
-                                    closeAnd(onMultiSelect)
-                                }
-                            )
-                        }
+                            }
+                        )
+                    }
+                    multiSelect?.let { ms ->
+                        StaggeredMenuItem(
+                            visible = menuItemVisible,
+                            delayMs = 120,
+                            icon = { Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                            text = "多选",
+                            onClick = {
+                                tapFeedback()
+                                closeAnd { ms.onEnter(track.id) }
+                            }
+                        )
                     }
                 }
             }
         }
+        // 返回键关菜单：声明在页面导航的 BackHandler 之后（组合顺序靠后 = 优先响应），
+        // 所以菜单开着时按返回只关菜单，不会退回上一页。
+        BackHandler { onDismiss() }
     }
 }
+
+/** 长按菜单的一次弹出请求：哪首歌、锚在哪个触点、以及「加到队列」这个动作。
+ * 文件操作 / 多选等回调不进这里——那些由 overlay 处从 CompositionLocal 现取，避免每行都带一份；
+ * 「是不是当前曲目」也不在这里定死，比较发生在渲染时（播放中切歌不会留下过期状态）。 */
+private class TrackMenuRequest(
+    val track: Track,
+    val touchPoint: IntOffset,
+    val onAddToQueue: () -> Unit
+)
+
+/** 长按菜单的内容宽度（spec §10：240dp）。 */
+private val MenuWidth = 240.dp
 
 /** 单曲行的文件操作对话框：改名（三个预填输入框）+ 删除二次确认。
  * 提交中禁用按钮且不许关闭（照 QQ 下载弹窗的防误关写法）；失败原因——含「密钥不对」
@@ -2245,9 +2333,23 @@ private fun TrackFileOpsDialogs(
         var album by remember(target.id) { mutableStateOf(target.album) }
         AlertDialog(
             onDismissRequest = { if (!state.isFileOpsBusy) onDismissRename() },
+            // 键盘处理（spec §10）：Compose 的 Dialog 在 decorFitsSystemWindows = true（默认）时
+            // 不设 adjustResize，IME 会直接盖住弹窗底部。关掉它 + 给弹窗面加 imePadding，
+            // 键盘弹出时整块内容上移，确认 / 取消按钮始终留在键盘上方。
+            properties = DialogProperties(decorFitsSystemWindows = false),
+            modifier = Modifier.imePadding(),
             title = { Text("修改歌曲信息") },
             text = {
-                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // 输入区可滚动（spec §10）：键盘弹出后窗口变矮，三个输入框 + 提示会撑不下。
+                // 按钮区在 AlertDialog 的按钮槽里——material3 把 text 槽放进 `weight(1f, fill = false)`
+                // 的 Box，先保证按钮拿到位置、剩余空间才给内容，所以按钮天然在滚动区外、不会被键盘顶走。
+                // 这里不再额外写高度上限：上限来自可用空间，写死 dp 反而会让大屏无谓地早滚动。
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
+                ) {
                     OutlinedTextField(title, { title = it }, label = { Text("歌名") }, singleLine = true, enabled = !state.isFileOpsBusy)
                     OutlinedTextField(artist, { artist = it }, label = { Text("歌手") }, singleLine = true, enabled = !state.isFileOpsBusy)
                     OutlinedTextField(album, { album = it }, label = { Text("专辑") }, singleLine = true, enabled = !state.isFileOpsBusy)
@@ -2302,7 +2404,11 @@ private fun TrackFileOpsDialogs(
             },
             confirmButton = {
                 TextButton(enabled = !state.isFileOpsBusy, onClick = { onDelete(deleteTarget) }) {
-                    Text(if (state.isFileOpsBusy) "删除中…" else "删除")
+                    // 删除确认用 error 色（spec §10/§11）：与长按菜单里的删除项一致。
+                    Text(
+                        if (state.isFileOpsBusy) "删除中…" else "删除",
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             },
             dismissButton = {
@@ -2320,7 +2426,9 @@ private fun StaggeredMenuItem(
     icon: @Composable () -> Unit,
     text: String,
     onClick: () -> Unit,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    /** 文字色。默认跟随玻璃面的 onSurface（[GlassPanel] 提供）；删除项传 error 色。 */
+    textColor: Color = Color.Unspecified
 ) {
     val transition = updateTransition(visible, label = "menuItem")
     val offsetY by transition.animateDp(
@@ -2336,15 +2444,17 @@ private fun StaggeredMenuItem(
         modifier = Modifier
             // fillMaxWidth 必须在 clickable 外侧：不然行宽只有文字那点，菜单右半边点了没反应（真机反馈）。
             .fillMaxWidth()
+            // 行高 48dp（spec §10）：正文行高 24 + 上下各 12 正好 48，字体放大时靠 heightIn 兜底。
+            .heightIn(min = Dimens.TouchTargetSmall)
             .graphicsLayer { this.alpha = if (enabled) alpha else alpha * 0.38f }
             .offset(y = offsetY)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         icon()
         Spacer(Modifier.width(14.dp))
-        Text(text, style = MaterialTheme.typography.bodyLarge)
+        Text(text, style = MaterialTheme.typography.bodyLarge, color = textColor)
     }
 }
 

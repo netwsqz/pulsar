@@ -4,7 +4,7 @@
 
 **Blocked by:** 01（设计 token 收口与设置页底部留白）、03（GlassPanel 玻璃面前景色统一）。
 
-**Status:** ready-for-agent
+**Status:** ready-for-human（代码完成，待真机验证）
 
 **规格参考：** `spec.md` §10、§11
 
@@ -39,6 +39,25 @@
 **验证了什么**
 
 - `:app:testDebugUnitTest` 全绿；`:app:assembleDebug` 通过。
+
+**已知限制（不假装已解决）**
+
+- **焦点陷阱**：`Popup` 是独立窗口，天然把焦点 / 无障碍语义隔离在那扇窗里。主窗口 overlay 做不到：
+  Compose 没有公开的「模态屏障」API，TalkBack 仍可能扫到背后的内容。当前实现是
+  `focusRequester` + `focusable` 主动取焦，返回键由 `BackHandler` 兜底；逐项读屏标签正常
+  （点外 / 卡片空白用 `pointerInput` 而非 `clickable`，避免整张菜单被合并成一个语义节点）。
+- **菜单生命周期不跟行**：旧 `Popup` 随 `TrackRow` 离开组合自动消失；overlay 是常驻的，目前只在
+  切页时收起。列表数据刷新把行刷掉（下拉刷新 / 离线过滤）这种边角情况下菜单会停在原坐标。
+- **阴影安全区 16dp**：按 spec §10 用 `MenuEdgePadding`（= SpaceMedium）；玻璃库默认阴影半径更大，
+  贴屏幕边缘时阴影会被屏幕裁掉一点（卡片本身不会被裁，父布局不 clip）。
+
+**评审记录**
+
+- 规范轴：无严重违规。已修 token 收口（`MenuWidth` 进 `Dimens`、行内边距改
+  `SpaceMidLarge`/`SpaceMidMedium`）、删除项改用 `destructive` 单一标志、去掉多余的 `BoxScope`
+  receiver、`clickable`→`pointerInput` 的语义修复、误导性的 IME 注释。
+- 规格轴：主链路成立（主窗口 overlay + `GlassPanel`、240/48/CornerLarge、error 色、IME 配方均相符）。
+  见上方「已知限制」。
 
 **「先在一个页面验证再替换全部」的处理**
 

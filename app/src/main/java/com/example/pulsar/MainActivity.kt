@@ -83,8 +83,8 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -2135,7 +2135,7 @@ private fun DrawScope.drawPlayingBars(progress: (Int) -> Float, color: Color) {
  * @param windowSize 主窗口尺寸，用于把菜单夹在可见区内（[menuTopLeft]）。
  */
 @Composable
-private fun BoxScope.TrackContextMenu(
+private fun TrackContextMenu(
     state: TrackMenuState,
     currentTrackId: String?,
     backdrop: Backdrop,
@@ -2153,8 +2153,7 @@ private fun BoxScope.TrackContextMenu(
     val density = LocalDensity.current
     val edgePaddingPx = with(density) { Dimens.MenuEdgePadding.toPx().toInt() }
     // 主窗口是 edge-to-edge：菜单不能画到状态栏 / 导航栏底下，定位时要把两侧 inset 让出来。
-    // 这里读的是**当前窗口**的 inset（与 windowSize 同一坐标系）；读值发生在菜单打开期间，
-    // 键盘弹出改变 inset 时菜单会跟着重新夹取。
+    // 只让系统栏——菜单没有输入框，IME 不该参与它的定位。
     val insets = WindowInsets.systemBars
     val topInsetPx = with(density) { insets.getTop(density).toInt() }
     val bottomInsetPx = with(density) { insets.getBottom(density).toInt() }
@@ -2188,28 +2187,22 @@ private fun BoxScope.TrackContextMenu(
         bottomInsetPx = bottomInsetPx
     )
     Box(Modifier.fillMaxSize()) {
-        // 点外关闭：全屏透明 scrim。无涟漪、无颜色，纯命中区。
+        // 点外关闭：全屏透明命中区。用 pointerInput 而不是 clickable——clickable 会往无障碍树里
+        // 塞一个没有标签的巨型按钮，读屏用户会先撞上它；返回键另有出口（下面的 BackHandler）。
         Box(
             Modifier
                 .matchParentSize()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss
-                )
+                // key 用 Unit：onDismiss 指向同一个 TrackMenuState，不必因每次重组换实例而重启手势。
+                .pointerInput(Unit) { detectTapGestures { onDismiss() } }
         )
         Box(
             modifier = Modifier
                 // anchor 是**卡片**左上角；外面还有一圈阴影安全区，所以整体往左上退一个 padding。
                 .offset { IntOffset(anchor.x - edgePaddingPx, anchor.y - edgePaddingPx) }
                 .padding(Dimens.MenuEdgePadding)
-                // 吃掉卡片自身的点击（含内边距空白区），别让它穿透到后面的 scrim 把菜单关掉。
-                // 行内按钮是更内层的 clickable，点击仍归它们。
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {}
-                )
+                // 吃掉卡片范围内的点击（含内边距空白区），别让它穿透到后面的 scrim 把菜单关掉。
+                // 这里同样避开 clickable：它会把整张卡片合并成一个语义节点，菜单项的读屏标签就没了。
+                .pointerInput(Unit) { detectTapGestures { } }
                 .focusRequester(focusRequester)
                 .focusable()
                 .graphicsLayer {
@@ -2224,7 +2217,7 @@ private fun BoxScope.TrackContextMenu(
                 surface = glassSurface,
                 shape = RoundedCornerShape(Dimens.CornerLarge),
                 modifier = Modifier
-                    .width(MenuWidth)
+                    .width(Dimens.MenuWidth)
                     // 量卡片本身（不含阴影安全区），定位按它算。
                     .onSizeChanged { menuCardSize = it }
             ) {
@@ -2236,7 +2229,7 @@ private fun BoxScope.TrackContextMenu(
                     StaggeredMenuItem(
                         visible = menuItemVisible,
                         delayMs = 0,
-                        icon = { Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                        icon = { tint -> Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = tint) },
                         text = "添加到播放队列",
                         onClick = {
                             tapFeedback()
@@ -2247,7 +2240,7 @@ private fun BoxScope.TrackContextMenu(
                         StaggeredMenuItem(
                             visible = menuItemVisible,
                             delayMs = 40,
-                            icon = { Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                            icon = { tint -> Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = tint) },
                             text = "改名",
                             onClick = {
                                 tapFeedback()
@@ -2259,19 +2252,10 @@ private fun BoxScope.TrackContextMenu(
                         StaggeredMenuItem(
                             visible = menuItemVisible,
                             delayMs = 80,
-                            icon = {
-                                Icon(
-                                    Icons.Filled.Delete,
-                                    null,
-                                    Modifier.size(20.dp),
-                                    // 删除项一律 error 色（spec §10/§11 的「删除类操作统一 error 色」）；
-                                    // 置灰是整项降透明，颜色本身不再换成 onSurfaceVariant，免得看起来像普通项。
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            },
+                            icon = { tint -> Icon(Icons.Filled.Delete, null, Modifier.size(20.dp), tint = tint) },
                             text = "删除",
                             enabled = deleteEnabled,
-                            textColor = MaterialTheme.colorScheme.error,
+                            destructive = true,
                             onClick = {
                                 if (deleteEnabled) {
                                     tapFeedback()
@@ -2284,7 +2268,7 @@ private fun BoxScope.TrackContextMenu(
                         StaggeredMenuItem(
                             visible = menuItemVisible,
                             delayMs = 120,
-                            icon = { Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary) },
+                            icon = { tint -> Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = tint) },
                             text = "多选",
                             onClick = {
                                 tapFeedback()
@@ -2309,9 +2293,6 @@ private class TrackMenuRequest(
     val touchPoint: IntOffset,
     val onAddToQueue: () -> Unit
 )
-
-/** 长按菜单的内容宽度（spec §10：240dp）。 */
-private val MenuWidth = 240.dp
 
 /** 单曲行的文件操作对话框：改名（三个预填输入框）+ 删除二次确认。
  * 提交中禁用按钮且不许关闭（照 QQ 下载弹窗的防误关写法）；失败原因——含「密钥不对」
@@ -2423,17 +2404,19 @@ private fun TrackFileOpsDialogs(
 private fun StaggeredMenuItem(
     visible: Boolean,
     delayMs: Int,
-    icon: @Composable () -> Unit,
+    icon: @Composable (Color) -> Unit,
     text: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
-    /** 文字色。默认跟随玻璃面的 onSurface（[GlassPanel] 提供）；删除项传 error 色。 */
-    textColor: Color = Color.Unspecified
+    /** 破坏性操作（删除）：图标与文字统一 error 色；普通项图标主色、文字跟随玻璃面的 onSurface。 */
+    destructive: Boolean = false
 ) {
+    val accent = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    val textColor = if (destructive) MaterialTheme.colorScheme.error else Color.Unspecified
     val transition = updateTransition(visible, label = "menuItem")
     val offsetY by transition.animateDp(
         transitionSpec = { spring(dampingRatio = 0.7f, stiffness = 350f) },
-        targetValueByState = { if (it) 0.dp else 12.dp },
+        targetValueByState = { if (it) 0.dp else Dimens.SpaceMidMedium },
         label = "offsetY"
     )
     val alpha by transition.animateFloat(
@@ -2449,11 +2432,11 @@ private fun StaggeredMenuItem(
             .graphicsLayer { this.alpha = if (enabled) alpha else alpha * 0.38f }
             .offset(y = offsetY)
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp),
+            .padding(horizontal = Dimens.SpaceMidLarge, vertical = Dimens.SpaceMidMedium),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        icon()
-        Spacer(Modifier.width(14.dp))
+        icon(accent)
+        Spacer(Modifier.width(Dimens.SpaceMidMedium))
         Text(text, style = MaterialTheme.typography.bodyLarge, color = textColor)
     }
 }

@@ -75,6 +75,9 @@ internal object Dimens {
     /** 长按菜单的安全区与内容内边距（阴影需要同宽的安全区，两处共用这一个值）。 */
     val MenuEdgePadding = 16.dp
 
+    /** 长按菜单的内容宽度（spec §10：240dp）。 */
+    val MenuWidth = 240.dp
+
     // 设置页配色预设色块（工单 13）：一行最多 8 个，窄屏由 FlowRow 自动换行
     val ThemeSwatch = 36.dp
     val ThemeSwatchBorder = 1.dp

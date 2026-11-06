@@ -180,7 +180,7 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 
 ### Issue tracker
 
-工单以本地 markdown 文件存在 `.scratch/<feature-slug>/` 下（本仓库无 git remote）。见 `docs/agents/issue-tracker.md`。
+工单走 GitHub Issues（`netwsqz/pulsar`，用 `gh` CLI）；`.scratch/` 存量工单只作历史，不再新增。见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 

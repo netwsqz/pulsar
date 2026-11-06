@@ -12,6 +12,6 @@
 
 当某个 skill 提到某个角色（例如「打上 AFK-ready 的 triage 标签」）时，使用本表对应行的标签字符串。
 
-注意：本仓库用的是**本地 Markdown** tracker（见 `issue-tracker.md`），没有真正的 label 机制 —— 这些字符串就写在工单文件顶部附近的 `Status:` 行里。
+注意：本仓库用 GitHub Issues（见 `issue-tracker.md`），这些字符串就是仓库里的 label 名。首次建单前用 `gh label create <name>` 建好这五个标签（GitHub 不会自动创建，`--add-label` 遇到不存在的标签会报错）。
 
 想换命名就改右列。

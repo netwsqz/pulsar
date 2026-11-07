@@ -147,6 +147,11 @@ interface PlaybackGate {
 
 ### Step 0 — 基线 + 测试基建（不改生产代码）
 
+> **已完成 2026-11-08**。基线：63 套 / 731 例（本步开始时 61 套 / 727 例）全绿。
+> **Fake 没有按原文在本步建，挪到 Step 2 的 RED 阶段**：`FakePlaybackRemote` /
+> `FakeTrackMediaItemFactory` / `FakePlaybackGate` 要实现的接口此刻还不存在，写出来编译不过；
+> 且 §4 自己写明接口形状「slice 2 再定稿」——先建 Fake 等于把没定稿的形状抄两遍。
+
 **目标**：确认改动前全绿，准备好共享 Fake。
 
 **动作**
@@ -172,6 +177,19 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 ---
 
 ### Step 1 — 抽纯函数：MediaItem 构造 + 队列操作
+
+> **已完成 2026-11-08**：全量 731 例全绿，`assembleDebug` 通过。与原文的差异：
+>
+> - 新增 `PlaybackMediaItems.kt`（`Track.toPlaybackMetadata()` + `buildMediaItem(track, url)`）、
+>   `PlaybackQueueOps.kt`（`insertAfterCurrentIndex` / `removeIdsFromQueue` / `applyOrderToPositions`），
+>   全部 `internal`。测试：`PlaybackMediaItemsTest`、`PlaybackQueueOpsTest`（4 例）。
+> - `removeIdsFromQueue` 收 `List<String>`（媒体 id 列表），由调用方拍队列快照；不依赖 Media3 对象。
+> - `applyOrderToPositions` 的插入位置**夹在合法范围内**：`moveMediaItem` 对越界索引是抛异常、
+>   不是自动夹紧。生产路径（`orderedIds` 是队列的一个排列）下夹紧是空操作，与旧行为逐字一致。
+> - **JVM 单测测不到 URI / 封面 tag / extras**：桩化 android.jar 下 `Uri.parse` 返回 null，
+>   Media3 因此不建 `localConfiguration`（URI 与 tag 都挂在它下面），`Bundle` 读写也是桩。
+>   这三项是逐字传递、逻辑为零，靠真机验收清单覆盖（封面显示、换歌响度增益）。
+> - **待真机**：基本播放一遍（点歌、切歌、拖拽重排队列、删除队列项）。
 
 **目标**：先把能纯测的逻辑从 `MainActivity.kt` 拿出来，不改调用方。
 

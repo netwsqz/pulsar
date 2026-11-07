@@ -239,7 +239,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.session.MediaController
@@ -263,11 +262,14 @@ import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackMode
 import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.SilenceSkipMediaCommands
-import com.example.pulsar.playback.putLoudnessGain
 import com.example.pulsar.playback.SleepTimer
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
 import java.time.LocalDate
+import com.example.pulsar.playback.buildMediaItem
 import com.example.pulsar.playback.buildPlaybackOrder
+import com.example.pulsar.playback.applyOrderToPositions
+import com.example.pulsar.playback.insertAfterCurrentIndex
+import com.example.pulsar.playback.removeIdsFromQueue
 import com.example.pulsar.playback.formatPosition
 import com.example.pulsar.playback.playbackModeConfig
 import com.example.pulsar.playback.positionReachedSeekTarget
@@ -959,18 +961,13 @@ private fun MusicLibraryScreen(
             } else {
                 val url = viewModel.streamUrl(track)
                 if (url != null) {
-                    val mediaItem = MediaItem.Builder()
-                        .setUri(url)
-                        .setMediaId(track.id)
-                        .setTag(track.imageTag)
-                        .setMediaMetadata(track.toPlaybackMetadata())
-                        .build()
+                    val mediaItem = buildMediaItem(track, url)
                     if (ctrl.mediaItemCount == 0) {
                         ctrl.setMediaItem(mediaItem)
                         ctrl.prepare()
                         ctrl.play()
                     } else {
-                        val insertIndex = (ctrl.currentMediaItemIndex + 1).coerceAtMost(ctrl.mediaItemCount)
+                        val insertIndex = insertAfterCurrentIndex(ctrl.currentMediaItemIndex, ctrl.mediaItemCount)
                         ctrl.addMediaItem(insertIndex, mediaItem)
                     }
                     snackbarScope.launch { snackbarHostState.showSnackbar("已添加到播放队列") }
@@ -1490,11 +1487,8 @@ private fun MusicLibraryScreen(
     fun removeFromQueue(ids: Set<String>) {
         val ctrl = controllerState.controller ?: return
         // 倒序摘：removeMediaItem 会让后面的索引前移；正在播的索引跳过（VM 守卫已挡单曲，这里兜底）
-        for (i in ctrl.mediaItemCount - 1 downTo 0) {
-            if (i != ctrl.currentMediaItemIndex && ctrl.getMediaItemAt(i).mediaId in ids) {
-                ctrl.removeMediaItem(i)
-            }
-        }
+        val mediaIds = List(ctrl.mediaItemCount) { ctrl.getMediaItemAt(it).mediaId.orEmpty() }
+        removeIdsFromQueue(mediaIds, ids, ctrl.currentMediaItemIndex).forEach { ctrl.removeMediaItem(it) }
     }
     TrackFileOpsDialogs(
         renameTarget = renameTarget,
@@ -4996,22 +4990,6 @@ internal fun AlbumCover(
 }
 
 /**
- * 播放条目元数据。响度增益挂 extras 而不是 MediaItem 的本地 tag——队列要经
- * MediaController 交给播放服务，本地 tag 只存在于控制端，到不了服务端；extras 会
- * 随 MediaMetadata 一起传过去，播放服务据此在换歌时算出回放增益。
- */
-private fun Track.toPlaybackMetadata(): MediaMetadata = MediaMetadata.Builder()
-    .setTitle(title)
-    .setArtist(artist)
-    .setAlbumTitle(album)
-    .setExtras(
-        Bundle().apply {
-            putLoudnessGain(normalizationGainDb)
-        }
-    )
-    .build()
-
-/**
  * 把 [tracks] 以 [startTrackId] 为开头旋转成播放队列后交给 [controller]；任一歌曲无流地址则放弃播放。
  * 调用方（[onPlayTrack]）负责离线守门：传进来的列表里只有能放的歌。
  */
@@ -5025,13 +5003,7 @@ private fun playTracks(
     val order = buildPlaybackOrder(tracks, startTrackId) ?: return
     val mediaItems = order.map { t ->
         val url = streamUrlFor(t) ?: return
-        // 把封面 tag 挂到条目上：Activity 被系统回收重建后，仍可从播放器读回封面信息。
-        MediaItem.Builder()
-            .setUri(url)
-            .setMediaId(t.id)
-            .setTag(t.imageTag)
-            .setMediaMetadata(t.toPlaybackMetadata())
-            .build()
+        buildMediaItem(t, url)
     }
     // 一次性监听本次加载失败，避免失败时应用崩溃；成功就绪后自动移除，防止重复累积。
     val errorListener = object : Player.Listener {
@@ -5413,10 +5385,8 @@ private fun MediaController.applyPlaybackMode(mode: PlaybackMode) {
  * MediaController 的 moveMediaItem 会即时更新本地队列镜像，循环内每次重新查当前位置即可正确收敛。
  */
 internal fun MediaController.applyQueueOrder(ordered: List<QueueTrack>) {
-    val desired = ordered.map { it.id }
-    for (targetIndex in desired.indices) {
-        val id = desired[targetIndex]
-        val currentIndex = (0 until mediaItemCount).firstOrNull { getMediaItemAt(it).mediaId == id } ?: continue
-        if (currentIndex != targetIndex) moveMediaItem(currentIndex, targetIndex)
+    val currentIds = List(mediaItemCount) { getMediaItemAt(it).mediaId.orEmpty() }
+    applyOrderToPositions(currentIds, ordered.map { it.id }).forEach { (from, to) ->
+        moveMediaItem(from, to)
     }
 }

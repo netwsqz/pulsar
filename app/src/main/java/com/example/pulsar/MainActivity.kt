@@ -169,9 +169,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
-import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -1160,7 +1157,6 @@ private fun MusicLibraryScreen(
                         currentTrackId = currentTrack?.id,
                         isPlaying = controllerState.isPlaying,
                         onRefresh = viewModel::refreshDiscover,
-                        onRefreshAlbums = viewModel::refreshDiscoverAlbums,
                         onRetry = viewModel::loadDiscoverAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
@@ -2448,7 +2444,7 @@ private fun StaggeredMenuItem(
  * 布局语言取 Auxio 的列表项规格（封面 + 主副文本），尺寸走 [Dimens]；
  * 这一页在 Auxio 里没有参照（Auxio 的 Home 就是曲库列表本身），属自创。
  * 各 section 独立降级：某一节失败/为空只是那一节不出现，整页照常可看。
- * 每日推荐是本地计算（按天稳定随机 + 下拉换批），其余走服务端。
+ * 每日推荐是本地计算（按天稳定随机 + 「换一批」），其余走服务端。
  */
 @Composable
 private fun DiscoverContent(
@@ -2464,18 +2460,17 @@ private fun DiscoverContent(
     currentTrackId: String?,
     isPlaying: Boolean,
     onRefresh: () -> Unit,
-    onRefreshAlbums: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 换一批按钮转圈（spec §9）：**只在加载时**转，停的时候补到最近的 360° 整倍数再停。
+    // 「换一批」按钮转圈（spec §9）：**只在刷新进行时**转，停的时候补到最近的 360° 整倍数再停。
     // 不用 rememberInfiniteTransition——它只要被组合就一直在跑动画帧（报告 #70，空转耗电），
-    // 而且以前是 isLoading 一落 false 就把 rotate 摘掉，图标从当前角度瞬间回正（报告 #30）。
+    // 而且以前是加载一落 false 就把 rotate 摘掉，图标从当前角度瞬间回正（报告 #30）。
     val refreshRotation = remember { Animatable(0f) }
-    val albumsLoading = state.isLoading
-    LaunchedEffect(albumsLoading) {
-        if (albumsLoading) {
-            // 一直转到被取消（albumsLoading 翻回 false）为止：把当前角度当成新起点，连续转圈不跳。
+    val refreshInFlight = state.isDiscoverRefreshing
+    LaunchedEffect(refreshInFlight) {
+        if (refreshInFlight) {
+            // 一直转到被取消（refreshInFlight 翻回 false）为止：把当前角度当成新起点，连续转圈不跳。
             while (true) {
                 refreshRotation.animateTo(
                     refreshRotation.value + 360f,
@@ -2491,7 +2486,7 @@ private fun DiscoverContent(
         }
     }
     // 每日推荐：按当天日期稳定随机挑 4 首（同一天内跨重启不变）。
-    // 下拉刷新递增变体编号，立刻换一批（挑选是纯本地计算，不等网络）。
+    // 「换一批」递增变体编号，立刻换一批（挑选是纯本地计算，不等网络）。
     var picksVariant by rememberSaveable { mutableStateOf(0) }
     val dailyPicks = remember(tracks, picksVariant) {
         discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
@@ -2514,39 +2509,11 @@ private fun DiscoverContent(
         tracksLoaded = state.tracks != null,
         isLoading = state.isLoading
     )
-    // 下拉刷新：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段放行幂等守卫），
-    // 每日推荐是本地计算，递增变体编号立刻换一批。
-    // 离线时不发网络请求（必然失败）：只重排本地的每日推荐与专辑墙（ADR-0008）。
-    val pullRefreshState = rememberPullToRefreshState()
-    // 刷新圈要落在状态栏和玻璃岛下方（报告 #23）。PullToRefreshBox 从自己的顶边排版，
-    // 而它整个铺在屏幕顶端（父层只有 navigationBarsPadding），所以默认位置会被状态栏和玻璃岛盖住。
-    //
-    // 修法用 indicator 自带的 `maxDistance`，而不是再加一层 padding：indicator 会**自己**
-    // 按拖拽进度从顶边往下平移，平移上限就是这个 `maxDistance`（默认值只够到状态栏附近）。
-    // 再叠固定 padding 就成双重偏移——拖到底时会被顶到离岛很远的下方。
-    // 把上限提到「状态栏 + 玻璃岛占位（岛高 + 上下外边距）」，落位正好露出在岛下面（spec §2）。
-    val refreshIndicatorDistance = with(LocalDensity.current) {
-        (WindowInsets.statusBars.getTop(this) + Dimens.GlassIslandTopSpacing.toPx()).toDp()
-    }
-    PullToRefreshBox(
-        isRefreshing = state.isDiscoverRefreshing,
-        onRefresh = {
-            picksVariant++
-            if (!isOfflineFiltered) onRefresh()
-        },
-        state = pullRefreshState,
-        indicator = {
-            PullToRefreshDefaults.Indicator(
-                state = pullRefreshState,
-                isRefreshing = state.isDiscoverRefreshing,
-                modifier = Modifier.align(Alignment.TopCenter),
-                maxDistance = refreshIndicatorDistance
-            )
-        },
-        modifier = modifier.fillMaxSize()
-    ) {
+    // 「换一批」= 原下拉刷新的替代：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段
+    // 放行幂等守卫），每日推荐是本地计算，递增变体编号立刻换一批。
+    // 离线时不发网络请求（必然失败）：只换一批每日推荐（ADR-0008）。
     LazyColumn(
-        modifier.fillMaxSize()
+        modifier = modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
         contentPadding = PaddingValues(
             start = Dimens.SpaceMedium,
@@ -2556,7 +2523,115 @@ private fun DiscoverContent(
         ),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
     ) {
-        // 三节服务器历史来自服务端，各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
+        // ── 每日推荐（本地随机单曲，固定在页面最上方）──────────────────
+        // 「换一批」放标题右侧（不再独占一整行），一次刷新每日推荐 + 随机专辑 + 三节历史；
+        // 离线时不发网络请求（必然失败），只换每日推荐（ADR-0008）。
+        item(key = "dailyHeader") {
+            DiscoverSectionHeader(
+                "每日推荐",
+                Modifier.padding(top = Dimens.SpaceSmall),
+                action = {
+                    TextButton(
+                        onClick = {
+                            picksVariant++
+                            if (!isOfflineFiltered) onRefresh()
+                        },
+                        enabled = !state.isDiscoverRefreshing
+                    ) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(18.dp)
+                                .rotate(refreshRotation.value)
+                        )
+                        Spacer(Modifier.width(Dimens.SpaceTiny))
+                        Text("换一批")
+                    }
+                }
+            )
+        }
+        if (isOfflineFiltered) {
+            item(key = "offlineNotice") { OfflineNoticeText("离线 · 只显示已下载") }
+        }
+        if (state.tracks == null) {
+            // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
+            // 而这里是"还在连"，两者语义完全不同。
+            item(key = "dailySkeleton") {
+                TrackListSkeleton(count = 3, trailingSpace = true, modifier = Modifier.padding(top = Dimens.SpaceTiny))
+            }
+        } else if (!sections.showDailyPicks && sections.hasAnySection) {
+            // 每日推荐没内容、但这一页别处还有东西可看（比如专辑墙有内容）：
+            // 就地给一行小字说明为什么这一节是空的。
+            //
+            // **整页都空的时候这里不写**（报告 #25）：那由页面底部的空态独占
+            // （`hasAnySection` 为 false 时走下面 `discoverEmpty`），
+            // 否则同一个页面上会出现上下两段一模一样的提示。
+            item(key = "dailyEmpty") {
+                Text(
+                    discoverEmptyNotice(isOffline = state.isOffline).message(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
+                )
+            }
+        }
+        itemsIndexed(dailyPicks, key = { _, t -> "daily-${t.id}" }) { index, track ->
+            TrackRow(
+                track = track,
+                cover = trackCoverFor(track),
+                onClick = { onPlayTrack(dailyPicks, track.id) },
+                onAddToQueue = { onAddToQueue(track) },
+                showDivider = index != dailyPicks.lastIndex,
+                isCurrent = currentTrackId == track.id,
+                isPlaying = isPlaying,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        // ── 随机专辑（横滑封面墙）──────────────────────────────────
+        // 换一批不在这里单独放按钮：整页只有一个「换一批」，在「每日推荐」标题右侧。
+        item(key = "albumHeader") {
+            DiscoverSectionHeader(
+                "随机专辑",
+                Modifier.padding(top = Dimens.SpaceMidLarge)
+            )
+        }
+        val albums = discoverAlbums
+        when {
+            albums == null && state.isLoading -> {
+                // 骨架屏：与历史 section 同一份横滑骨架（同宽同造型）。
+                item(key = "albumSkeleton") {
+                    DiscoverStripSkeleton()
+                }
+            }
+            albums == null && state.errorMessage != null -> {
+                item(key = "albumError") { ErrorState(state.errorMessage, onRetry = onRetry) }
+            }
+            albums.orEmpty().isEmpty() -> {
+                item(key = "albumEmpty") {
+                    EmptyState(if (isOfflineFiltered) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
+                }
+            }
+            else -> {
+                val albumList = albums.orEmpty()
+                // 换一批后按新批次内容淡入淡出替换，避免硬切；用本批专辑 id 拼接作为批次 key。
+                val batchKey = albumList.joinToString(",") { it.id }
+                item(key = "albumWall") {
+                    Crossfade(targetState = batchKey, label = "discoverAlbumsBatch") {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+                            contentPadding = PaddingValues(horizontal = 2.dp)
+                        ) {
+                            items(albumList, key = { it.id }) { album ->
+                                DiscoverAlbumCard(album, coverFor(album), onOpenAlbum)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // ── 三节服务器历史（最近播放 / 最常播放 / 最近添加）────────────
+        // 各自独立加载/失败（工单 02）：拉到了就显示，为空就整节隐藏；
         // 还没拉到且这一节没失败时显示横滑骨架——失败过的不再转圈（否则永远等下去）。
         //
         // **离线时这三节整节不组合**（连骨架和空态都不给，spec §7）：数据留在 state 里，回在线自动回来。
@@ -2613,101 +2688,6 @@ private fun DiscoverContent(
                 ErrorState("推荐内容暂时加载失败", onRetry = onRefresh)
             }
         }
-        // ── 每日推荐 ─────────────────────────────────────────────
-        item(key = "dailyHeader") {
-            DiscoverSectionHeader("每日推荐", Modifier.padding(top = Dimens.SpaceMidLarge))
-        }
-        if (isOfflineFiltered) {
-            item(key = "offlineNotice") { OfflineNoticeText("离线 · 只显示已下载") }
-        }
-        if (state.tracks == null) {
-            // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
-            // 而这里是"还在连"，两者语义完全不同。
-            item(key = "dailySkeleton") {
-                TrackListSkeleton(count = 3, trailingSpace = true, modifier = Modifier.padding(top = Dimens.SpaceTiny))
-            }
-        } else if (!sections.showDailyPicks && sections.hasAnySection) {
-            // 每日推荐没内容、但这一页别处还有东西可看（比如专辑墙有内容）：
-            // 就地给一行小字说明为什么这一节是空的。
-            //
-            // **整页都空的时候这里不写**（报告 #25）：那由页面底部的空态独占
-            // （`hasAnySection` 为 false 时走下面 `discoverEmpty`），
-            // 否则同一个页面上会出现上下两段一模一样的提示。
-            item(key = "dailyEmpty") {
-                Text(
-                    discoverEmptyNotice(isOffline = state.isOffline).message(),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
-                )
-            }
-        }
-        itemsIndexed(dailyPicks, key = { _, t -> "daily-${t.id}" }) { index, track ->
-            TrackRow(
-                track = track,
-                cover = trackCoverFor(track),
-                onClick = { onPlayTrack(dailyPicks, track.id) },
-                onAddToQueue = { onAddToQueue(track) },
-                showDivider = index != dailyPicks.lastIndex,
-                isCurrent = currentTrackId == track.id,
-                isPlaying = isPlaying,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-        // ── 随机专辑（横滑封面墙）──────────────────────────────────
-        item(key = "albumHeader") {
-            DiscoverSectionHeader(
-                "随机专辑",
-                Modifier.padding(top = Dimens.SpaceMidLarge),
-                action = {
-                    IconButton(
-                        onClick = onRefreshAlbums,
-                        enabled = !state.isLoading,
-                        modifier = Modifier.size(Dimens.TouchTargetSmall)
-                    ) {
-                        Icon(
-                            Icons.Filled.Refresh,
-                            contentDescription = "换一批专辑",
-                            modifier = Modifier.rotate(refreshRotation.value)
-                        )
-                    }
-                }
-            )
-        }
-        val albums = discoverAlbums
-        when {
-            albums == null && state.isLoading -> {
-                // 骨架屏：与历史 section 同一份横滑骨架（同宽同造型）。
-                item(key = "albumSkeleton") {
-                    DiscoverStripSkeleton()
-                }
-            }
-            albums == null && state.errorMessage != null -> {
-                item(key = "albumError") { ErrorState(state.errorMessage, onRetry = onRetry) }
-            }
-            albums.orEmpty().isEmpty() -> {
-                item(key = "albumEmpty") {
-                    EmptyState(if (isOfflineFiltered) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
-                }
-            }
-            else -> {
-                val albumList = albums.orEmpty()
-                // 换一批后按新批次内容淡入淡出替换，避免硬切；用本批专辑 id 拼接作为批次 key。
-                val batchKey = albumList.joinToString(",") { it.id }
-                item(key = "albumWall") {
-                    Crossfade(targetState = batchKey, label = "discoverAlbumsBatch") {
-                        LazyRow(
-                            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
-                            contentPadding = PaddingValues(horizontal = 2.dp)
-                        ) {
-                            items(albumList, key = { it.id }) { album ->
-                                DiscoverAlbumCard(album, coverFor(album), onOpenAlbum)
-                            }
-                        }
-                    }
-                }
-            }
-        }
         // 整页都没有可看的内容（登录了、服务端也确实没歌 / 离线且一首都没下载）：
         // 给一句明确空态，而不是一片空白。判定走 discoverSections（报告 #22）——
         // 离线时三节历史的残留缓存**不算**「有内容」，否则整页空态永远不出现。
@@ -2719,7 +2699,6 @@ private fun DiscoverContent(
                 EmptyState(discoverEmptyNotice(isOffline = state.isOffline).message())
             }
         }
-    }
     }
 }
 
@@ -2854,6 +2833,18 @@ private fun DiscoverStripSkeleton() {
 /** 发现页横滑卡片的统一宽度（Auxio hero_small 128dp 附近，Pulsar 沿用 140dp 的既有手感）。 */
 private val DiscoverCardWidth = 140.dp
 
+/**
+ * 发现页横滑卡片的裁剪形状：**只圆上面两个角**。
+ *
+ * 圆角本来是给封面的（封面自己另有一份圆角），但整卡裁剪会把卡片底下的两行文字也圈进去。
+ * 文字没有左右内边距，最后一行紧贴卡片底边，正好落进底部两个 [Dimens.CornerLarge] 圆角的切口，
+ * 左下 / 右下各被啃掉一截。下角改成直角，文字就出了裁剪范围；涟漪仍跟着上圆角走，观感不变。
+ */
+private val DiscoverCardShape = RoundedCornerShape(
+    topStart = Dimens.CornerLarge,
+    topEnd = Dimens.CornerLarge
+)
+
 @Composable
 private fun DiscoverTrackCard(
     track: Track,
@@ -2866,7 +2857,7 @@ private fun DiscoverTrackCard(
     Column(
         modifier = Modifier
             .width(DiscoverCardWidth)
-            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .clip(DiscoverCardShape)
             .combinedClickable(onClick = onClick, onLongClick = onAddToQueue)
     ) {
         Box {
@@ -2914,7 +2905,7 @@ private fun DiscoverAlbumCard(
     Column(
         modifier = Modifier
             .width(DiscoverCardWidth)
-            .clip(RoundedCornerShape(Dimens.CornerLarge))
+            .clip(DiscoverCardShape)
             .clickable { onOpenAlbum(album) }
     ) {
         AlbumCover(

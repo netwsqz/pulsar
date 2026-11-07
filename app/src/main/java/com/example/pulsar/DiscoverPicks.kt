@@ -6,7 +6,7 @@ import kotlin.random.Random
 /**
  * 发现页「每日推荐」：从曲库里按 dayIndex（当天日期整数，如 20260903）稳定随机挑 count 首。
  * 同一天 + 同一批曲目 = 同一份歌单（跨重启/重组不变），换一天自动换一批。
- * variant 是刷新变体编号：下拉刷新一次 +1，同一编号内结果稳定，换编号即换一批。
+ * variant 是刷新变体编号：点一次「换一批」+1，同一编号内结果稳定，换编号即换一批。
  * 纯函数：不做任何 IO，UI 与测试都直接调用。
  */
 internal fun discoverDailyPicks(

@@ -3,6 +3,7 @@ package com.example.pulsar.playback
 import androidx.media3.common.Player
 import androidx.media3.session.SessionResult
 import com.example.pulsar.QueueTrack
+import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -59,6 +60,25 @@ class PlaybackSessionTest {
         imageTag = null,
         isCurrent = current
     )
+
+    private fun track(id: String) = Track(
+        id = id,
+        title = "歌曲-$id",
+        artist = "歌手",
+        album = "专辑",
+        durationMs = 0L,
+        imageTag = null
+    )
+
+    private fun TestScope.newSession(gate: PlaybackGate) =
+        PlaybackSession(remote, factory, gate, backgroundScope)
+
+    private fun TestScope.collectEvents(session: PlaybackSession): MutableList<PlaybackEvent> {
+        val events = mutableListOf<PlaybackEvent>()
+        backgroundScope.launch { session.events.collect { events += it } }
+        runCurrent()
+        return events
+    }
 
     // ── 连接 ────────────────────────────────────────────────────────────────
 
@@ -159,6 +179,198 @@ class PlaybackSessionTest {
         assertNull(session.state.value.playbackError)
         assertEquals("七里香 · 已暂停", session.state.value.status)
         assertEquals(listOf("x"), session.state.value.queue.map { it.id })
+    }
+
+    // ── 播放与队列意图 ──────────────────────────────────────────────────────
+
+    @Test
+    fun `点歌播放过滤不可播曲目并从点的那首开始`() = runTest {
+        remote.snapshot = connected()
+        val blockedGate = FakePlaybackGate(mapOf("b" to "这首歌没有下载，联网后才能播放"))
+        val session = newSession(blockedGate)
+        remote.connect()
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Play(listOf(track("a"), track("b"), track("c")), "c")
+        )
+
+        assertTrue(accepted)
+        val call = remote.setQueueCalls.single()
+        // buildPlaybackOrder 把点的那首旋到队首：c, a（b 被 gate 筛掉）。
+        assertEquals(listOf("c", "a"), call.items.map { it.mediaId })
+        assertEquals(0, call.startIndex)
+        assertEquals(1, remote.prepareCalls)
+        assertEquals(1, remote.playCalls)
+        // 起播前把当前模式应用到播放器（与旧 playTracks 一致）。
+        assertEquals(listOf(PlaybackMode.SEQUENCE), remote.appliedModes)
+    }
+
+    @Test
+    fun `点的那首不可播时只发事件不写队列`() = runTest {
+        remote.snapshot = connected()
+        val blockedGate = FakePlaybackGate(mapOf("b" to "这首歌没有下载，联网后才能播放"))
+        val session = newSession(blockedGate)
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Play(listOf(track("a"), track("b"), track("c")), "b")
+        )
+        runCurrent()
+
+        assertTrue(accepted)
+        assertEquals(0, remote.setQueueCalls.size)
+        assertEquals(0, remote.prepareCalls)
+        assertEquals(0, remote.playCalls)
+        assertFalse(events.any { it is PlaybackEvent.PlaybackQueuePrepared })
+        assertEquals(
+            listOf<PlaybackEvent>(PlaybackEvent.Unplayable("这首歌没有下载，联网后才能播放")),
+            events
+        )
+    }
+
+    @Test
+    fun `队列为空时添加到队列直接开始播放`() = runTest {
+        remote.snapshot = connected()
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(PlaybackIntent.AddToQueue(track("d")))
+        runCurrent()
+
+        assertTrue(accepted)
+        assertEquals(listOf("d"), remote.singleItems.map { it.mediaId })
+        assertEquals(1, remote.prepareCalls)
+        assertEquals(1, remote.playCalls)
+        assertEquals(0, remote.insertedItems.size)
+        assertEquals(
+            listOf<PlaybackEvent>(PlaybackEvent.Message("已添加到播放队列")),
+            events
+        )
+    }
+
+    @Test
+    fun `非空队列时添加到当前曲目之后`() = runTest {
+        remote.snapshot = connected().copy(
+            queue = listOf(queueTrack("a", current = true), queueTrack("b"))
+        )
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(PlaybackIntent.AddToQueue(track("c")))
+        runCurrent()
+
+        assertTrue(accepted)
+        assertEquals(listOf("c"), remote.insertedItems.map { it.mediaId })
+        assertEquals(0, remote.singleItems.size)
+        assertEquals(0, remote.prepareCalls)
+        assertEquals(0, remote.playCalls)
+        assertEquals(
+            listOf<PlaybackEvent>(PlaybackEvent.Message("已添加到播放队列")),
+            events
+        )
+    }
+
+    @Test
+    fun `删除队列项倒序摘并跳过当前项`() = runTest {
+        remote.snapshot = connected().copy(
+            queue = listOf(
+                queueTrack("a"),
+                queueTrack("b", current = true),
+                queueTrack("c"),
+                queueTrack("d")
+            )
+        )
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+
+        val accepted = session.dispatch(
+            PlaybackIntent.RemoveFromQueue(setOf("a", "b", "c", "d"))
+        )
+
+        assertTrue(accepted)
+        // b 是当前项（索引 1），跳过；其余从后往前：d(3) → c(2) → a(0)。
+        assertEquals(listOf(3, 2, 0), remote.removedIndices)
+    }
+
+    @Test
+    fun `重排产生与旧实现一致的逐条 move 序列`() = runTest {
+        remote.snapshot = connected().copy(
+            queue = listOf(
+                queueTrack("a"),
+                queueTrack("b"),
+                queueTrack("c"),
+                queueTrack("d")
+            )
+        )
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Reorder(
+                listOf(queueTrack("b"), queueTrack("a"), queueTrack("d"), queueTrack("c"))
+            )
+        )
+
+        assertTrue(accepted)
+        // 逐条模拟：b(1→0)，然后是 d(3→2)。
+        assertEquals(listOf(1 to 0, 3 to 2), remote.moves)
+    }
+
+    @Test
+    fun `SetMode 更新会话状态并应用到播放器`() = runTest {
+        remote.snapshot = connected()
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+
+        session.dispatch(PlaybackIntent.SetMode(PlaybackMode.REPEAT_ONE))
+
+        assertEquals(PlaybackMode.REPEAT_ONE, session.state.value.mode)
+        assertEquals(listOf(PlaybackMode.REPEAT_ONE), remote.appliedModes)
+    }
+
+    @Test
+    fun `CycleMode 在三种模式之间循环`() = runTest {
+        remote.snapshot = connected()
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+        assertEquals(PlaybackMode.SEQUENCE, session.state.value.mode)
+
+        session.dispatch(PlaybackIntent.CycleMode)
+        assertEquals(PlaybackMode.REPEAT_ONE, session.state.value.mode)
+
+        session.dispatch(PlaybackIntent.CycleMode)
+        assertEquals(PlaybackMode.SHUFFLE, session.state.value.mode)
+
+        session.dispatch(PlaybackIntent.CycleMode)
+        assertEquals(PlaybackMode.SEQUENCE, session.state.value.mode)
+
+        assertEquals(
+            listOf(PlaybackMode.REPEAT_ONE, PlaybackMode.SHUFFLE, PlaybackMode.SEQUENCE),
+            remote.appliedModes
+        )
+    }
+
+    @Test
+    fun `播放控制意图全部转发给播放器`() = runTest {
+        remote.snapshot = connected(isPlaying = true)
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+
+        session.dispatch(PlaybackIntent.TogglePlayPause)
+        session.dispatch(PlaybackIntent.SeekTo(12_000L))
+        session.dispatch(PlaybackIntent.Next)
+        session.dispatch(PlaybackIntent.Previous)
+        session.dispatch(PlaybackIntent.PlayQueueItem(2))
+
+        assertEquals(1, remote.pauseCalls)
+        assertEquals(listOf(12_000L), remote.seekToCalls)
+        assertEquals(1, remote.nextCalls)
+        assertEquals(1, remote.previousCalls)
+        assertEquals(listOf(2), remote.seekToDefaultPositionCalls)
+        assertEquals(1, remote.playCalls)
     }
 
     // ── USB 命令 ────────────────────────────────────────────────────────────

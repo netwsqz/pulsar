@@ -41,6 +41,8 @@ internal data class RemoteCommandResult(
 internal data class RemoteSnapshot(
     val isConnected: Boolean = false,
     val currentTitle: String? = null,
+    /** 当前曲目的原始条目；界面据此恢复「当前曲目」（歌词 / 封面 / 历史）。 */
+    val currentMediaItem: MediaItem? = null,
     val playbackState: Int = Player.STATE_IDLE,
     val isPlaying: Boolean = false,
     val positionMs: Long = 0L,
@@ -77,8 +79,7 @@ internal interface RemoteListener {
  * 这里只放「session 真正会调用的动作」，不暴露 `MediaController` 本身——session 因此
  * 不依赖 Media3 控制器的生命周期，测试也不需要 Android 运行时。
  *
- * 队列写操作（[setQueue] / [insertAfterCurrent] 等）本轮仍由 UI 旧路径直接操作
- * `MediaController`，接口先把形状留出来，Step 3 再切过来。
+ * 队列与播放控制的写操作全部从这里过；界面只发 [PlaybackIntent]。
  */
 internal interface PlaybackRemote {
     fun play()
@@ -105,6 +106,9 @@ internal interface PlaybackRemote {
     fun seekToNext()
 
     fun seekToPrevious()
+
+    /** 应用播放模式（repeatMode + shuffle）。 */
+    fun applyPlaybackMode(mode: PlaybackMode)
 
     /** 一次性拿到进度、时长、播放状态、队列与连接状态。 */
     fun snapshot(): RemoteSnapshot

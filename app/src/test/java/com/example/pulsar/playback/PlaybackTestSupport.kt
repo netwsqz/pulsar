@@ -44,6 +44,26 @@ internal class FakePlaybackRemote : PlaybackRemote {
     val sentCommands = mutableListOf<SentCommand>()
     val pendingCommands = mutableListOf<PendingCommand>()
 
+    // ── 队列 / 播放控制写操作记录 ────────────────────────────────────────────
+    data class SetQueueCall(val items: List<MediaItem>, val startIndex: Int)
+
+    val setQueueCalls = mutableListOf<SetQueueCall>()
+    val singleItems = mutableListOf<MediaItem>()
+    val insertedItems = mutableListOf<MediaItem>()
+    val removedIndices = mutableListOf<Int>()
+    val moves = mutableListOf<Pair<Int, Int>>()
+    val seekToCalls = mutableListOf<Long>()
+    val seekToDefaultPositionCalls = mutableListOf<Int>()
+    var nextCalls = 0
+    var previousCalls = 0
+    var playCalls = 0
+    var pauseCalls = 0
+    var prepareCalls = 0
+    val appliedModes = mutableListOf<PlaybackMode>()
+
+    /** `insertAfterCurrent` 的返回值；默认 true（已连接）。 */
+    var insertAfterCurrentResult = true
+
     /** 会话是否调过 [close]。 */
     var closed = false
         private set
@@ -73,29 +93,58 @@ internal class FakePlaybackRemote : PlaybackRemote {
     fun emitError(message: String) = listeners.toList().forEach { it.onPlayerError(message) }
 
     // ── PlaybackRemote ───────────────────────────────────────────────────────
-    override fun play() = Unit
+    override fun play() {
+        playCalls++
+    }
 
-    override fun pause() = Unit
+    override fun pause() {
+        pauseCalls++
+    }
 
-    override fun prepare() = Unit
+    override fun prepare() {
+        prepareCalls++
+    }
 
-    override fun setQueue(items: List<MediaItem>, startIndex: Int) = Unit
+    override fun setQueue(items: List<MediaItem>, startIndex: Int) {
+        setQueueCalls += SetQueueCall(items, startIndex)
+    }
 
-    override fun setSingleItem(item: MediaItem) = Unit
+    override fun setSingleItem(item: MediaItem) {
+        singleItems += item
+    }
 
-    override fun insertAfterCurrent(item: MediaItem): Boolean = true
+    override fun insertAfterCurrent(item: MediaItem): Boolean {
+        insertedItems += item
+        return insertAfterCurrentResult
+    }
 
-    override fun removeAt(index: Int) = Unit
+    override fun removeAt(index: Int) {
+        removedIndices += index
+    }
 
-    override fun move(from: Int, to: Int) = Unit
+    override fun move(from: Int, to: Int) {
+        moves += from to to
+    }
 
-    override fun seekTo(positionMs: Long) = Unit
+    override fun seekTo(positionMs: Long) {
+        seekToCalls += positionMs
+    }
 
-    override fun seekToDefaultPosition(index: Int) = Unit
+    override fun seekToDefaultPosition(index: Int) {
+        seekToDefaultPositionCalls += index
+    }
 
-    override fun seekToNext() = Unit
+    override fun seekToNext() {
+        nextCalls++
+    }
 
-    override fun seekToPrevious() = Unit
+    override fun seekToPrevious() {
+        previousCalls++
+    }
+
+    override fun applyPlaybackMode(mode: PlaybackMode) {
+        appliedModes += mode
+    }
 
     override fun snapshot(): RemoteSnapshot = snapshot
 

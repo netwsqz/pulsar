@@ -1,7 +1,9 @@
 package com.example.pulsar.playback
 
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import com.example.pulsar.QueueTrack
+import com.example.pulsar.domain.model.Track
 
 /**
  * USB 独占输出的对外状态。
@@ -34,6 +36,13 @@ internal data class PlaybackUiState(
     val positionMs: Long = 0L,
     val durationMs: Long = C.TIME_UNSET,
     val queue: List<QueueTrack> = emptyList(),
+    /** 当前播放模式。Step 3 起由会话持有，界面不再各存一份本地副本。 */
+    val mode: PlaybackMode = PlaybackMode.SEQUENCE,
+    /**
+     * 当前曲目的原始 `MediaItem`。界面用它把「当前曲目」同步回 ViewModel
+     * （歌词 / 封面 / 历史都按曲目 id 走），这样 UI 不必再直接持有控制器。
+     */
+    val currentMediaItem: MediaItem? = null,
     val usb: UsbOutputState = UsbOutputState(),
     val silenceSkipEnabled: Boolean = true
 )
@@ -45,6 +54,15 @@ internal sealed interface PlaybackEvent {
 
     /** 曲目不可播（离线未下载等），文案由 gate 给出。 */
     data class Unplayable(val reason: String) : PlaybackEvent
+
+    /**
+     * 点歌成功进入播放队列。界面据此把可播列表记进 ViewModel——解出可播列表是会话
+     * （gate 在会话内）的事，界面不再自己过滤一遍。
+     */
+    data class PlaybackQueuePrepared(
+        val tracks: List<Track>,
+        val startTrackId: String
+    ) : PlaybackEvent
 
     /**
      * USB 音量命令成功后的新音量。界面拿它立刻点亮音量浮窗——等 500ms 轮询会慢半拍。

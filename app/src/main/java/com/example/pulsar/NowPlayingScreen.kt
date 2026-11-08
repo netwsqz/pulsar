@@ -102,7 +102,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.C
-import androidx.media3.session.MediaController
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.delay
@@ -114,6 +113,7 @@ import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.PlaybackDiagnostics
+import com.example.pulsar.playback.PlaybackIntent
 import com.example.pulsar.playback.PlaybackMode
 import com.example.pulsar.playback.PlaybackOutputInfo
 import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
@@ -220,8 +220,6 @@ internal fun NowPlayingScreen(
     currentTrack: Track?,
     coverRequest: JellyfinRequest?,
     gradientColors: CoverGradient,
-    playbackMode: PlaybackMode,
-    onPlaybackModeChange: (PlaybackMode) -> Unit,
     lyrics: Lyrics,
     onLineSeek: (Long) -> Unit,
     sharedTransitionScope: SharedTransitionScope,
@@ -229,8 +227,9 @@ internal fun NowPlayingScreen(
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val controller = controllerState.controller
-    val hasMedia = controller != null && controllerState.durationMs > 0
+    // 播放模式由会话持有，本地只读；点按钮发 CycleMode 意图。
+    val playbackMode = controllerState.mode
+    val hasMedia = controllerState.isConnected && controllerState.durationMs > 0
     // 本页永远是深底白字，系统栏图标因此恒用亮色（不跟主题深浅走）。
     // 退出时把「跟随系统深浅」还回去——主界面由工单 14 的 edge-to-edge 统一设置。
     val view = LocalView.current
@@ -476,17 +475,20 @@ internal fun NowPlayingScreen(
                         queue = queue,
                         lazyListState = queueListState,
                         reorderableState = reorderableState,
-                        enabled = controller != null,
+                        enabled = controllerState.isConnected,
                         onDragStarted = { isQueueDragging = true },
                         onDragStopped = {
                             isQueueDragging = false
-                            controller?.applyQueueOrder(queue)
+                            controllerState.dispatch(PlaybackIntent.Reorder(queue))
                         },
                         onSeekTo = { index ->
-                            controller?.seekToDefaultPosition(index)
-                            controller?.play()
+                            controllerState.dispatch(PlaybackIntent.PlayQueueItem(index))
                         },
-                        onRemove = { index -> controller?.removeMediaItem(index) },
+                        onRemove = { index ->
+                            queue.getOrNull(index)?.let { item ->
+                                controllerState.dispatch(PlaybackIntent.RemoveFromQueue(setOf(item.id)))
+                            }
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -582,8 +584,8 @@ internal fun NowPlayingScreen(
                             )
                     )
                     IconButton(
-                        onClick = { onPlaybackModeChange(playbackMode.next()) },
-                        enabled = controller != null,
+                        onClick = { controllerState.dispatch(PlaybackIntent.CycleMode) },
+                        enabled = controllerState.isConnected,
                         modifier = Modifier.size(48.dp)
                     ) {
                         // 切换模式时图标交叉淡入淡出，跟进度条那套柔和动效保持一致（不再是硬切）。
@@ -591,7 +593,7 @@ internal fun NowPlayingScreen(
                             Icon(
                                 playbackModeIcon(mode),
                                 contentDescription = "切换播放模式，当前：${mode.label}",
-                                tint = if (controller != null) NpTextPrimary else NpTextFaint
+                                tint = if (controllerState.isConnected) NpTextPrimary else NpTextFaint
                             )
                         }
                     }
@@ -621,7 +623,7 @@ internal fun NowPlayingScreen(
                 value = displayedPositionSec,
                 onValueChange = { sliderPosition = it; isDragging = true },
                 onValueChangeFinished = {
-                    controller?.seekTo((sliderPosition * 1000).toLong())
+                    controllerState.dispatch(PlaybackIntent.SeekTo((sliderPosition * 1000).toLong()))
                     isDragging = false
                     // 锁定显示值，等播放器位置追上来再放开（见上面的 seekHoldSec）。
                     seekHoldSec = sliderPosition
@@ -655,9 +657,9 @@ internal fun NowPlayingScreen(
                 IconButton(
                     onClick = {
                         controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        controller?.seekToPrevious()
+                        controllerState.dispatch(PlaybackIntent.Previous)
                     },
-                    enabled = controller != null,
+                    enabled = controllerState.isConnected,
                     modifier = Modifier.size(44.dp)
                 ) {
                     Icon(
@@ -696,10 +698,10 @@ internal fun NowPlayingScreen(
                         .clickable(
                             interactionSource = playInteraction,
                             indication = LocalIndication.current,
-                            enabled = controller != null
+                            enabled = controllerState.isConnected
                         ) {
                             controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            controller?.let { if (it.isPlaying) it.pause() else it.play() }
+                            controllerState.dispatch(PlaybackIntent.TogglePlayPause)
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -714,9 +716,9 @@ internal fun NowPlayingScreen(
                 IconButton(
                     onClick = {
                         controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        controller?.seekToNext()
+                        controllerState.dispatch(PlaybackIntent.Next)
                     },
-                    enabled = controller != null,
+                    enabled = controllerState.isConnected,
                     modifier = Modifier.size(44.dp)
                 ) {
                     Icon(

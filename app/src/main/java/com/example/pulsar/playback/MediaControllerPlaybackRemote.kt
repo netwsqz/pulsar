@@ -22,8 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  * 它只在设备上跑）。晚注册的监听者在 [addListener] 时会收到当前连接状态的重放，
  * 所以 [PlaybackSession] 的初始化监听不会漏掉连接结果。
  *
- * [controller] 是给 Step 3 之前的旧路径（队列写操作仍直接操作控制器）用的过渡出口；
- * 一旦队列意图切进会话，这个属性就该删掉。
+ * [controller] 只在适配器内部使用（快照与命令）；界面的旧直连出口已在 Step 3 删除。
  */
 internal class MediaControllerPlaybackRemote(
     controllerFuture: ListenableFuture<MediaController>?
@@ -104,6 +103,7 @@ internal class MediaControllerPlaybackRemote(
         return RemoteSnapshot(
             isConnected = true,
             currentTitle = current.currentMediaItem?.mediaMetadata?.title?.toString(),
+            currentMediaItem = current.currentMediaItem,
             playbackState = current.playbackState,
             isPlaying = current.isPlaying,
             positionMs = current.currentPosition,
@@ -175,6 +175,14 @@ internal class MediaControllerPlaybackRemote(
 
     override fun seekToPrevious() {
         controller?.seekToPrevious()
+    }
+
+    override fun applyPlaybackMode(mode: PlaybackMode) {
+        val config = playbackModeConfig(mode)
+        controller?.apply {
+            repeatMode = config.repeatMode
+            shuffleModeEnabled = config.shuffleEnabled
+        }
     }
 }
 

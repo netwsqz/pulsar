@@ -1,9 +1,11 @@
 package com.example.pulsar.playback
 
+import android.net.Uri
 import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.SessionCommand
+import com.example.pulsar.QueueTrack
 import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -40,10 +42,40 @@ internal interface PlaybackGate {
 }
 
 /**
- * 播放会话的意图。Step 2 只收自定义命令这一批；队列 / 播放控制（`Play` / `AddToQueue` /
- * `Reorder` / `TogglePlayPause` 等）在 Step 3 补进来。
+ * 播放会话的意图：界面只声明「用户想做什么」，所有播放器写操作由会话执行。
  */
 internal sealed interface PlaybackIntent {
+    /** 点歌播放：从 [startTrackId] 开始，队列顺序由会话旋转。 */
+    data class Play(val tracks: List<Track>, val startTrackId: String) : PlaybackIntent
+
+    /** 打开手机里的本地音频（SAF `content://`）：单曲 set + prepare + play。 */
+    data class PlayLocalFile(val uri: Uri) : PlaybackIntent
+
+    /** 点播放队列里的某一行：跳到该索引并开始播放。 */
+    data class PlayQueueItem(val index: Int) : PlaybackIntent
+
+    /** 添加到播放队列：插在当前曲目之后；队列为空时直接开始播放。 */
+    data class AddToQueue(val track: Track) : PlaybackIntent
+
+    /** 从队列中移除指定 id 的曲目（跳过当前项，倒序摘）。 */
+    data class RemoveFromQueue(val ids: Set<String>) : PlaybackIntent
+
+    /** 拖拽重排后的目标顺序。 */
+    data class Reorder(val ordered: List<QueueTrack>) : PlaybackIntent
+
+    data class SeekTo(val positionMs: Long) : PlaybackIntent
+
+    data object Next : PlaybackIntent
+
+    data object Previous : PlaybackIntent
+
+    data object TogglePlayPause : PlaybackIntent
+
+    data class SetMode(val mode: PlaybackMode) : PlaybackIntent
+
+    /** 顺序循环 → 单曲循环 → 随机播放。 */
+    data object CycleMode : PlaybackIntent
+
     data class SetUsbExclusive(val enabled: Boolean) : PlaybackIntent
 
     data class SetUsbVolume(val percent: Int) : PlaybackIntent
@@ -74,8 +106,8 @@ private const val STATUS_USB_VOLUME_FAILED = "USB 音量设置失败"
  */
 internal class PlaybackSession(
     private val remote: PlaybackRemote,
-    @Suppress("unused") private val mediaItems: TrackMediaItemFactory,
-    @Suppress("unused") private val gate: PlaybackGate,
+    private val mediaItems: TrackMediaItemFactory,
+    private val gate: PlaybackGate,
     private val scope: CoroutineScope
 ) {
     private val _state = MutableStateFlow(PlaybackUiState())
@@ -99,6 +131,7 @@ internal class PlaybackSession(
                 it.copy(
                     isConnected = true,
                     isPlaying = snapshot.isPlaying,
+                    currentMediaItem = snapshot.currentMediaItem,
                     status = playbackStatusText(snapshot, it.playbackError)
                 )
             }
@@ -136,7 +169,8 @@ internal class PlaybackSession(
                     playbackError = null,
                     status = playbackStatusText(snapshot, null),
                     // 队列快照同步刷新：播放键的可用性与队列面板不能等下一轮 500ms 轮询。
-                    queue = snapshot.queue
+                    queue = snapshot.queue,
+                    currentMediaItem = snapshot.currentMediaItem
                 )
             }
         }
@@ -164,6 +198,18 @@ internal class PlaybackSession(
     fun dispatch(intent: PlaybackIntent): Boolean {
         if (closed) return false
         return when (intent) {
+            is PlaybackIntent.Play -> play(intent.tracks, intent.startTrackId)
+            is PlaybackIntent.PlayLocalFile -> playLocalFile(intent.uri)
+            is PlaybackIntent.PlayQueueItem -> playQueueItem(intent.index)
+            is PlaybackIntent.AddToQueue -> addToQueue(intent.track)
+            is PlaybackIntent.RemoveFromQueue -> removeFromQueue(intent.ids)
+            is PlaybackIntent.Reorder -> reorder(intent.ordered)
+            is PlaybackIntent.SeekTo -> seekTo(intent.positionMs)
+            PlaybackIntent.Next -> skipToNext()
+            PlaybackIntent.Previous -> skipToPrevious()
+            PlaybackIntent.TogglePlayPause -> togglePlayPause()
+            is PlaybackIntent.SetMode -> setMode(intent.mode)
+            PlaybackIntent.CycleMode -> cycleMode()
             is PlaybackIntent.SetUsbExclusive -> setUsbExclusive(intent.enabled)
             is PlaybackIntent.SetUsbVolume -> setUsbVolume(intent.percent)
             is PlaybackIntent.SetSilenceSkip -> setSilenceSkip(intent.enabled)
@@ -201,7 +247,8 @@ internal class PlaybackSession(
                 positionMs = snapshot.positionMs,
                 durationMs = snapshot.durationMs,
                 isPlaying = snapshot.isPlaying,
-                queue = snapshot.queue
+                queue = snapshot.queue,
+                currentMediaItem = snapshot.currentMediaItem
             )
         }
         queryUsbState()
@@ -270,6 +317,127 @@ internal class PlaybackSession(
             silenceQueryInFlight = false
         }, { runnable -> runnable.run() })
     }
+
+    // ── 播放 / 队列意图 ─────────────────────────────────────────────────────
+
+    /**
+     * 点歌播放。不可播的曲目从队列里筛掉；**点的那首不可播 → 只发 [PlaybackEvent.Unplayable]，
+     * 不写队列**（旧界面就是这个口径，避免「正在播」镜像指向一首根本没在放的歌）。
+     *
+     * 队列顺序仍用 [buildPlaybackOrder] 旋转到点的那首开头；某首算不出播放条目时整条放弃
+     * （保留旧 `playTracks` 语义，不在这里做 null URL 容错）。
+     */
+    private fun play(tracks: List<Track>, startTrackId: String): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        val start = tracks.firstOrNull { it.id == startTrackId }
+        val reason = start?.let(gate::unplayableReason)
+        if (reason != null) {
+            _events.tryEmit(PlaybackEvent.Unplayable(reason))
+            return true
+        }
+        val playable = tracks.filter(gate::isPlayable)
+        // ViewModel 的可播队列记录保持旧顺序：先记队列，再尝试起播（起播失败也不回滚记录）。
+        _events.tryEmit(PlaybackEvent.PlaybackQueuePrepared(playable, startTrackId))
+        val order = buildPlaybackOrder(playable, startTrackId) ?: return false
+        val items = order.map { track -> mediaItems.create(track) ?: return false }
+        remote.applyPlaybackMode(state.value.mode)
+        remote.setQueue(items, 0)
+        remote.prepare()
+        remote.play()
+        return true
+    }
+
+    private fun playLocalFile(uri: Uri): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        remote.setSingleItem(MediaItem.fromUri(uri))
+        remote.prepare()
+        remote.play()
+        return true
+    }
+
+    private fun playQueueItem(index: Int): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        remote.seekToDefaultPosition(index)
+        remote.play()
+        return true
+    }
+
+    /** 添加到队列：插在当前曲目之后；队列为空时 set + prepare + play。 */
+    private fun addToQueue(track: Track): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        val reason = gate.unplayableReason(track)
+        if (reason != null) {
+            _events.tryEmit(PlaybackEvent.Unplayable(reason))
+            return true
+        }
+        val item = mediaItems.create(track) ?: return false
+        if (remote.snapshot().queue.isEmpty()) {
+            remote.setSingleItem(item)
+            remote.prepare()
+            remote.play()
+        } else {
+            remote.insertAfterCurrent(item)
+        }
+        _events.tryEmit(PlaybackEvent.Message("已添加到播放队列"))
+        return true
+    }
+
+    /** 与旧 `removeFromQueue` 一致：倒序摘、跳过当前项。 */
+    private fun removeFromQueue(ids: Set<String>): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        val snapshot = remote.snapshot()
+        val currentIndex = snapshot.queue.indexOfFirst { it.isCurrent }
+        removeIdsFromQueue(
+            mediaIds = snapshot.queue.map { it.id },
+            ids = ids,
+            currentIndex = currentIndex
+        ).forEach(remote::removeAt)
+        return true
+    }
+
+    /** 与旧 `applyQueueOrder` 一致：逐条 move，位置序列由 [applyOrderToPositions] 模拟。 */
+    private fun reorder(ordered: List<QueueTrack>): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        val currentIds = remote.snapshot().queue.map { it.id }
+        applyOrderToPositions(currentIds, ordered.map { it.id }).forEach { (from, to) ->
+            remote.move(from, to)
+        }
+        return true
+    }
+
+    private fun seekTo(positionMs: Long): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        remote.seekTo(positionMs)
+        return true
+    }
+
+    private fun skipToNext(): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        remote.seekToNext()
+        return true
+    }
+
+    private fun skipToPrevious(): Boolean {
+        if (!remote.snapshot().isConnected) return false
+        remote.seekToPrevious()
+        return true
+    }
+
+    private fun togglePlayPause(): Boolean {
+        val snapshot = remote.snapshot()
+        if (!snapshot.isConnected) return false
+        if (snapshot.isPlaying) remote.pause() else remote.play()
+        return true
+    }
+
+    /** 播放模式写入会话状态并应用到播放器；未连接时也更新状态（与旧本地副本一致）。 */
+    private fun setMode(mode: PlaybackMode): Boolean {
+        _state.update { it.copy(mode = mode) }
+        remote.applyPlaybackMode(mode)
+        return true
+    }
+
+    private fun cycleMode(): Boolean = setMode(state.value.mode.next())
 
     private fun setUsbExclusive(enabled: Boolean): Boolean {
         if (!remote.snapshot().isConnected) return false

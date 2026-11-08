@@ -5,7 +5,13 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.example.pulsar.playback.usb.UsbExclusiveState
 
-/** PlaybackService 与界面之间的 USB 独占控制协议。 */
+/**
+ * PlaybackService 与界面之间的 USB 独占控制协议。
+ *
+ * 构造 `SessionCommand` 的 extras 用 `Bundle()` 而非 `Bundle.EMPTY`：JVM 单测跑在桩化的
+ * android.jar 上，`Bundle.EMPTY` 静态字段是 null，会让 `SessionCommand` 构造抛 NPE；
+ * `Bundle()` 在两边都是空包，行为一致。
+ */
 object UsbExclusiveMediaCommands {
     const val SET_ENABLED = "com.example.pulsar.USB_EXCLUSIVE_SET_ENABLED"
     const val GET_STATE = "com.example.pulsar.USB_EXCLUSIVE_GET_STATE"
@@ -17,12 +23,12 @@ object UsbExclusiveMediaCommands {
     const val KEY_VOLUME_PERCENT = "volumePercent"
     const val KEY_VOLUME_STEP = "volumeStep"
 
-    fun setCommand(): SessionCommand = SessionCommand(SET_ENABLED, Bundle.EMPTY)
+    fun setCommand(): SessionCommand = SessionCommand(SET_ENABLED, Bundle())
 
     fun setArgs(enabled: Boolean): Bundle = Bundle().apply { putBoolean(KEY_ENABLED, enabled) }
-    fun getCommand(): SessionCommand = SessionCommand(GET_STATE, Bundle.EMPTY)
+    fun getCommand(): SessionCommand = SessionCommand(GET_STATE, Bundle())
 
-    fun setVolumeCommand(): SessionCommand = SessionCommand(SET_VOLUME, Bundle.EMPTY)
+    fun setVolumeCommand(): SessionCommand = SessionCommand(SET_VOLUME, Bundle())
     fun setVolumeArgs(percent: Int): Bundle = Bundle().apply { putInt(KEY_VOLUME_PERCENT, percent) }
 
     /**
@@ -30,7 +36,7 @@ object UsbExclusiveMediaCommands {
      * 500ms 轮询来的快照，自己算会丢档，所以改传"加一档/减一档"，由服务按自己的实时音量
      * 算（[UsbExclusiveMediaCommands.KEY_VOLUME_STEP]，取值 ±1）。
      */
-    fun adjustVolumeCommand(): SessionCommand = SessionCommand(ADJUST_VOLUME, Bundle.EMPTY)
+    fun adjustVolumeCommand(): SessionCommand = SessionCommand(ADJUST_VOLUME, Bundle())
 
     fun adjustVolumeArgs(step: Int): Bundle = Bundle().apply { putInt(KEY_VOLUME_STEP, step) }
 

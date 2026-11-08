@@ -242,8 +242,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.session.MediaController
-import androidx.media3.session.SessionCommand
-import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -258,11 +256,17 @@ import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.ForegroundVolumeKeys
+import com.example.pulsar.playback.MediaControllerPlaybackRemote
 import com.example.pulsar.playback.PlaybackDiagnostics
+import com.example.pulsar.playback.PlaybackEvent
+import com.example.pulsar.playback.PlaybackGate
+import com.example.pulsar.playback.PlaybackIntent
 import com.example.pulsar.playback.PlaybackMode
+import com.example.pulsar.playback.PlaybackSession
 import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.SilenceSkipMediaCommands
 import com.example.pulsar.playback.SleepTimer
+import com.example.pulsar.playback.TrackMediaItemFactory
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
 import java.time.LocalDate
 import com.example.pulsar.playback.buildMediaItem
@@ -812,7 +816,18 @@ private fun MusicLibraryScreen(
     coverTheme: CoverTheme,
     themePreferences: ThemePreferences
 ) {
-    val controllerState = rememberMediaController(controllerFuture, volumeKeys)
+    // 播放会话的两个端口：曲目 → 播放条目 / 离线守门。Step 2 只把它们接进会话构造签名，
+    // Step 3 的播放意图才会用到；这里给的是生产实现（viewModel::streamUrl 等）。
+    val playbackMediaItems = remember(viewModel) {
+        TrackMediaItemFactory { track -> viewModel.streamUrl(track)?.let { buildMediaItem(track, it) } }
+    }
+    val playbackGate = remember(viewModel) {
+        object : PlaybackGate {
+            override fun isPlayable(track: Track): Boolean = viewModel.isPlayable(track)
+            override fun unplayableReason(track: Track): String? = viewModel.unplayableReason(track)
+        }
+    }
+    val controllerState = rememberPlaybackSession(controllerFuture, playbackMediaItems, playbackGate, volumeKeys)
     // 播放模式：顺序循环 → 单曲循环 → 随机播放，点按钮循环切换。
     var playbackMode by remember { mutableStateOf(PlaybackMode.SEQUENCE) }
     val localAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -5053,102 +5068,38 @@ internal data class ControllerState(
     val onSilenceSkipChange: (Boolean) -> Unit = {}
 )
 
-/** 读取播放器当前真实队列的快照（含当前播放项标记）。 */
-private fun MediaController.queueSnapshot(): List<QueueTrack> {
-    val count = mediaItemCount
-    val currentIndex = currentMediaItemIndex
-    if (count <= 0) return emptyList()
-    return List(count) { index ->
-        val item = getMediaItemAt(index)
-        val metadata = item.mediaMetadata
-        QueueTrack(
-            id = item.mediaId.orEmpty(),
-            title = metadata.title?.toString() ?: "未知歌曲",
-            artist = metadata.artist?.toString() ?: "未知歌手",
-            album = metadata.albumTitle?.toString().orEmpty(),
-            imageTag = item.localConfiguration?.tag as? String,
-            isCurrent = index == currentIndex
-        )
-    }
-}
-
 @Composable
-private fun rememberMediaController(
+private fun rememberPlaybackSession(
     controllerFuture: ListenableFuture<MediaController>?,
+    mediaItems: TrackMediaItemFactory,
+    gate: PlaybackGate,
     volumeKeys: ForegroundVolumeKeys
 ): ControllerState {
-    var controller by remember { mutableStateOf<MediaController?>(null) }
-    var status by remember { mutableStateOf("正在连接播放服务…") }
-    var playbackError by remember { mutableStateOf<String?>(null) }
-    var positionMs by remember { mutableStateOf(0L) }
-    var durationMs by remember { mutableStateOf(C.TIME_UNSET) }
-    var isPlaying by remember { mutableStateOf(false) }
-    var queue by remember { mutableStateOf<List<QueueTrack>>(emptyList()) }
-    var usbExclusiveEnabled by remember { mutableStateOf(false) }
-    var usbExclusiveState by remember { mutableStateOf("disabled") }
-    var usbExclusiveError by remember { mutableStateOf<String?>(null) }
-    var usbExclusivePending by remember { mutableStateOf(false) }
-    var usbVolumePercent by remember { mutableStateOf(100) }
-    var silenceSkipEnabled by remember { mutableStateOf(true) }
-    DisposableEffect(controllerFuture) {
-        if (controllerFuture == null) { status = "播放服务不可用"; onDispose { } } else {
-            var isActive = true
-            val listener = Runnable { if (isActive) runCatching { controller = controllerFuture.get(); status = controllerStatus(controller) }.onFailure { status = "播放服务连接失败" } }
-            controllerFuture.addListener(listener) { it.run() }
-            onDispose { isActive = false; controller = null }
-        }
+    val scope = rememberCoroutineScope()
+    val remote = remember(controllerFuture) { MediaControllerPlaybackRemote(controllerFuture) }
+    val session = remember(remote, mediaItems, gate, scope) {
+        PlaybackSession(remote, mediaItems, gate, scope)
     }
-    DisposableEffect(controller) {
-        val current = controller
-        if (current == null) onDispose { } else {
-            val listener = object : Player.Listener {
-                override fun onIsPlayingChanged(playing: Boolean) {
-                    isPlaying = playing
-                    if (playing) playbackError = null
-                    status = controllerStatus(current, playbackError)
-                }
-
-                override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    playbackError = null
-                    status = controllerStatus(current, playbackError)
-                    // 队列快照同步刷新：播放键的可用性（队列是否为空）与队列面板不能等下一轮
-                    // 500ms 轮询才更新，否则点歌后的第一拍按钮还是灰的。
-                    queue = current.queueSnapshot()
-                }
-
-                override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_BUFFERING) playbackError = null
-                    status = controllerStatus(current, playbackError)
-                }
-
-                override fun onPlayerError(error: PlaybackException) {
-                    playbackError = friendlyPlaybackError(error)
-                    status = controllerStatus(current, playbackError)
-                }
-            }
-            current.addListener(listener)
-            // 连接后立即同步播放状态，避免图标与播放器不一致（如后台回来正在播放却显示播放箭头）。
-            isPlaying = current.isPlaying
-            status = controllerStatus(current, playbackError)
-            onDispose { current.removeListener(listener) }
-        }
+    DisposableEffect(session) {
+        onDispose { session.close() }
     }
+    val uiState by session.state.collectAsStateWithLifecycle()
+
     // 前台音量键接管：把"USB 泵是否在输出 + 下发口"交给 Activity 的 dispatchKeyEvent（MIUI
-    // 不向远程音量会话派发音量键，见 ForegroundVolumeKeys 注释）。控制器没连上时清空，
-    // 音量键立刻还给系统。**泵没在输出（没插设备/未就绪）也走同一条清空路径**——那时声音
-    // 走系统 AudioTrack，接管只会让音量键失灵。
-    DisposableEffect(controller, usbExclusiveState) {
-        val current = controller
-        if (current == null) {
+    // 不向远程音量会话派发音量键，见 ForegroundVolumeKeys 注释）。控制器没连上时清空，音量键
+    // 立刻还给系统。**泵没在输出（没插设备/未就绪）也走同一条清空路径**——那时声音走系统
+    // AudioTrack，接管只会让音量键失灵。
+    DisposableEffect(uiState.isConnected, uiState.usb.state) {
+        if (!uiState.isConnected) {
             volumeKeys.snapshot = null
             volumeKeys.sink = null
         } else {
             volumeKeys.snapshot = ForegroundVolumeKeys.Snapshot(
-                usbAudioActive = UsbExclusiveMediaCommands.isUsbAudioActive(usbExclusiveState)
+                usbAudioActive = UsbExclusiveMediaCommands.isUsbAudioActive(uiState.usb.state)
             )
             volumeKeys.sink = ForegroundVolumeKeys.Sink { step ->
-                // 服务把算完的新音量随命令结果带回，拿它直接点亮浮窗——比等 500ms 轮询快一个来回。
-                adjustDeviceVolume(current, step, VolumeFeedback::show)
+                // 只发"加一档/减一档"；算术在服务里。返回 false 时按键交还系统。
+                session.dispatch(PlaybackIntent.AdjustVolume(step))
             }
         }
         onDispose {
@@ -5159,188 +5110,31 @@ private fun rememberMediaController(
             VolumeFeedback.dismiss()
         }
     }
-    // 轮询刷新进度与播放状态：每 500ms 读取一次当前位置、总时长、播放中标记、播放队列快照。
-    LaunchedEffect(controller) {
-        val current = controller
-        var isActive = true
-        var usbQueryInFlight = false
-        var silenceQueryInFlight = false
-        try {
-            while (isActive) {
-                current?.let {
-                    positionMs = it.currentPosition
-                    durationMs = it.duration
-                    isPlaying = it.isPlaying
-                    queue = it.queueSnapshot()
-                    if (!usbQueryInFlight) {
-                        usbQueryInFlight = true
-                        runCatching {
-                            it.sendCustomCommand(
-                                UsbExclusiveMediaCommands.getCommand(), Bundle.EMPTY
-                            )
-                        }.onSuccess { future ->
-                            future.addListener({
-                                if (isActive && controller === current) {
-                                    runCatching {
-                                        val result = future.get()
-                                        if (result.resultCode == SessionResult.RESULT_SUCCESS) {
-                                            val extras = result.extras
-                                            if (extras.containsKey(UsbExclusiveMediaCommands.KEY_STATE)) {
-                                                usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
-                                                usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
-                                                usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
-                                                if (extras.containsKey(UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT)) {
-                                                    usbVolumePercent = extras.getInt(
-                                                        UsbExclusiveMediaCommands.KEY_VOLUME_PERCENT, usbVolumePercent
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                usbQueryInFlight = false
-                            }, { runnable -> runnable.run() })
-                        }.onFailure { usbQueryInFlight = false }
-                    }
-                    if (!silenceQueryInFlight) {
-                        silenceQueryInFlight = true
-                        runCatching {
-                            it.sendCustomCommand(
-                                SilenceSkipMediaCommands.getCommand(), Bundle.EMPTY
-                            )
-                        }.onSuccess { future ->
-                            future.addListener({
-                                if (isActive && controller === current) {
-                                    runCatching {
-                                        val result = future.get()
-                                        if (result.resultCode == SessionResult.RESULT_SUCCESS) {
-                                            val extras = result.extras
-                                            if (extras.containsKey(SilenceSkipMediaCommands.KEY_ENABLED)) {
-                                                silenceSkipEnabled = extras.getBoolean(SilenceSkipMediaCommands.KEY_ENABLED)
-                                            }
-                                        }
-                                    }
-                                }
-                                silenceQueryInFlight = false
-                            }, { runnable -> runnable.run() })
-                        }.onFailure { silenceQueryInFlight = false }
-                    }
-                }
-                delay(500)
-            }
-        } finally {
-            isActive = false
+    // 音量键命令成功：服务把算完的新音量随结果带回，立刻点亮浮窗（比等 500ms 轮询快一个来回）。
+    LaunchedEffect(session) {
+        session.events.collect { event ->
+            if (event is PlaybackEvent.VolumeApplied) VolumeFeedback.show(event.percent)
         }
     }
-    return ControllerState(
-        controller = controller,
-        status = status,
-        playbackError = playbackError,
-        positionMs = positionMs,
-        durationMs = durationMs,
-        isPlaying = isPlaying,
-        queue = queue,
-        usbExclusiveEnabled = usbExclusiveEnabled,
-        usbExclusiveState = usbExclusiveState,
-        usbExclusiveError = usbExclusiveError,
-        usbExclusivePending = usbExclusivePending,
-        usbVolumePercent = usbVolumePercent,
-        silenceSkipEnabled = silenceSkipEnabled,
-        onUsbExclusiveChange = { enabled ->
-            val current = controller ?: return@ControllerState
-            usbExclusivePending = true
-            current.sendCustomCommand(
-                SessionCommand(UsbExclusiveMediaCommands.SET_ENABLED, Bundle.EMPTY),
-                UsbExclusiveMediaCommands.setArgs(enabled)
-            ).addListener({
-                runCatching {
-                    val resultFuture = current.sendCustomCommand(
-                        UsbExclusiveMediaCommands.getCommand(), Bundle.EMPTY
-                    )
-                    resultFuture.addListener({
-                        runCatching {
-                            val result = resultFuture.get()
-                            if (result.resultCode != SessionResult.RESULT_SUCCESS) {
-                                throw IllegalStateException("USB 独占设置命令失败")
-                            }
-                            val extras = result.extras
-                            usbExclusiveEnabled = extras.getBoolean(UsbExclusiveMediaCommands.KEY_ENABLED)
-                            usbExclusiveState = extras.getString(UsbExclusiveMediaCommands.KEY_STATE).orEmpty()
-                            usbExclusiveError = extras.getString(UsbExclusiveMediaCommands.KEY_ERROR)
-                        }.onFailure { usbExclusiveError = "USB 独占设置失败" }
-                        usbExclusivePending = false
-                    }, { runnable -> runnable.run() })
-                }.onFailure {
-                    usbExclusiveError = "USB 独占设置失败"
-                    usbExclusivePending = false
-                }
-            }, { runnable -> runnable.run() })
-        },
-        onUsbVolumeChange = { newPercent ->
-            usbVolumePercent = newPercent
-            val current = controller ?: return@ControllerState
-            val future = current.sendCustomCommand(
-                SessionCommand(UsbExclusiveMediaCommands.SET_VOLUME, Bundle.EMPTY),
-                UsbExclusiveMediaCommands.setVolumeArgs(newPercent)
-            )
-            future.addListener({
-                if (future.get().resultCode != SessionResult.RESULT_SUCCESS) {
-                    usbExclusiveError = "USB 音量设置失败"
-                }
-            }, { runnable -> runnable.run() })
-        },
-        onSilenceSkipChange = { enabled ->
-            silenceSkipEnabled = enabled
-            val current = controller ?: return@ControllerState
-            // 用 addListener 而非阻塞的 .get()：PlaybackService 里 SET_ENABLED 命令要靠一个
-            // 主线程协程写完 DataStore 才 set 这个 future，如果这里在主线程同步 .get() 等它，
-            // 会跟那个协程互相卡死（协程排不上主线程执行，主线程又卡在 .get() 上），触发 ANR。
-            current.sendCustomCommand(
-                SessionCommand(SilenceSkipMediaCommands.SET_ENABLED, Bundle.EMPTY),
-                SilenceSkipMediaCommands.setArgs(enabled)
-            ).addListener({}, { runnable -> runnable.run() })
-        }
-    )
-}
 
-/**
- * 前台音量键的下发：把一档调整发到会话，由播放服务按自己手里的实时值算新音量。
- *
- * **不在这里自己算百分比**——百分比的真源在服务里（`usbVolumePercent`），UI 侧只有
- * 500ms 轮询来的快照；连按两下时本地快照还没刷新，自己算会把第二下算成同一个目标值而
- * 丢掉一档。传"加一档/减一档"走一个来回，算术就只有一处。
- *
- * 走自定义命令而不是 `MediaController.increaseDeviceVolume()`：后者依赖 MediaSession
- * 把设备音量命令传给控制器，实测靠不住（`isCommandAvailable` 时真时假），而自定义命令
- * 这条通道是 App 内滑块一直在用的、验证过好用的。
- *
- * @param step `+1` 加一档、`-1` 减一档。
- * @param onApplied 服务算完（并夹紧）的新音量。**只在命令成功时调用**——吃掉按键却什么都没
- *   发生时不该给音量反馈。
- * @return `false` = 会话没提供这条命令（服务未连上）。此时按键交还系统，免得吃掉按键
- *   却什么都不做。
- */
-private fun adjustDeviceVolume(
-    controller: MediaController,
-    step: Int,
-    onApplied: (Int) -> Unit
-): Boolean {
-    val command = UsbExclusiveMediaCommands.adjustVolumeCommand()
-    if (!controller.isSessionCommandAvailable(command)) return false
-    return runCatching {
-        val future = controller.sendCustomCommand(
-            command, UsbExclusiveMediaCommands.adjustVolumeArgs(step)
-        )
-        // 结果顺着这次命令的返回值回来，比等 500ms 轮询快得多——音量浮窗就是靠它跟手的。
-        future.addListener({
-            runCatching {
-                val result = future.get()
-                if (result.resultCode == SessionResult.RESULT_SUCCESS) {
-                    UsbExclusiveMediaCommands.volumePercentFrom(result.extras)?.let(onApplied)
-                }
-            }
-        }, { runnable -> runnable.run() })
-    }.isSuccess
+    return ControllerState(
+        controller = remote.controller,
+        status = uiState.status,
+        playbackError = uiState.playbackError,
+        positionMs = uiState.positionMs,
+        durationMs = uiState.durationMs,
+        isPlaying = uiState.isPlaying,
+        queue = uiState.queue,
+        usbExclusiveEnabled = uiState.usb.enabled,
+        usbExclusiveState = uiState.usb.state,
+        usbExclusiveError = uiState.usb.error,
+        usbExclusivePending = uiState.usb.pending,
+        usbVolumePercent = uiState.usb.volumePercent,
+        silenceSkipEnabled = uiState.silenceSkipEnabled,
+        onUsbExclusiveChange = { session.dispatch(PlaybackIntent.SetUsbExclusive(it)) },
+        onUsbVolumeChange = { session.dispatch(PlaybackIntent.SetUsbVolume(it)) },
+        onSilenceSkipChange = { session.dispatch(PlaybackIntent.SetSilenceSkip(it)) }
+    )
 }
 
 private fun usbExclusiveStateLabel(state: ControllerState): String = when (state.usbExclusiveState) {
@@ -5351,26 +5145,6 @@ private fun usbExclusiveStateLabel(state: ControllerState): String = when (state
     "streaming" -> "输出中"
     "error" -> "USB 独占失败：${state.usbExclusiveError.orEmpty()}"
     else -> "状态未知"
-}
-
-private fun controllerStatus(controller: MediaController?, playbackError: String? = null): String {
-    if (playbackError != null) return playbackError
-    if (controller == null) return "播放服务不可用"
-    val title = controller.currentMediaItem?.mediaMetadata?.title ?: "未选择媒体"
-    val state = when {
-        controller.playbackState == Player.STATE_BUFFERING -> "缓冲中"
-        controller.playbackState == Player.STATE_ENDED -> "已结束"
-        controller.isPlaying -> "播放中"
-        else -> "已暂停"
-    }
-    return "$title · $state"
-}
-
-private fun friendlyPlaybackError(error: PlaybackException): String = when {
-    error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED -> "播放失败：网络连接中断"
-    error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
-        error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED -> "播放失败：音频格式不受支持"
-    else -> "播放失败：请检查服务器或网络"
 }
 
 /** 把 [mode] 应用到播放器：设置 repeatMode 与 shuffle 开关。 */

@@ -14,6 +14,7 @@ import com.example.pulsar.data.qqdownload.QQDownloadApi
 import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
+import com.example.pulsar.download.DownloadLibrary
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
@@ -135,17 +136,34 @@ class PulsarApplication : Application(), AuthorizationSink {
     fun downloadLedgerStore(): DownloadLedgerStore = DataStoreDownloadLedgerStore(pulsarPreferencesDataStore)
 
     /**
+     * 下载任务（调度器 + 唯一真相 module）共用的进程级作用域。
+     * 不混用 [playbackReportScope]：下载任务时长以分钟计，分开更好排查。
+     */
+    private val downloadScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
+    /**
      * 下载调度器，**进程级单例**：串行队列与进度状态都挂在它身上，界面重建不能重来一遍。
-     * 用独立的作用域而不是 [playbackReportScope]：两者生命周期虽然一样，但这些下载
-     * 任务时长以分钟计，混在一起会让播放上报的诊断更难看清。
      */
     val downloadScheduler: DownloadScheduler by lazy {
         DownloadScheduler(
-            scope = kotlinx.coroutines.CoroutineScope(
-                kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
-            ),
+            scope = downloadScope,
             downloads = mediaDownloads(),
             ledger = downloadLedgerStore(),
+        )
+    }
+
+    /**
+     * 「已下载」唯一真相（工单 #4）：字节完整 ∩ 当前账号名单。
+     * **进程级单例**——View 重建不能重来一份，账号作用域与快照都挂在它身上。
+     */
+    val downloadLibrary: DownloadLibrary by lazy {
+        DownloadLibrary(
+            downloads = mediaDownloads(),
+            ledger = downloadLedgerStore(),
+            scheduler = downloadScheduler,
+            scope = downloadScope,
         )
     }
 }

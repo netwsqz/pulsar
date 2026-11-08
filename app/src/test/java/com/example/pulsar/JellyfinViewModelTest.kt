@@ -16,6 +16,7 @@ import com.example.pulsar.data.libraryfiles.LibraryRecycleFile
 import com.example.pulsar.data.libraryfiles.LibraryRecycleResponse
 import com.example.pulsar.data.libraryfiles.LibraryRenameResponse
 import com.example.pulsar.data.libraryfiles.LibraryRestoreResponse
+import com.example.pulsar.download.DownloadLibrary
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -954,6 +955,64 @@ class JellyfinViewModelTest {
         advanceBounded()
 
         assertFalse(viewModel.isPlayable(track))
+        viewModel.stopOfflineForTest()
+    }
+
+    // ── 工单 #4：DownloadLibrary 接线后，离线口径与改前一致 ───────────────
+
+    @Test
+    fun `接线下载模块后离线可见集合仍为字节完整且在当前账号名单里`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val inLedger = Track("in-ledger", "歌", "手", "辑", 1L, null)
+        val notInLedger = Track("not-in-ledger", "歌", "手", "辑", 1L, null)
+        val snapshotRepo = FakeSnapshotRepository().apply {
+            stored = LibrarySnapshot(tracks = listOf(inLedger, notInLedger))
+        }
+        val mediaDownloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/in-ledger", "stream/not-in-ledger")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("in-ledger")))
+        }
+        val library = downloadLibraryFor(mediaDownloads, ledger)
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger, downloadLibrary = library
+        )
+        advanceBounded()
+
+        assertTrue(viewModel.isPlayable(inLedger))
+        assertFalse(viewModel.isPlayable(notInLedger))
+        // 交集在 module 里只算了一份；ViewModel 只读它的结果。
+        assertEquals(setOf("in-ledger"), library.state.value.visibleTrackIds)
+        assertEquals(setOf("stream/in-ledger", "stream/not-in-ledger"), library.state.value.completeKeys)
+        viewModel.stopOfflineForTest()
+    }
+
+    @Test
+    fun `接线下载模块后换账号看不见上一个账号的下载`() = runTest {
+        val api = FakeJellyfinApi()
+        api.musicItemsError = JellyfinError.Network(IOException("no network"))
+        val snapshotRepo = FakeSnapshotRepository().apply { stored = LibrarySnapshot(tracks = listOf(track)) }
+        val mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" }
+        // 名单只有 user-1 的条目；当前会话是 user-2
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("track-1"), userId = "user-1"))
+        }
+        val library = downloadLibraryFor(mediaDownloads, ledger)
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
+            downloadLedgerStore = ledger, downloadLibrary = library
+        )
+        advanceBounded()
+
+        assertFalse(viewModel.isPlayable(track))
+        assertTrue(library.state.value.visibleTrackIds.isEmpty())
+        // ADR-0007：字节仍共享，换账号不删任何东西
+        assertEquals(setOf("stream/track-1"), library.state.value.completeKeys)
         viewModel.stopOfflineForTest()
     }
 
@@ -2121,6 +2180,17 @@ class JellyfinViewModelTest {
         return viewModel
     }
 
+    /** 真 module + Fake 字节/名单：验证 ViewModel 接线，不复制交集逻辑。 */
+    private fun TestScope.downloadLibraryFor(
+        downloads: FakeMediaDownloads,
+        ledger: FakeDownloadLedgerStore
+    ): DownloadLibrary = DownloadLibrary(
+        downloads = downloads,
+        ledger = ledger,
+        scheduler = DownloadScheduler(backgroundScope, downloads, ledger),
+        scope = backgroundScope
+    )
+
     private fun TestScope.createViewModel(
         sessions: FakeSessionRepository,
         api: FakeJellyfinApi,
@@ -2129,10 +2199,12 @@ class JellyfinViewModelTest {
         mediaDownloads: FakeMediaDownloads? = null,
         snapshotRepository: FakeSnapshotRepository? = null,
         serverUrlHistory: FakeServerUrlHistory? = null,
-        downloadLedgerStore: FakeDownloadLedgerStore? = null
+        downloadLedgerStore: FakeDownloadLedgerStore? = null,
+        downloadLibrary: DownloadLibrary? = null
     ): JellyfinViewModel = JellyfinViewModel(
         sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
-        libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory, downloadLedgerStore
+        libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory, downloadLedgerStore,
+        downloadLibrary
     )
 
     /** 下载名单的内存 Fake（迁移测试用）。 */

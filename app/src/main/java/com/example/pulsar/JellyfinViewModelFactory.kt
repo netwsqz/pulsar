@@ -22,7 +22,9 @@ class JellyfinViewModelFactory(private val application: Application) : ViewModel
             serverUrlHistory = application.serverUrlHistory(),
             // 存量副本迁移（工单 07）写这里。直接拿 App 的 DataStore 建 store：
             // 不动 PulsarApplication（那文件归别的工单），也不必多一个工厂方法。
-            downloadLedgerStore = DataStoreDownloadLedgerStore(application.pulsarPreferencesDataStore)
+            downloadLedgerStore = DataStoreDownloadLedgerStore(application.pulsarPreferencesDataStore),
+            // 「已下载」唯一真相（工单 #4）：进程级单例，账号作用域与快照都挂在它身上。
+            downloadLibrary = application.downloadLibrary
         ) as T
     }
 }

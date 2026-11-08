@@ -11,6 +11,8 @@ import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.data.libraryfiles.LibraryFilesApi
 import com.example.pulsar.data.libraryfiles.LibraryFilesError
+import com.example.pulsar.download.AccountScope
+import com.example.pulsar.download.DownloadLibrary
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -52,7 +54,12 @@ class JellyfinViewModel(
     /** 服务器地址历史：登录页下拉选 + 登录成功后记录。null = 无历史。 */
     private val serverUrlHistory: ServerUrlHistory? = null,
     /** 下载名单：存量副本迁移（工单 07）写这里。null = 不迁移。 */
-    private val downloadLedgerStore: DownloadLedgerStore? = null
+    private val downloadLedgerStore: DownloadLedgerStore? = null,
+    /**
+     * 「已下载」唯一真相（工单 #4）：字节完整 ∩ 当前账号名单。
+     * null = 旧兜底路径（历史测试 / 未接线调用方），行为与改前一致。
+     */
+    private val downloadLibrary: DownloadLibrary? = null
 ) : ViewModel() {
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
@@ -139,6 +146,8 @@ class JellyfinViewModel(
         val password = current.password
         invalidateSessionRequests()
         session = null
+        // 新登录发起时旧账号的可见性立刻作废（字节不清，ADR-0007）。
+        downloadLibrary?.setAccount(null)
         dataSource = null
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
@@ -182,6 +191,8 @@ class JellyfinViewModel(
                 val tracks = source.getMusicItems(signedIn.userId, signedIn.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     session = signedIn
+                    // 登录成功：下载可见性按新账号作用域算（字节仍共享）。
+                    downloadLibrary?.setAccount(AccountScope(current.serverUrl, signedIn.userId))
                     dataSource = source
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(signedIn.accessToken)
@@ -231,6 +242,8 @@ class JellyfinViewModel(
                 val tracks = source.getMusicItems(saved.userId, saved.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
+                    // 恢复登录：下载可见性按这个账号作用域算（字节仍共享）。
+                    downloadLibrary?.setAccount(AccountScope(saved.serverUrl, saved.userId))
                     dataSource = source
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(saved.accessToken)
@@ -277,6 +290,8 @@ class JellyfinViewModel(
         val source = apiFactory.create(saved.serverUrl)
         snapshot = loaded
         session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
+        // 断网恢复也拿到了本地会话：下载可见性按这个账号作用域算。
+        downloadLibrary?.setAccount(AccountScope(saved.serverUrl, saved.userId))
         dataSource = source
         authorizationSink.activeAuthorization = source.authorizationHeader(saved.accessToken)
         _state.value = _state.value.copy(isLoading = false, isRestoring = false)
@@ -315,6 +330,8 @@ class JellyfinViewModel(
         stopOfflineRetry()
         invalidateSessionRequests()
         session = null
+        // 退出登录只清「可见性」，字节与统计不动（ADR-0007）。
+        downloadLibrary?.setAccount(null)
         dataSource = null
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
@@ -1238,7 +1255,16 @@ class JellyfinViewModel(
      * null 硬撑会把能放的歌也拦成「没下载」——对能播的歌说谎比等一下更糟。
      * 在线时不需要知道（一律能放），所以不提前算。
      */
-    private suspend fun computeDownloadedTrackIds(): Set<String> {
+    private suspend fun computeDownloadedTrackIds(): Set<String> =
+        // 主路径：交集只在 DownloadLibrary 里算（唯一真相）。module 未注入才走旧兜底。
+        downloadLibrary?.refresh(knownTracks(), ::cacheKey)?.visibleTrackIds
+            ?: legacyComputeDownloadedTrackIds()
+
+    /**
+     * 旧兜底：module 未注入时（历史测试 / 尚未接线的调用方）沿用改前的本地实现。
+     * **生产路径不应走到这里**；接线完成后由 #7 删除，别再往这里加新逻辑。
+     */
+    private suspend fun legacyComputeDownloadedTrackIds(): Set<String> {
         val downloads = mediaDownloads ?: return emptySet()
         val completeKeys = try {
             downloads.completeKeys()
@@ -1610,6 +1636,8 @@ class JellyfinViewModel(
         stopOfflineRetry()
         invalidateSessionRequests()
         session = null
+        // 会话过期 = 暂时没人登录：可见性清空，字节与统计不动（ADR-0007）。
+        downloadLibrary?.setAccount(null)
         dataSource = null
         authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()

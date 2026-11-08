@@ -190,3 +190,22 @@ internal class FakePlaybackGate(
 
     override fun unplayableReason(track: Track): String? = blocked[track.id]
 }
+
+/**
+ * 测试用播放模式存储：`load()` 返回 [mode]，`save()` 记录每次写入。
+ *
+ * 用真实挂起语义（没有 delay）就够了：`close()` 后写入必须停止，靠的是取消保存协程，
+ * 而不是这个 Fake 自己吞掉调用。
+ */
+internal class FakePlaybackModeStore(
+    var mode: PlaybackMode = PlaybackMode.SEQUENCE
+) : PlaybackModeStore {
+    val savedModes = mutableListOf<PlaybackMode>()
+
+    override suspend fun load(): PlaybackMode = mode
+
+    override suspend fun save(mode: PlaybackMode) {
+        savedModes += mode
+        this.mode = mode
+    }
+}

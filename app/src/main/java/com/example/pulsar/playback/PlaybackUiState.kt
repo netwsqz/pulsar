@@ -22,8 +22,8 @@ internal data class UsbOutputState(
 /**
  * 播放会话对外的唯一状态面。
  *
- * 迷你条、全屏播放页、设置页读同一份状态；`ControllerState` 只是它在 Step 3 之前的
- * 过渡映射（还带着旧路径直接使用的 `controller`）。
+ * 迷你条、全屏播放页、设置页都直接读这一份状态并发 [PlaybackIntent]；`PlaybackSession`
+ * 是唯一写入者，界面上不再有过渡状态壳或本地控制器引用。
  *
  * `durationMs` 的默认值保持 [C.TIME_UNSET]（负数），与旧实现一致——界面据此判断
  * 「还不知道时长」。

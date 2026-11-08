@@ -59,6 +59,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 ### 播放 `playback/` + `PlaybackService.kt`
 
 - `PlaybackService`：Media3 `MediaSessionService`，用 `AuthHttpDataSourceFactory` 建 ExoPlayer。`onTaskRemoved` 时若无播放内容则停止服务。
+- **播放会话 `PlaybackSession.kt` / `PlaybackRemote.kt` / `PlaybackUiState.kt`（#1–#3）**：播放 UI 的唯一门面。**界面只读 `PlaybackUiState`、只发 `PlaybackIntent`**，不再直接持有 `MediaController` 或自己写队列。会话内部负责连接与监听、**500ms 轮询**（`PLAYBACK_POLL_INTERVAL_MS`）、USB 独占 / USB 音量 / 静音跳过的**自定义命令解析**、错误映射与全部播放意图。`PlaybackRemote` 是控制器接缝：生产实现 `MediaControllerPlaybackRemote`，测试用 `FakePlaybackRemote`；`TrackMediaItemFactory` / `PlaybackGate` 两个 port 让会话单测不依赖 ViewModel。**播放模式真相在 `PlaybackUiState.mode`**：由 `PlaybackModeStore`（DataStore 键 `playback_mode`）落盘，转屏 / 重建组合后恢复；`SetMode` / `CycleMode` 由会话写盘，`close()` 后不再读写。
 - `PlaybackMode.kt`：三种模式（顺序循环/单曲循环/随机）与 Media3 设置的映射。
 - `PlaybackLogic.kt`：`buildPlaybackOrder`（旋转队列使点击的曲目开头）、`formatPosition`（`m:ss`）。
 - `SleepTimer.kt`：定时停止播放，倒计时到 0 时通过 `MediaController` 暂停。

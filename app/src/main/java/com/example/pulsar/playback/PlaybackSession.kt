@@ -108,7 +108,9 @@ internal class PlaybackSession(
     private val remote: PlaybackRemote,
     private val mediaItems: TrackMediaItemFactory,
     private val gate: PlaybackGate,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    /** 播放模式落盘端口；默认 no-op，生产注入 DataStore 实现。 */
+    private val modeStore: PlaybackModeStore = PlaybackModeStore.NoOp
 ) {
     private val _state = MutableStateFlow(PlaybackUiState())
     val state: StateFlow<PlaybackUiState> = _state.asStateFlow()
@@ -117,8 +119,18 @@ internal class PlaybackSession(
     val events: SharedFlow<PlaybackEvent> = _events.asSharedFlow()
 
     private var pollJob: Job? = null
+    private var modeLoadJob: Job? = null
+    private var modeSaveJob: Job? = null
     private var usbQueryInFlight = false
     private var silenceQueryInFlight = false
+
+    /** 从存储读到的模式；`null` = 还没读完。连接时用它把模式补到播放器。 */
+    @Volatile
+    private var restoredMode: PlaybackMode? = null
+
+    /** 用户已手动切过模式：加载完成得晚，也不许把旧值盖回来。 */
+    @Volatile
+    private var modeChangedByUser = false
 
     @Volatile
     private var closed = false
@@ -135,6 +147,9 @@ internal class PlaybackSession(
                     status = playbackStatusText(snapshot, it.playbackError)
                 )
             }
+            // 组合重建 / 进程重连后，播放器自己的 repeatMode 可能已是默认值：
+            // 把从存储恢复的模式补下发一次。没读到过存储值时不发，保持旧行为。
+            restoredMode?.let(remote::applyPlaybackMode)
             startPolling()
         }
 
@@ -192,6 +207,18 @@ internal class PlaybackSession(
 
     init {
         remote.addListener(listener)
+        modeLoadJob = scope.launch {
+            val saved = modeStore.load()
+            if (closed) return@launch
+            // 用户在读取完成前已经点过模式：以用户的选择为准，不让旧值盖回来。
+            if (modeChangedByUser) return@launch
+            restoredMode = saved
+            if (saved != _state.value.mode) {
+                _state.update { it.copy(mode = saved) }
+            }
+            // 加载晚于连接时补一次下发；连接晚于加载时由 onConnected 负责。
+            if (remote.snapshot().isConnected) remote.applyPlaybackMode(saved)
+        }
     }
 
     /** 唯一入口。返回 `false` = 意图没有生效（会话已关闭 / 未连接 / 命令不可用）。 */
@@ -217,12 +244,17 @@ internal class PlaybackSession(
         }
     }
 
-    /** 停止轮询并解除监听。之后 [dispatch] 一律返回 `false`。 */
+    /** 停止轮询并解除监听。之后 [dispatch] 一律返回 `false`，也不再读写模式存储。 */
     fun close() {
         if (closed) return
         closed = true
         pollJob?.cancel()
         pollJob = null
+        // 加载 / 保存都可能是挂起中的 DataStore IO：关闭后必须取消，避免销毁后还写盘。
+        modeLoadJob?.cancel()
+        modeLoadJob = null
+        modeSaveJob?.cancel()
+        modeSaveJob = null
         remote.removeListener(listener)
         remote.close()
     }
@@ -430,14 +462,25 @@ internal class PlaybackSession(
         return true
     }
 
-    /** 播放模式写入会话状态并应用到播放器；未连接时也更新状态（与旧本地副本一致）。 */
+    /** 播放模式写入会话状态、应用到播放器并落盘；未连接时也更新状态与存储。 */
     private fun setMode(mode: PlaybackMode): Boolean {
+        modeChangedByUser = true
         _state.update { it.copy(mode = mode) }
         remote.applyPlaybackMode(mode)
+        persistMode(mode)
         return true
     }
 
     private fun cycleMode(): Boolean = setMode(state.value.mode.next())
+
+    /** 落盘最新模式：连续切换时取消上一笔尚未执行的保存，只写最后那个。 */
+    private fun persistMode(mode: PlaybackMode) {
+        if (closed) return
+        modeSaveJob?.cancel()
+        modeSaveJob = scope.launch {
+            if (!closed) modeStore.save(mode)
+        }
+    }
 
     private fun setUsbExclusive(enabled: Boolean): Boolean {
         if (!remote.snapshot().isConnected) return false

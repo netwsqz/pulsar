@@ -353,6 +353,63 @@ class PlaybackSessionTest {
         )
     }
 
+    // ── 播放模式持久化（跨转屏 / 杀进程） ───────────────────────────────────
+
+    @Test
+    fun `播放模式从存储加载进会话状态`() = runTest {
+        val store = FakePlaybackModeStore(PlaybackMode.REPEAT_ONE)
+        val session = PlaybackSession(remote, factory, gate, backgroundScope, store)
+
+        runCurrent()
+
+        assertEquals(PlaybackMode.REPEAT_ONE, session.state.value.mode)
+    }
+
+    @Test
+    fun `连接后把存储里的播放模式应用到播放器`() = runTest {
+        val store = FakePlaybackModeStore(PlaybackMode.SHUFFLE)
+        val session = PlaybackSession(remote, factory, gate, backgroundScope, store)
+        // 先让加载完成，再连接：模式必须在连接时才下发给播放器。
+        runCurrent()
+
+        remote.snapshot = connected()
+        remote.connect()
+
+        assertEquals(PlaybackMode.SHUFFLE, session.state.value.mode)
+        assertEquals(PlaybackMode.SHUFFLE, remote.appliedModes.last())
+    }
+
+    @Test
+    fun `SetMode 与 CycleMode 会把模式写进存储`() = runTest {
+        val store = FakePlaybackModeStore()
+        val session = PlaybackSession(remote, factory, gate, backgroundScope, store)
+
+        session.dispatch(PlaybackIntent.SetMode(PlaybackMode.REPEAT_ONE))
+        runCurrent()
+        assertEquals(listOf(PlaybackMode.REPEAT_ONE), store.savedModes)
+
+        session.dispatch(PlaybackIntent.CycleMode)
+        runCurrent()
+        assertEquals(listOf(PlaybackMode.REPEAT_ONE, PlaybackMode.SHUFFLE), store.savedModes)
+    }
+
+    @Test
+    fun `关闭后不再写存储`() = runTest {
+        val store = FakePlaybackModeStore()
+        val session = PlaybackSession(remote, factory, gate, backgroundScope, store)
+
+        // 保存被排进协程队列后立刻关闭：取消必须发生在写盘之前。
+        session.dispatch(PlaybackIntent.SetMode(PlaybackMode.SHUFFLE))
+        session.close()
+        runCurrent()
+
+        assertTrue(store.savedModes.isEmpty())
+        // 关闭后意图一律拒绝，更不能产生新的写盘。
+        assertFalse(session.dispatch(PlaybackIntent.SetMode(PlaybackMode.REPEAT_ONE)))
+        runCurrent()
+        assertTrue(store.savedModes.isEmpty())
+    }
+
     @Test
     fun `播放控制意图全部转发给播放器`() = runTest {
         remote.snapshot = connected(isPlaying = true)

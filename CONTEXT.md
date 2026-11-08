@@ -171,6 +171,22 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 ---
 
+## 播放
+
+### 播放会话（PlaybackSession）
+
+`playback/PlaybackSession.kt`。播放 UI 与 `PlaybackService` 之间唯一的门面：界面只读 `PlaybackUiState`（连接 / 进度 / 队列 / USB / 静音 / 播放模式）、只发 `PlaybackIntent`（点歌、入队、删除、重排、seek、切模式、USB 命令）；MediaController 连接与监听、500ms 轮询、自定义命令解析全部在会话内部。
+
+**队列真相在会话，不在两份 UI 本地副本**——迷你条与全屏页为拖拽保留的列表只是视觉副本，松手必须发 `Reorder` 让会话回写播放器。彻底消除这两份副本是 #28，本轮**没有**承诺完成。
+
+_Avoid_: 播放器控制器（界面侧旧叫法）——界面不再直接拿 `MediaController`。
+
+### 播放 remote（PlaybackRemote）
+
+`playback/PlaybackRemote.kt`。会话对播放控制器的接缝：生产实现是 `MediaControllerPlaybackRemote`（包 `MediaController`），测试实现是手写 `FakePlaybackRemote`。接口只暴露会话真正需要的动作（play / pause / 队列写操作 / seek / 播放模式 / 快照 / 自定义命令），**不把 `MediaController` 本身漏出去**；因此会话单测不依赖 Android 运行时。
+
+_Avoid_: 把 remote 当成全局控制器或单例——它是会话专用的端口。
+
 ## 主题与配色
 
 ### 主题色板（Theme palette）

@@ -237,8 +237,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
@@ -265,6 +263,10 @@ import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.SilenceSkipMediaCommands
 import com.example.pulsar.playback.SleepTimer
 import com.example.pulsar.playback.TrackMediaItemFactory
+import com.example.pulsar.playback.DataStorePlaybackModeStore
+import com.example.pulsar.playback.PlaybackModeStore
+import com.example.pulsar.playback.PlaybackUiState
+import com.example.pulsar.playback.UsbOutputState
 import com.example.pulsar.playback.UsbExclusiveMediaCommands
 import java.time.LocalDate
 import com.example.pulsar.playback.buildMediaItem
@@ -274,7 +276,6 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.kyant.backdrop.Backdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -822,11 +823,16 @@ private fun MusicLibraryScreen(
             override fun unplayableReason(track: Track): String? = viewModel.unplayableReason(track)
         }
     }
-    val controllerState = rememberPlaybackSession(controllerFuture, playbackMediaItems, playbackGate, volumeKeys)
+    val context = LocalContext.current
+    val modeStore = remember(context) { DataStorePlaybackModeStore(context.pulsarPreferencesDataStore) }
+    val playbackSession = rememberPlaybackSession(
+        controllerFuture, playbackMediaItems, playbackGate, volumeKeys, modeStore
+    )
+    val playback by playbackSession.state.collectAsStateWithLifecycle()
     // 本地音频也走会话：界面不再直接 setMediaItem / prepare / play。
     val localAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
-        controllerState.dispatch(PlaybackIntent.PlayLocalFile(uri))
+        playbackSession.dispatch(PlaybackIntent.PlayLocalFile(uri))
     }
     // 本地导航：Discover / Tracks / Albums / AlbumDetail，不引入导航库，直接按 state 分支切换内容。
     // 主页默认显示发现页（随机专辑），其余分区通过顶部导航切换。
@@ -906,9 +912,9 @@ private fun MusicLibraryScreen(
     val volumeFeedback by VolumeFeedback.state.collectAsStateWithLifecycle()
     // 当前曲目由会话状态驱动，界面不再挂控制器的 transition 监听。
     // 连接成功时状态里已经有当前条目（后台播放回来不会再触发 transition），这里一并恢复。
-    LaunchedEffect(controllerState.isConnected, controllerState.currentMediaItem) {
-        if (controllerState.isConnected) {
-            viewModel.onMediaItemTransition(controllerState.currentMediaItem)
+    LaunchedEffect(playback.isConnected, playback.currentMediaItem) {
+        if (playback.isConnected) {
+            viewModel.onMediaItemTransition(playback.currentMediaItem)
         }
     }
     // 统一播放入口：把可播队列记录进 ViewModel，并交给会话起播。gate 在会话内执行。
@@ -936,8 +942,8 @@ private fun MusicLibraryScreen(
     }
     // 播放会话的一次性事件统一出口：不可播提示、入队成功、起播队列、USB 音量浮窗。
     // 界面只消费会话的结论，不再自己判断 gate / 拼提示文案。
-    LaunchedEffect(controllerState.events) {
-        controllerState.events.collect { event ->
+    LaunchedEffect(playbackSession) {
+        playbackSession.events.collect { event ->
             when (event) {
                 is PlaybackEvent.Unplayable -> snackbarHostState.showSnackbar(event.reason)
                 is PlaybackEvent.Message -> snackbarHostState.showSnackbar(event.text)
@@ -949,12 +955,12 @@ private fun MusicLibraryScreen(
     }
     // 统一播放入口：只在会话里过 gate / 过滤不可播项，界面不重复一遍。
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
-        controllerState.dispatch(PlaybackIntent.Play(trackList, trackId))
+        playbackSession.dispatch(PlaybackIntent.Play(trackList, trackId))
     }
     // 离线过滤生效时给各内容页的统一小字（ADR-0008）：歌变少了得有一句解释。
     val offlineNotice = if (offlineFilter) "离线 · 只显示已下载" else null
     val onAddToQueue: (Track) -> Unit = { track ->
-        controllerState.dispatch(PlaybackIntent.AddToQueue(track))
+        playbackSession.dispatch(PlaybackIntent.AddToQueue(track))
     }
     // ── 曲库文件操作（长按菜单 → 删除 / 改名，走 PC 伴生服务）──────────────
     // 回调经 CompositionLocal 发给所有 TrackRow（五个列表页共用，不逐页传参）；
@@ -1133,7 +1139,7 @@ private fun MusicLibraryScreen(
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         currentTrackId = currentTrack?.id,
-                        isPlaying = controllerState.isPlaying,
+                        isPlaying = playback.isPlaying,
                         onRefresh = viewModel::refreshDiscover,
                         onRetry = viewModel::loadDiscoverAlbums,
                         modifier = Modifier.fillMaxSize()
@@ -1143,7 +1149,7 @@ private fun MusicLibraryScreen(
                         tracks = tracks,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
-                        controllerState = controllerState,
+                        playback = playback,
                         coverFor = viewModel::trackCover,
                         onLocalAudio = { localAudioLauncher.launch(arrayOf("audio/*")) },
                         onPlayTrack = onPlayTrack,
@@ -1213,7 +1219,7 @@ private fun MusicLibraryScreen(
                         onRetryCredential = qqViewModel::retryCredential,
                         onRetryQqSearch = qqViewModel::retrySearch,
                         currentTrackId = currentTrack?.id,
-                        isPlaying = controllerState.isPlaying,
+                        isPlaying = playback.isPlaying,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.DownloadService -> DownloadServiceScreen(
@@ -1237,7 +1243,7 @@ private fun MusicLibraryScreen(
                         albumCoverFor = viewModel::albumCover,
                         onRetry = { viewModel.loadAlbumTracks(s.album) },
                         currentTrackId = currentTrack?.id,
-                        isPlaying = controllerState.isPlaying,
+                        isPlaying = playback.isPlaying,
                         streamUrl = viewModel::streamUrl,
                         onDownloadMessage = showMessage,
                         modifier = Modifier.fillMaxSize()
@@ -1254,7 +1260,7 @@ private fun MusicLibraryScreen(
                         playlistCoverFor = viewModel::playlistCover,
                         onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
                         currentTrackId = currentTrack?.id,
-                        isPlaying = controllerState.isPlaying,
+                        isPlaying = playback.isPlaying,
                         streamUrl = viewModel::streamUrl,
                         onDownloadMessage = showMessage,
                         modifier = Modifier.fillMaxSize()
@@ -1278,7 +1284,9 @@ private fun MusicLibraryScreen(
                     LibrarySection.Settings -> SettingsContent(
                         state = state,
                         viewModel = viewModel,
-                        controllerState = controllerState,
+                        playback = playback,
+                        onPlaybackIntent = playbackSession::dispatch,
+                        playbackEvents = playbackSession.events,
                         onOpenCachedCopies = { section = LibrarySection.CachedCopies },
                         onOpenDownloadService = { section = LibrarySection.DownloadService },
                         themePreferences = themePreferences,
@@ -1323,7 +1331,9 @@ private fun MusicLibraryScreen(
         // 早前把 align 放进内容里丢过一次，迷你条跑到屏幕顶部（真机已复现）。
         MiniPlayerBar(
             backdrop = backdrop,
-            controllerState = controllerState,
+            playback = playback,
+            onPlaybackIntent = playbackSession::dispatch,
+            playbackEvents = playbackSession.events,
             currentTrack = currentTrack,
             accentColor = coverAccentAnimated,
             coverFor = viewModel::trackCover,
@@ -1364,14 +1374,16 @@ private fun MusicLibraryScreen(
         ) {
             key(nowPlayingSession) {
                 NowPlayingScreen(
-                    controllerState = controllerState,
+                    playback = playback,
+                    onPlaybackIntent = playbackSession::dispatch,
+                    playbackEvents = playbackSession.events,
                     currentTrack = currentTrack,
                     coverRequest = currentTrack?.let(viewModel::trackCover),
                     gradientColors = animatedCoverGradient,
                     lyrics = lyrics,
                     // 点歌词行 seek 到该行时间（微秒 → 毫秒）。
                     onLineSeek = { positionUs ->
-                        controllerState.dispatch(PlaybackIntent.SeekTo(positionUs / 1000))
+                        playbackSession.dispatch(PlaybackIntent.SeekTo(positionUs / 1000))
                     },
                     sharedTransitionScope = this@SharedTransitionLayout,
                     // key(nowPlayingSession) 包着本内容，AnimatedVisibilityScope 就是本层。
@@ -1474,14 +1486,14 @@ private fun MusicLibraryScreen(
                 if (targets.size == 1) {
                     val target = targets.first()
                     if (viewModel.deleteTrack(target)) {
-                        controllerState.dispatch(PlaybackIntent.RemoveFromQueue(setOf(target.id)))
+                        playbackSession.dispatch(PlaybackIntent.RemoveFromQueue(setOf(target.id)))
                         deleteTarget = emptyList()
                         snackbarHostState.showSnackbar("已删除，可在设置页的回收站恢复")
                     }
                 } else {
                     val deletedCount = viewModel.deleteTracks(targets)
                     if (deletedCount > 0) {
-                        controllerState.dispatch(PlaybackIntent.RemoveFromQueue(targets.map { it.id }.toSet()))
+                        playbackSession.dispatch(PlaybackIntent.RemoveFromQueue(targets.map { it.id }.toSet()))
                         deleteTarget = emptyList()
                         // 部分失败时 VM 已写 fileOpsMessage，一并带进提示
                         val extra = viewModel.state.value.fileOpsMessage?.let { "；$it" }.orEmpty()
@@ -1734,7 +1746,7 @@ private fun TracksContent(
     tracks: List<Track>,
     title: String,
     offlineNotice: String?,
-    controllerState: ControllerState,
+    playback: PlaybackUiState,
     coverFor: (Track) -> JellyfinRequest?,
     onLocalAudio: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
@@ -1764,7 +1776,7 @@ private fun TracksContent(
             Button(
                 onClick = onLocalAudio,
                 Modifier.fillMaxWidth().padding(top = Dimens.SpaceTiny, bottom = Dimens.SpaceSmall),
-                enabled = controllerState.isConnected
+                enabled = playback.isConnected
             ) { Text("选择手机里的音频") }
         }
         // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
@@ -1784,7 +1796,7 @@ private fun TracksContent(
                 onAddToQueue = { onAddToQueue(track) },
                 showDivider = index != tracks.lastIndex,
                 isCurrent = currentTrackId == track.id,
-                isPlaying = controllerState.isPlaying,
+                isPlaying = playback.isPlaying,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -3770,12 +3782,14 @@ private fun PlaylistDetailContent(
     }
 }
 
-/** 设置页：USB 独占输出、静音跳曲、定时关闭。控件状态与回调都来自 [ControllerState]，与播放条共用同一份数据源。 */
+/** 设置页：USB 独占输出、静音跳曲、定时关闭。状态读 [PlaybackUiState]，写操作只发 [PlaybackIntent]。 */
 @Composable
 private fun SettingsContent(
     state: JellyfinUiState,
     viewModel: JellyfinViewModel,
-    controllerState: ControllerState,
+    playback: PlaybackUiState,
+    onPlaybackIntent: (PlaybackIntent) -> Boolean,
+    playbackEvents: SharedFlow<PlaybackEvent>,
     onOpenCachedCopies: () -> Unit,
     onOpenDownloadService: () -> Unit,
     themePreferences: ThemePreferences,
@@ -3784,10 +3798,10 @@ private fun SettingsContent(
 ) {
     // USB 音量滑块本地拖拽值：拖拽中用本地值，松手才发 SET_VOLUME；服务确认值
     // 变化时（且非拖拽中）同步回本地，避免滑块跳动。
-    var usbVolumeLocal by remember { mutableStateOf(controllerState.usbVolumePercent) }
+    var usbVolumeLocal by remember { mutableStateOf(playback.usb.volumePercent) }
     var usbVolumeDragging by remember { mutableStateOf(false) }
-    LaunchedEffect(controllerState.usbVolumePercent) {
-        if (!usbVolumeDragging) usbVolumeLocal = controllerState.usbVolumePercent
+    LaunchedEffect(playback.usb.volumePercent) {
+        if (!usbVolumeDragging) usbVolumeLocal = playback.usb.volumePercent
     }
     // 定时关闭：进程级单例状态（剩余时间/是否启用），拖动时用本地预览值不跟随倒计时。
     val sleepState by SleepTimer.state.collectAsStateWithLifecycle()
@@ -3824,15 +3838,15 @@ private fun SettingsContent(
                 Column(Modifier.weight(1f)) {
                     Text("USB 独占输出", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        usbExclusiveStateLabel(controllerState),
+                        usbExclusiveStateLabel(playback.usb),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(
-                    checked = controllerState.usbExclusiveEnabled,
-                    onCheckedChange = controllerState.onUsbExclusiveChange,
-                    enabled = controllerState.isConnected && !controllerState.usbExclusivePending
+                    checked = playback.usb.enabled,
+                    onCheckedChange = { onPlaybackIntent(PlaybackIntent.SetUsbExclusive(it)) },
+                    enabled = playback.isConnected && !playback.usb.pending
                 )
             }
             // USB 独占输出音量：独占路径绕过系统音量、满刻度直送会削顶，
@@ -3853,11 +3867,11 @@ private fun SettingsContent(
                         usbVolumeDragging = true
                     },
                     onValueChangeFinished = {
-                        controllerState.onUsbVolumeChange(usbVolumeLocal)
+                        onPlaybackIntent(PlaybackIntent.SetUsbVolume(usbVolumeLocal))
                         usbVolumeDragging = false
                     },
                     valueRange = 0f..100f,
-                    enabled = controllerState.usbExclusiveEnabled && controllerState.isConnected,
+                    enabled = playback.usb.enabled && playback.isConnected,
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(Dimens.SpaceMidMedium))
@@ -3875,15 +3889,15 @@ private fun SettingsContent(
                 Column(Modifier.weight(1f)) {
                     Text("静音跳曲", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        if (controllerState.silenceSkipEnabled) "已开启" else "已关闭",
+                        if (playback.silenceSkipEnabled) "已开启" else "已关闭",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Switch(
-                    checked = controllerState.silenceSkipEnabled,
-                    onCheckedChange = controllerState.onSilenceSkipChange,
-                    enabled = controllerState.isConnected
+                    checked = playback.silenceSkipEnabled,
+                    onCheckedChange = { onPlaybackIntent(PlaybackIntent.SetSilenceSkip(it)) },
+                    enabled = playback.isConnected
                 )
             }
             // 回放增益：按每首歌的响度数据统一音量。直接读写 DataStore——播放服务订阅的是
@@ -4449,7 +4463,9 @@ private fun MiniPlayerCover(
 @Composable
 private fun MiniPlayerBar(
     backdrop: Backdrop,
-    controllerState: ControllerState,
+    playback: PlaybackUiState,
+    onPlaybackIntent: (PlaybackIntent) -> Boolean,
+    playbackEvents: SharedFlow<PlaybackEvent>,
     currentTrack: Track?,
     /** 当前专辑主色（进度条填充 / 底部细线用）；无封面时为品牌靛蓝。 */
     accentColor: Color,
@@ -4467,15 +4483,15 @@ private fun MiniPlayerBar(
     // 小展开面板开关：右侧箭头按钮切换。
     var expanded by remember { mutableStateOf(false) }
     // 播放模式由会话持有，本地只读；点按钮发 CycleMode 意图。
-    val playbackMode = controllerState.mode
+    val playbackMode = playback.mode
     // 播放/暂停：有媒体项（队列非空）才可用。队列为空时按钮置灰、点了没反应。
     // 不用 durationMs > 0 判断——刚起播、时长还没上报时按钮会先灰一下。
     // 队列快照在轮询与 onMediaItemTransition 两处刷新，点歌后按钮立刻可用。
-    val hasMedia = controllerState.isConnected && controllerState.queue.isNotEmpty()
+    val hasMedia = playback.isConnected && playback.queue.isNotEmpty()
     // 进度条额外要求已知时长，否则 valueRange 没有意义。
-    val canSeek = hasMedia && controllerState.durationMs > 0
+    val canSeek = hasMedia && playback.durationMs > 0
     // 进度状态：拖动中显示拖动值，松手才 seek，避免边拖边跳。
-    val durationSec = (controllerState.durationMs / 1000f).coerceAtLeast(1f)
+    val durationSec = (playback.durationMs / 1000f).coerceAtLeast(1f)
     var sliderPosition by remember { mutableStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
     // 松手 seek 后播放器上报的位置要等下一次轮询（500ms）才追上。追上之前继续显示拖动值，
@@ -4483,9 +4499,9 @@ private fun MiniPlayerBar(
     // 非 null 即锁定中，值是松手时锁定的拖动位置。
     var seekHoldSec by remember { mutableStateOf<Float?>(null) }
     // 位置追上目标 → 放开锁定，显示值交还给播放器。
-    LaunchedEffect(seekHoldSec, controllerState.positionMs) {
+    LaunchedEffect(seekHoldSec, playback.positionMs) {
         val target = seekHoldSec ?: return@LaunchedEffect
-        if (positionReachedSeekTarget(controllerState.positionMs / 1000f, target)) seekHoldSec = null
+        if (positionReachedSeekTarget(playback.positionMs / 1000f, target)) seekHoldSec = null
     }
     // 超时兜底：seek 被忽略（无媒体 / 播放器已销毁）时位置永远追不上，别把显示值锁死。
     LaunchedEffect(seekHoldSec) {
@@ -4494,21 +4510,21 @@ private fun MiniPlayerBar(
         seekHoldSec = null
     }
     // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
-    val currentQueueId = controllerState.queue.firstOrNull { it.isCurrent }?.id
+    val currentQueueId = playback.queue.firstOrNull { it.isCurrent }?.id
     LaunchedEffect(currentQueueId) { seekHoldSec = null }
     // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器；默认折叠避免歌多时占满面板。
     val hapticFeedback = LocalHapticFeedback.current
     var queueExpanded by remember { mutableStateOf(false) }
     var isQueueDragging by remember { mutableStateOf(false) }
-    var queue by remember { mutableStateOf(controllerState.queue) }
+    var queue by remember { mutableStateOf(playback.queue) }
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
         queue = queue.toMutableList().apply { add(to.index, removeAt(from.index)) }
         hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
     }
     // 播放器快照变化时刷新本地队列；拖拽进行中不覆盖本地顺序，避免排序时列表跳动。
-    LaunchedEffect(controllerState.queue) {
-        if (!isQueueDragging) queue = controllerState.queue
+    LaunchedEffect(playback.queue) {
+        if (!isQueueDragging) queue = playback.queue
     }
     // 输出信息（设备 + 采样率 + 位深），由 PlaybackService 写入诊断单例。
     val outputInfo by PlaybackDiagnostics.info.collectAsStateWithLifecycle()
@@ -4520,8 +4536,8 @@ private fun MiniPlayerBar(
     val density = LocalDensity.current
     // 底部细进度线的比例：直接按轮询到的位置/时长算（拖动同步由展开面板的进度条负责）；
     // 时长未知（<=0）整条显示未播色。
-    val miniProgressFraction = if (controllerState.durationMs > 0) {
-        (controllerState.positionMs / controllerState.durationMs.toFloat()).coerceIn(0f, 1f)
+    val miniProgressFraction = if (playback.durationMs > 0) {
+        (playback.positionMs / playback.durationMs.toFloat()).coerceIn(0f, 1f)
     } else 0f
 
     // 液态玻璃容器。这里是**全 App 玻璃材质的基准**（模糊 / 透镜 / 圆角的默认值都取自此处），
@@ -4544,12 +4560,12 @@ private fun MiniPlayerBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     // 点击整条打开全屏播放页（连接上播放服务即可，方便未播放时也能进去操作）。
-                    .clickable(enabled = controllerState.isConnected) { onOpenFullScreen() }
+                    .clickable(enabled = playback.isConnected) { onOpenFullScreen() }
                     // 左右滑动切歌：向左滑过阈值切下一首、向右滑切上一首，松手才触发，触发时带触觉反馈。
                     // 已知取舍：歌名超宽时跑马灯（basicMarquee 支持手动滚动）会抢走文字区域上的横向拖动手势，
                     // 此时封面和右侧按钮区域仍可滑动切歌；歌名不超宽时整条都能滑。
                     // 纯点按不受影响：横向拖动超过触摸溢出距离后框架自动取消点击，tap 仍走上面的 clickable 打开全屏页。
-                    .pointerInput(controllerState.isConnected) {
+                    .pointerInput(playback.isConnected) {
                         val swipeThreshold = 48.dp.toPx()
                         var accumulatedDrag = 0f
                         detectHorizontalDragGestures(
@@ -4558,11 +4574,11 @@ private fun MiniPlayerBar(
                                 when {
                                     accumulatedDrag < -swipeThreshold -> {
                                         controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                        controllerState.dispatch(PlaybackIntent.Next)
+                                        onPlaybackIntent(PlaybackIntent.Next)
                                     }
                                     accumulatedDrag > swipeThreshold -> {
                                         controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                        controllerState.dispatch(PlaybackIntent.Previous)
+                                        onPlaybackIntent(PlaybackIntent.Previous)
                                     }
                                 }
                                 accumulatedDrag = 0f
@@ -4600,9 +4616,9 @@ private fun MiniPlayerBar(
                         )
                     )
                     Text(
-                        text = controllerState.playbackError ?: currentTrack?.artist ?: controllerState.status,
+                        text = playback.playbackError ?: currentTrack?.artist ?: playback.status,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (controllerState.playbackError != null) {
+                        color = if (playback.playbackError != null) {
                             MaterialTheme.colorScheme.error
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
@@ -4619,14 +4635,14 @@ private fun MiniPlayerBar(
                     IconButton(
                         onClick = {
                             controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            controllerState.dispatch(PlaybackIntent.TogglePlayPause)
+                            onPlaybackIntent(PlaybackIntent.TogglePlayPause)
                         },
                         enabled = hasMedia,
                         modifier = Modifier.size(Dimens.TouchTargetSmall)
                     ) {
                         Icon(
-                            if (controllerState.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            contentDescription = if (controllerState.isPlaying) "暂停播放" else "开始播放"
+                            if (playback.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = if (playback.isPlaying) "暂停播放" else "开始播放"
                         )
                     }
                     if (!hasMedia) {
@@ -4642,7 +4658,7 @@ private fun MiniPlayerBar(
                 // 展开/收起小面板（more = 展开更多内容，less = 收起更少内容）；进全屏页走点整条或面板里的全屏按钮
                 IconButton(
                     onClick = { expanded = !expanded },
-                    enabled = controllerState.isConnected,
+                    enabled = playback.isConnected,
                     modifier = Modifier.size(Dimens.TouchTargetSmall)
                 ) {
                     Icon(
@@ -4675,12 +4691,12 @@ private fun MiniPlayerBar(
                     // 展示用位置：拖动中 / 松手后等播放器追上期间用拖动值，其余时间跟随播放器。
                     val displayedPositionSec =
                         if (isDragging || seekHoldSec != null) sliderPosition
-                        else (controllerState.positionMs / 1000f).coerceIn(0f, durationSec)
+                        else (playback.positionMs / 1000f).coerceIn(0f, durationSec)
                     LiquidGlassSlider(
                         value = displayedPositionSec,
                         onValueChange = { sliderPosition = it; isDragging = true },
                         onValueChangeFinished = {
-                            controllerState.dispatch(PlaybackIntent.SeekTo((sliderPosition * 1000).toLong()))
+                            onPlaybackIntent(PlaybackIntent.SeekTo((sliderPosition * 1000).toLong()))
                             isDragging = false
                             // 锁定显示值，等播放器位置追上来再放开（见上面的 seekHoldSec）。
                             seekHoldSec = sliderPosition
@@ -4695,7 +4711,7 @@ private fun MiniPlayerBar(
                     )
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(formatPosition((displayedPositionSec * 1000).toLong()), style = MaterialTheme.typography.labelSmall)
-                        Text(formatPosition(controllerState.durationMs), style = MaterialTheme.typography.labelSmall)
+                        Text(formatPosition(playback.durationMs), style = MaterialTheme.typography.labelSmall)
                     }
                     // 播放模式：图标切换（顺序循环 / 单曲循环 / 随机播放）
                     Row(
@@ -4703,14 +4719,14 @@ private fun MiniPlayerBar(
                         horizontalArrangement = Arrangement.Center
                     ) {
                         IconButton(
-                            onClick = { controllerState.dispatch(PlaybackIntent.CycleMode) },
-                            enabled = controllerState.isConnected,
+                            onClick = { onPlaybackIntent(PlaybackIntent.CycleMode) },
+                            enabled = playback.isConnected,
                             modifier = Modifier.size(Dimens.TouchTargetSmall)
                         ) {
                             Icon(
                                 playbackModeIcon(playbackMode),
                                 contentDescription = "切换播放模式，当前：${playbackMode.label}",
-                                tint = if (controllerState.isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = if (playback.isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -4790,12 +4806,12 @@ private fun MiniPlayerBar(
                                                     onDragStarted = { isQueueDragging = true },
                                                     onDragStopped = {
                                                         isQueueDragging = false
-                                                        controllerState.dispatch(PlaybackIntent.Reorder(queue))
+                                                        onPlaybackIntent(PlaybackIntent.Reorder(queue))
                                                     }
                                                 )
-                                                .clickable(enabled = controllerState.isConnected) {
+                                                .clickable(enabled = playback.isConnected) {
                                                     val index = queue.indexOfFirst { it.id == item.id }
-                                                    controllerState.dispatch(PlaybackIntent.PlayQueueItem(index))
+                                                    onPlaybackIntent(PlaybackIntent.PlayQueueItem(index))
                                                 }
                                                 .padding(vertical = Dimens.SpaceTiny),
                                             verticalAlignment = Alignment.CenterVertically
@@ -4832,9 +4848,9 @@ private fun MiniPlayerBar(
                                             }
                                             IconButton(
                                                 onClick = {
-                                                    controllerState.dispatch(PlaybackIntent.RemoveFromQueue(setOf(item.id)))
+                                                    onPlaybackIntent(PlaybackIntent.RemoveFromQueue(setOf(item.id)))
                                                 },
-                                                enabled = controllerState.isConnected,
+                                                enabled = playback.isConnected,
                                                 modifier = Modifier.size(Dimens.TouchTargetSmall)
                                             ) {
                                                 Icon(Icons.Filled.Close, contentDescription = "从队列中移除此歌曲", Modifier.size(16.dp))
@@ -4963,45 +4979,18 @@ internal data class QueueTrack(
     val isCurrent: Boolean
 )
 
-internal data class ControllerState(
-    val controller: MediaController?,
-    /** 播放服务是否已连接（界面判断控件可用性，不再直接读控制器）。 */
-    val isConnected: Boolean = false,
-    val status: String,
-    val playbackError: String? = null,
-    val positionMs: Long = 0L,
-    val durationMs: Long = C.TIME_UNSET,
-    val isPlaying: Boolean = false,
-    val queue: List<QueueTrack> = emptyList(),
-    /** 当前播放模式（由会话持有，界面只读）。 */
-    val mode: PlaybackMode = PlaybackMode.SEQUENCE,
-    /** 播放/队列写操作的唯一出口：界面只发 [PlaybackIntent]，由会话执行。 */
-    val dispatch: (PlaybackIntent) -> Boolean = { false },
-    /** 会话的一次性事件流（不可播提示 / 入队成功 / 起播队列 / USB 音量浮窗）。 */
-    val events: SharedFlow<PlaybackEvent> = MutableSharedFlow(),
-    val currentMediaItem: MediaItem? = null,
-    val usbExclusiveEnabled: Boolean = false,
-    val usbExclusiveState: String = "disabled",
-    val usbExclusiveError: String? = null,
-    val usbExclusivePending: Boolean = false,
-    val usbVolumePercent: Int = 100,
-    val silenceSkipEnabled: Boolean = true,
-    val onUsbExclusiveChange: (Boolean) -> Unit = {},
-    val onUsbVolumeChange: (Int) -> Unit = {},
-    val onSilenceSkipChange: (Boolean) -> Unit = {}
-)
-
 @Composable
 private fun rememberPlaybackSession(
     controllerFuture: ListenableFuture<MediaController>?,
     mediaItems: TrackMediaItemFactory,
     gate: PlaybackGate,
-    volumeKeys: ForegroundVolumeKeys
-): ControllerState {
+    volumeKeys: ForegroundVolumeKeys,
+    modeStore: PlaybackModeStore
+): PlaybackSession {
     val scope = rememberCoroutineScope()
     val remote = remember(controllerFuture) { MediaControllerPlaybackRemote(controllerFuture) }
-    val session = remember(remote, mediaItems, gate, scope) {
-        PlaybackSession(remote, mediaItems, gate, scope)
+    val session = remember(remote, mediaItems, gate, scope, modeStore) {
+        PlaybackSession(remote, mediaItems, gate, scope, modeStore)
     }
     DisposableEffect(session) {
         onDispose { session.close() }
@@ -5040,37 +5029,15 @@ private fun rememberPlaybackSession(
         }
     }
 
-    return ControllerState(
-        controller = remote.controller,
-        isConnected = uiState.isConnected,
-        status = uiState.status,
-        playbackError = uiState.playbackError,
-        positionMs = uiState.positionMs,
-        durationMs = uiState.durationMs,
-        isPlaying = uiState.isPlaying,
-        queue = uiState.queue,
-        mode = uiState.mode,
-        dispatch = session::dispatch,
-        events = session.events,
-        currentMediaItem = uiState.currentMediaItem,
-        usbExclusiveEnabled = uiState.usb.enabled,
-        usbExclusiveState = uiState.usb.state,
-        usbExclusiveError = uiState.usb.error,
-        usbExclusivePending = uiState.usb.pending,
-        usbVolumePercent = uiState.usb.volumePercent,
-        silenceSkipEnabled = uiState.silenceSkipEnabled,
-        onUsbExclusiveChange = { session.dispatch(PlaybackIntent.SetUsbExclusive(it)) },
-        onUsbVolumeChange = { session.dispatch(PlaybackIntent.SetUsbVolume(it)) },
-        onSilenceSkipChange = { session.dispatch(PlaybackIntent.SetSilenceSkip(it)) }
-    )
+    return session
 }
 
-private fun usbExclusiveStateLabel(state: ControllerState): String = when (state.usbExclusiveState) {
+private fun usbExclusiveStateLabel(usb: UsbOutputState): String = when (usb.state) {
     "disabled" -> "已关闭"
     "no_device" -> "已开启，等待 USB 设备"
     "awaiting_permission" -> "等待 USB 权限"
     "ready" -> "已就绪"
     "streaming" -> "输出中"
-    "error" -> "USB 独占失败：${state.usbExclusiveError.orEmpty()}"
+    "error" -> "USB 独占失败：${usb.error.orEmpty()}"
     else -> "状态未知"
 }

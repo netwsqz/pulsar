@@ -5,12 +5,17 @@ import com.example.pulsar.DownloadKind
 import com.example.pulsar.DownloadLedger
 import com.example.pulsar.DownloadLedgerStore
 import com.example.pulsar.DownloadScheduler
+import com.example.pulsar.DownloadTarget
+import com.example.pulsar.DownloadTrack
 import com.example.pulsar.MediaDownloads
 import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -27,6 +32,7 @@ import org.junit.Test
  * - 字节层读失败 → 空集合，不抛给界面；
  * - `CancellationException` 一律重新抛出。
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class DownloadLibraryTest {
 
     private val user1 = AccountScope("https://server.test", "user-1")
@@ -58,6 +64,23 @@ class DownloadLibraryTest {
         name = "专辑",
         trackIds = trackIds,
         createdAt = 1L
+    )
+
+    /** 下载按钮的目标：曲目 → 缓存键与 Fake 的 `stream/{id}` 对齐。 */
+    private fun target(
+        tracks: List<Track> = listOf(track("t1"), track("t2"), track("t3")),
+        userId: String = "user-1",
+        serverUrl: String = "https://server.test",
+        kind: DownloadKind = DownloadKind.ALBUM,
+        id: String = "album-1",
+        name: String = "专辑"
+    ) = DownloadTarget(
+        serverUrl = serverUrl,
+        userId = userId,
+        kind = kind,
+        id = id,
+        name = name,
+        tracks = tracks.map { DownloadTrack(it.id, "stream/${it.id}", "stream/${it.id}") }
     )
 
     // ── 可见性：字节 ∩ 名单 ──────────────────────────────────────────
@@ -348,6 +371,251 @@ class DownloadLibraryTest {
         assertSame(snapshot, library.state.value)
     }
 
+    // ── 五态 stateFor（#5）──────────────────────────────────────────
+
+    @Test
+    fun `stateFor：字节全齐且都在当前账号名单 → 已下载`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2", "t3")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+
+        val state = library.stateFor(target())
+        runCurrent()
+
+        assertEquals(DownloadActionState.Downloaded, state.value)
+    }
+
+    @Test
+    fun `stateFor：字节完整但不在当前账号名单 → 未下载`() = runTest {
+        // 盘上有完整字节（可能是别的账号 / 历史遗留），但当前账号的名单里没有它
+        val downloads = FakeMediaDownloads().apply { completeKeys += "stream/t1" }
+        val library = library(downloads, FakeDownloadLedgerStore())
+        library.setAccount(user1)
+
+        val state = library.stateFor(target(tracks = listOf(track("t1"))))
+        runCurrent()
+
+        assertEquals(DownloadActionState.NotDownloaded, state.value)
+    }
+
+    @Test
+    fun `stateFor：换账号后旧目标 → 未下载，字节不删除`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2", "t3"), userId = "user-1"))
+        }
+        val library = library(downloads, ledger)
+        // 当前账号是 user-2；目标还是 user-1 的（界面切换瞬间可能还挂着旧 target）
+        library.setAccount(user2)
+
+        val state = library.stateFor(target(userId = "user-1"))
+        runCurrent()
+
+        assertEquals(DownloadActionState.NotDownloaded, state.value)
+        // ADR-0007：换账号不删共享字节
+        assertEquals(setOf("stream/t1", "stream/t2", "stream/t3"), downloads.completeKeys)
+    }
+
+    @Test
+    fun `stateFor：账号还没确定 → 检查中，不猜未下载`() = runTest {
+        val downloads = FakeMediaDownloads().apply { completeKeys += "stream/t1" }
+        val library = library(downloads, FakeDownloadLedgerStore())
+        // 不调 setAccount：会话还没恢复出来
+
+        val state = library.stateFor(target(tracks = listOf(track("t1"))))
+        runCurrent()
+
+        assertEquals(DownloadActionState.Checking, state.value)
+    }
+
+    @Test
+    fun `stateFor：空曲目表 → 未下载，不能永远检查中`() = runTest {
+        val library = library(FakeMediaDownloads(), FakeDownloadLedgerStore())
+        library.setAccount(user1)
+
+        val state = library.stateFor(target(tracks = emptyList()))
+        runCurrent()
+
+        assertEquals(DownloadActionState.NotDownloaded, state.value)
+    }
+
+    @Test
+    fun `stateFor：名单未注入 → 退化成只看字节真相`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2")
+        }
+        val library = library(downloads, ledger = null)
+        library.setAccount(user1)
+
+        val state = library.stateFor(target(tracks = listOf(track("t1"), track("t2"))))
+        runCurrent()
+
+        assertEquals(DownloadActionState.Downloaded, state.value)
+    }
+
+    @Test
+    fun `stateFor：字节层读失败 → 检查中，不把未知当未下载`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            failHasCompleteCopy = RuntimeException("cache broken")
+        }
+        val library = library(downloads, FakeDownloadLedgerStore())
+        library.setAccount(user1)
+
+        val state = library.stateFor(target(tracks = listOf(track("t1"))))
+        runCurrent()
+
+        assertEquals(DownloadActionState.Checking, state.value)
+    }
+
+    @Test
+    fun `stateFor：调度器下载中实时映射进度，完成后按字节收口`() = runTest {
+        val downloads = FakeMediaDownloads().apply { downloadGate = CompletableDeferred() }
+        val ledger = FakeDownloadLedgerStore()
+        val scheduler = DownloadScheduler(backgroundScope, downloads, ledger)
+        val library = DownloadLibrary(downloads, ledger, scheduler, backgroundScope)
+        library.setAccount(user1)
+        val target = target(tracks = listOf(track("t1")))
+        val state = library.stateFor(target)
+
+        scheduler.enqueue(target)
+        runCurrent()
+        // 调度器本次运行的事实优先：进度环不能等到字节查完才出现
+        assertEquals(DownloadActionState.Downloading(0, 0), state.value)
+
+        downloads.downloadGate!!.complete(Unit)
+        runCurrent()
+        // 字节写完后回到字节真相（名单是 enqueue 时写的）
+        assertEquals(DownloadActionState.Downloaded, state.value)
+    }
+
+    // ── 删除（#5）──────────────────────────────────────────────────
+
+    @Test
+    fun `删除只删名单里的那批，服务器新增的歌不在名单里不动`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+
+        val result = library.delete(target(), playingTrackId = null)
+
+        assertEquals(2, result.deletedCount)
+        assertTrue(result.ledgerUpdated)
+        assertEquals(listOf("stream/t1", "stream/t2"), downloads.removedKeys)
+        // 服务器后来加进专辑的 t3 不在名单里：字节不动
+        assertEquals(setOf("stream/t3"), downloads.completeKeys)
+        assertTrue(ledger.entries.none { it.id == "album-1" })
+    }
+
+    @Test
+    fun `删除跳过正在播的那首，名单里保留它`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2", "t3")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+
+        val result = library.delete(target(), playingTrackId = "t2")
+
+        // 报的是真删掉的副本数：正在播的那首跳过，不算它
+        assertEquals(2, result.deletedCount)
+        assertEquals(listOf("stream/t1", "stream/t3"), downloads.removedKeys)
+        assertTrue("stream/t2" in downloads.completeKeys)
+        // 名单只留正在播的那首，下次还能删
+        assertEquals(listOf("t2"), ledger.entries.single().trackIds)
+    }
+
+    @Test
+    fun `删除时名单里认不出的 id 忽略，不按专辑名一锅端`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "gone")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+
+        val result = library.delete(target(), playingTrackId = null)
+
+        // 认不出 "gone" 就算不出缓存键；t2 / t3 从没进过名单，也不许删
+        assertEquals(1, result.deletedCount)
+        assertEquals(listOf("stream/t1"), downloads.removedKeys)
+        assertEquals(setOf("stream/t2", "stream/t3"), downloads.completeKeys)
+    }
+
+    @Test
+    fun `名单缺失时只删当前目标里已有完整副本的那几首`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t3")
+        }
+        // 名单没注入：兜底只认字节，且只认 target.tracks 里的曲目
+        val library = library(downloads, ledger = null)
+        library.setAccount(user1)
+
+        val result = library.delete(target(), playingTrackId = null)
+
+        assertEquals(2, result.deletedCount)
+        assertFalse(result.ledgerUpdated)
+        assertEquals(listOf("stream/t1", "stream/t3"), downloads.removedKeys)
+        assertTrue(downloads.completeKeys.isEmpty())
+    }
+
+    @Test
+    fun `换账号后旧目标来删 → 一个字节也不删`() = runTest {
+        val downloads = FakeMediaDownloads().apply { completeKeys += "stream/t1" }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1"), userId = "user-1"))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user2)
+
+        val result = library.delete(target(userId = "user-1"), playingTrackId = null)
+
+        assertEquals(0, result.deletedCount)
+        assertFalse(result.ledgerUpdated)
+        assertEquals(setOf("stream/t1"), downloads.completeKeys)
+        assertTrue(downloads.removedKeys.isEmpty())
+    }
+
+    @Test
+    fun `单曲删除：删掉字节并从名单里去掉，正在播的不动`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2")
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+
+        val deleted = library.deleteTrack(track("t2"), key = "stream/t2", playingTrackId = null)
+
+        assertTrue(deleted)
+        assertEquals(listOf("stream/t2"), downloads.removedKeys)
+        assertEquals(listOf("t1"), ledger.entries.single().trackIds)
+
+        // 正在播的那首：ViewModel 侧可以挡，module 自己也必须挡一道
+        val playingDeleted = library.deleteTrack(track("t1"), key = "stream/t1", playingTrackId = "t1")
+        assertFalse(playingDeleted)
+        assertEquals(listOf("stream/t2"), downloads.removedKeys)
+        assertEquals(listOf("t1"), ledger.entries.single().trackIds)
+    }
+
     // ── 测试辅助 ────────────────────────────────────────────────────
 
     private fun TestScope.library(
@@ -370,12 +638,19 @@ class DownloadLibraryTest {
     /** 可通过字段控制「字节真相」与故障注入的 Fake；不参与下载流程。 */
     private class FakeMediaDownloads : MediaDownloads {
         val completeKeys = mutableSetOf<String>()
+        val removedKeys = mutableListOf<String>()
         var usedBytesValue = 0L
         var completeCountValue = 0
         var failCompleteKeys: Throwable? = null
+        var failHasCompleteCopy: Throwable? = null
         var failStats: Throwable? = null
+        /** 非空时 [download] 真的挂起，用来把调度器钉在「下载中」。 */
+        var downloadGate: CompletableDeferred<Unit>? = null
 
-        override suspend fun hasCompleteCopy(key: String): Boolean = key in completeKeys
+        override suspend fun hasCompleteCopy(key: String): Boolean {
+            failHasCompleteCopy?.let { throw it }
+            return key in completeKeys
+        }
 
         override suspend fun usedBytes(): Long {
             failStats?.let { throw it }
@@ -396,9 +671,15 @@ class DownloadLibraryTest {
             url: String,
             key: String,
             onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
-        ): Boolean = true
+        ): Boolean {
+            downloadGate?.await()
+            completeKeys += key
+            onProgress(1L, 1L)
+            return true
+        }
 
         override suspend fun remove(key: String) {
+            removedKeys += key
             completeKeys -= key
         }
     }

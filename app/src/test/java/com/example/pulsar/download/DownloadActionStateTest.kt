@@ -1,5 +1,14 @@
-package com.example.pulsar
+package com.example.pulsar.download
 
+import com.example.pulsar.DownloadKind
+import com.example.pulsar.DownloadState
+import com.example.pulsar.DownloadTarget
+import com.example.pulsar.DownloadTargetId
+import com.example.pulsar.DownloadTrack
+import com.example.pulsar.downloadProgressFraction
+import com.example.pulsar.estimateDownloadBytes
+import com.example.pulsar.formatBytes
+import com.example.pulsar.targetId
 import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -9,11 +18,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 详情页下载按钮的纯逻辑（工单 05 / 13）。UI 布局本身不测（仓库没有 Compose 测试设施），
- * 这里只钉住「算下载目标 / 字节真相三态 / 五态收口 / 算要删的键 / 删除提示 / 体积估算 /
- * 进度比例」这几条真正会算错的规则。
+ * 下载按钮纯逻辑（原 `DownloadActionButtonTest` 的迁移版，#5）。
+ *
+ * UI 布局本身依旧不测（仓库没有 Compose 测试设施），这里只钉住「算下载目标 / 五态收口 /
+ * 字节真相三态 / 删除提示 / 状态签名 / 体积估算 / 进度比例」这些会算错规则。
+ * 删除的**行为**（按名单删、跳过正在播、名单兜底）在 [DownloadLibraryTest] 里用真 module 测。
  */
-class DownloadActionButtonTest {
+class DownloadActionStateTest {
 
     private fun track(
         id: String,
@@ -33,7 +44,7 @@ class DownloadActionButtonTest {
     /** 测试用的 streamUrl：跟生产一样「算不出就返回 null」。 */
     private val streamUrl: (Track) -> String? = { t -> "https://server.test/Videos/${t.id}/stream" }
 
-    // ── 算下载目标 ────────────────────────────────────────────────
+    // ── 算下载目标（从 UI 文件迁到 download 包）──────────────────────
 
     @Test
     fun `下载目标：url 与 key 都取播放 URL（token 不进 URL）`() {
@@ -96,82 +107,107 @@ class DownloadActionButtonTest {
         )
     }
 
-    // ── 删除：按名单删、跳过正在播的 ─────────────────────────────────
-
-    @Test
-    fun `删除只删名单里的那批，服务器新增的歌不在名单里就不删`() {
-        // 名单当初只下了 t1、t2；t3 是服务器后来加的
-        val keys = downloadKeysToDelete(
-            trackIds = listOf("t1", "t2"),
-            tracks = tracks,
-            playingTrackId = null,
-            streamUrl = streamUrl
-        )
-        assertEquals(
-            listOf(
-                "https://server.test/Videos/t1/stream",
-                "https://server.test/Videos/t2/stream"
-            ),
-            keys
-        )
-    }
-
-    @Test
-    fun `删除跳过正在播的那首，其余照删`() {
-        val keys = downloadKeysToDelete(
-            trackIds = listOf("t1", "t2", "t3"),
-            tracks = tracks,
-            playingTrackId = "t2",
-            streamUrl = streamUrl
-        )
-        assertFalse(keys.any { "t2" in it })
-        assertEquals(2, keys.size)
-    }
-
-    @Test
-    fun `删除时名单里有、曲目表里认不出的 id 忽略（歌被删了就算不出键）`() {
-        val keys = downloadKeysToDelete(
-            trackIds = listOf("t1", "gone"),
-            tracks = tracks,
-            playingTrackId = null,
-            streamUrl = streamUrl
-        )
-        assertEquals(listOf("https://server.test/Videos/t1/stream"), keys)
-    }
-
-    // ── 五态收口（工单 13）──────────────────────────────────────────
+    // ── 五态收口（工单 13 / #5）────────────────────────────────────
 
     @Test
     fun `五态：下载中与部分失败照抄调度器，其余按字节真相`() {
         val downloading = DownloadState.Downloading(10, 100)
-        assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = false))
+        assertEquals(
+            DownloadActionState.Downloading(10, 100),
+            resolveDownloadActionState(downloading, allTracksComplete = false)
+        )
         // 字节全齐也不影响进度显示（下载刚跑完的那一下）
-        assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = true))
+        assertEquals(
+            DownloadActionState.Downloading(10, 100),
+            resolveDownloadActionState(downloading, allTracksComplete = true)
+        )
         // 字节还没查到也照抄：下载中优先于「检查中…」，否则进度环会被顶掉
-        assertEquals(downloading, resolveDownloadState(downloading, allTracksComplete = null))
+        assertEquals(
+            DownloadActionState.Downloading(10, 100),
+            resolveDownloadActionState(downloading, allTracksComplete = null)
+        )
 
         val failed = DownloadState.PartiallyFailed(2)
-        assertEquals(failed, resolveDownloadState(failed, allTracksComplete = false))
-        assertEquals(failed, resolveDownloadState(failed, allTracksComplete = true))
-        assertEquals(failed, resolveDownloadState(failed, allTracksComplete = null))
+        assertEquals(
+            DownloadActionState.PartiallyFailed(2),
+            resolveDownloadActionState(failed, allTracksComplete = false)
+        )
+        assertEquals(
+            DownloadActionState.PartiallyFailed(2),
+            resolveDownloadActionState(failed, allTracksComplete = true)
+        )
+        assertEquals(
+            DownloadActionState.PartiallyFailed(2),
+            resolveDownloadActionState(failed, allTracksComplete = null)
+        )
 
         // 字节真相优先：调度器说已下载（本次运行的旧状态）但字节不齐 → 未下载
-        assertEquals(DownloadState.NotDownloaded, resolveDownloadState(DownloadState.Downloaded, false))
-        assertEquals(DownloadState.Downloaded, resolveDownloadState(DownloadState.Downloaded, true))
+        assertEquals(
+            DownloadActionState.NotDownloaded,
+            resolveDownloadActionState(DownloadState.Downloaded, false)
+        )
+        assertEquals(
+            DownloadActionState.Downloaded,
+            resolveDownloadActionState(DownloadState.Downloaded, true)
+        )
         // 取消 / 从没跑过 → 看字节真相
-        assertEquals(DownloadState.NotDownloaded, resolveDownloadState(DownloadState.Canceled, false))
-        assertEquals(DownloadState.Downloaded, resolveDownloadState(DownloadState.Canceled, true))
-        assertEquals(DownloadState.NotDownloaded, resolveDownloadState(null, false))
-        assertEquals(DownloadState.Downloaded, resolveDownloadState(null, true))
+        assertEquals(
+            DownloadActionState.NotDownloaded,
+            resolveDownloadActionState(DownloadState.Canceled, false)
+        )
+        assertEquals(
+            DownloadActionState.Downloaded,
+            resolveDownloadActionState(DownloadState.Canceled, true)
+        )
+        assertEquals(
+            DownloadActionState.NotDownloaded,
+            resolveDownloadActionState(null, false)
+        )
+        assertEquals(
+            DownloadActionState.Downloaded,
+            resolveDownloadActionState(null, true)
+        )
     }
 
     @Test
     fun `五态：字节还没查完（null）就是未知态，不猜「未下载」`() {
         // 用户故事 59：打开已下载专辑时先给「检查中…」，不先闪一个可点的「下载」
-        assertNull(resolveDownloadState(null, allTracksComplete = null))
-        assertNull(resolveDownloadState(DownloadState.NotDownloaded, allTracksComplete = null))
-        assertNull(resolveDownloadState(DownloadState.Downloaded, allTracksComplete = null))
-        assertNull(resolveDownloadState(DownloadState.Canceled, allTracksComplete = null))
+        assertEquals(
+            DownloadActionState.Checking,
+            resolveDownloadActionState(null, allTracksComplete = null)
+        )
+        assertEquals(
+            DownloadActionState.Checking,
+            resolveDownloadActionState(DownloadState.NotDownloaded, allTracksComplete = null)
+        )
+        assertEquals(
+            DownloadActionState.Checking,
+            resolveDownloadActionState(DownloadState.Downloaded, allTracksComplete = null)
+        )
+        assertEquals(
+            DownloadActionState.Checking,
+            resolveDownloadActionState(DownloadState.Canceled, allTracksComplete = null)
+        )
+    }
+
+    @Test
+    fun `五态：账号不一致时一律未下载，连进度也不显示`() {
+        assertEquals(
+            DownloadActionState.NotDownloaded,
+            resolveDownloadActionState(
+                live = DownloadState.Downloading(1, 100),
+                allTracksComplete = true,
+                accountMatches = false
+            )
+        )
+        assertEquals(
+            DownloadActionState.NotDownloaded,
+            resolveDownloadActionState(
+                live = DownloadState.PartiallyFailed(1),
+                allTracksComplete = null,
+                accountMatches = false
+            )
+        )
     }
 
     @Test
@@ -221,7 +257,7 @@ class DownloadActionButtonTest {
         assertEquals("none", downloadStateSignature(null))
     }
 
-    // ── 体积估算与进度比例 ─────────────────────────────────────────
+    // ── 体积估算与进度比例（UI 侧辅助，留在 UI 文件）────────────────
 
     @Test
     fun `体积估算按 320kbps 折算`() {

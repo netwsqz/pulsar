@@ -1429,10 +1429,12 @@ class JellyfinViewModelTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
         mediaDownloads.completeKeys += "stream/t2"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("t1", "t2"), id = "a1", name = "Album A"))
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1462,10 +1464,12 @@ class JellyfinViewModelTest {
         val albumA = Album("a1", "Album A", "Artist X", 2, null)
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += listOf("stream/t1", "stream/t2")
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("t1", "t2"), id = "a1", name = "Album A"))
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1490,10 +1494,12 @@ class JellyfinViewModelTest {
         val albumA = Album("a1", "Album A", "Artist X", 1, null)
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("t1"), id = "a1", name = "Album A"))
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1515,10 +1521,12 @@ class JellyfinViewModelTest {
         val albumA = Album("a1", "Album A", "Artist X", 1, null)
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("t1"), id = "a1", name = "Album A"))
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1551,10 +1559,15 @@ class JellyfinViewModelTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
         mediaDownloads.completeKeys += "stream/t3"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(
+                downloadedEntry(listOf("t1"), id = "a1", name = "Album A"),
+                downloadedEntry(listOf("t3"), id = "a2", name = "Album B")
+            )
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1, t3), albums = listOf(albumA, albumB)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1590,11 +1603,9 @@ class JellyfinViewModelTest {
                 )
             )
         }
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(old1, old2, added), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads,
-            downloadLedgerStore = ledger
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1618,10 +1629,12 @@ class JellyfinViewModelTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
         mediaDownloads.completeKeys += "stream/t2"
-        val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(downloadedEntry(listOf("t1", "t2"), id = "a1", name = "Album A"))
+        }
+        val viewModel = createDeleteTestViewModel(
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads, ledger
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -2189,6 +2202,19 @@ class JellyfinViewModelTest {
         ledger = ledger,
         scheduler = DownloadScheduler(backgroundScope, downloads, ledger),
         scope = backgroundScope
+    )
+
+    /** 删除链路一律走真 module：生产路径不再有 ViewModel 里的第二份删除实现。 */
+    private fun TestScope.createDeleteTestViewModel(
+        api: FakeJellyfinApi,
+        mediaDownloads: FakeMediaDownloads,
+        ledger: FakeDownloadLedgerStore
+    ): JellyfinViewModel = createViewModel(
+        FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        api,
+        mediaDownloads = mediaDownloads,
+        downloadLedgerStore = ledger,
+        downloadLibrary = downloadLibraryFor(mediaDownloads, ledger)
     )
 
     private fun TestScope.createViewModel(

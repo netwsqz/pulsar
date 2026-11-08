@@ -1,7 +1,11 @@
 package com.example.pulsar.download
 
+import com.example.pulsar.DownloadKind
 import com.example.pulsar.DownloadState
+import com.example.pulsar.DownloadTarget
 import com.example.pulsar.DownloadTargetId
+import com.example.pulsar.DownloadTrack
+import com.example.pulsar.domain.model.Track
 
 /**
  * 「下载归属」的账号作用域：服务器地址 + 用户 ID。
@@ -45,8 +49,7 @@ data class DownloadSnapshot(
 )
 
 /**
- * 下载按钮的目标状态（五态）。**本票只定义类型，不接线**；`stateFor(target)` 与
- * `DownloadActionButton` 的收口在 #5（Step 2）才接。
+ * 下载按钮的目标状态（五态）。由 [DownloadLibrary.stateFor] 输出，界面只负责画。
  */
 sealed interface DownloadActionState {
     /** 字节还没查完：按钮显示「检查中…」，不先闪一个可点的「下载」。 */
@@ -62,3 +65,51 @@ sealed interface DownloadActionState {
     /** 有 [failed] 首重试 3 次仍失败被跳过；其余照常下完。 */
     data class PartiallyFailed(val failed: Int) : DownloadActionState
 }
+
+/**
+ * 一次删除的结果。
+ *
+ * [deletedCount] 是**真正跳过正在播的曲目之后**删掉的副本数，界面拿它弹「已删除 N 首」；
+ * [ledgerUpdated] 表示这次删除是否按名单更新了账本（名单缺失 / 写失败时是 false，
+ * 走的是「只删当前目标里已有完整副本的那几首」的兜底）。
+ */
+data class DownloadDeleteResult(
+    val deletedCount: Int,
+    val ledgerUpdated: Boolean
+)
+
+/**
+ * 由当前曲目表算下载目标。算不出播放 URL 的曲目跳过；一首都算不出（未登录 / 空专辑）
+ * 返回 null —— 界面据此显示禁用的「下载」。
+ *
+ * 放在 download 包而不是 UI 文件：按钮、ViewModel 的删除入口和测试都从这里取同一份规则。
+ */
+internal fun buildDownloadTarget(
+    serverUrl: String,
+    userId: String,
+    kind: DownloadKind,
+    id: String,
+    name: String,
+    tracks: List<Track>,
+    streamUrl: (Track) -> String?
+): DownloadTarget? {
+    if (serverUrl.isBlank() || userId.isBlank() || id.isBlank()) return null
+    val items = tracks.mapNotNull { track ->
+        // 下载 URL 与缓存键是同一个播放 URL（token 只走 header，不进 URL）。
+        val url = streamUrl(track) ?: return@mapNotNull null
+        DownloadTrack(id = track.id, url = url, key = url)
+    }
+    if (items.isEmpty()) return null
+    return DownloadTarget(
+        serverUrl = serverUrl,
+        userId = userId,
+        kind = kind,
+        id = id,
+        name = name,
+        tracks = items
+    )
+}
+
+/** 删除完成后的提示（用户故事 62）：删掉几首说几首；一首都没删掉（只剩正在播的那首）就不打扰。 */
+internal fun downloadDeletedMessage(deleted: Int): String? =
+    if (deleted <= 0) null else "已删除 $deleted 首"

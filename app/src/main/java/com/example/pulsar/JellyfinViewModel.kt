@@ -13,6 +13,8 @@ import com.example.pulsar.data.libraryfiles.LibraryFilesApi
 import com.example.pulsar.data.libraryfiles.LibraryFilesError
 import com.example.pulsar.download.AccountScope
 import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.download.buildDownloadTarget
+import com.example.pulsar.download.downloadDeletedMessage
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -1484,28 +1486,25 @@ class JellyfinViewModel(
 
     /**
      * 删掉单首的下载（已下载页展开后逐首删）。正在播的那首不删——不能把正在听的歌
-     * 从播放流底下抽走。只动手机本地（铁律 5），失败静默（铁律 4）。
+     * 从播放流底下抽走。字节删除 + 名单更新都在 [DownloadLibrary.deleteTrack] 里，
+     * 这里只负责刷新界面（铁律 4：失败静默）。
      */
     fun deleteDownloadedTrack(track: Track) {
-        val downloads = mediaDownloads ?: return
+        val library = downloadLibrary ?: return
         val tracks = _state.value.tracks ?: return
         if (_currentTrack.value?.id == track.id) return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
-            downloads.remove(key)
+            // module 内部会再挡一道「正在播的不删」，并顺手把名单里的这一首去掉。
+            library.deleteTrack(track, key, _currentTrack.value?.id)
             refreshCachedAlbums(tracks)
             refreshCacheStats()
         }
     }
 
     /**
-     * 删掉一张专辑的下载（界面已二次确认）。**按名单删**（用户故事 10）：只删当初下过的
-     * 那批（[DownloadLedgerStore] 里这条 entry 的 `trackIds`），服务器后来往专辑里新增的
-     * 歌不在名单里，不受影响。正在播的那首**保留**。
-     *
-     * 名单里找不到这条（迁移失败 / 没注入名单）时退回「当前列表里已有完整副本的那几首」——
-     * 只删真在盘上的，绝不按专辑名把全部曲目一锅端。只动手机本地（铁律 5），
-     * 失败静默（铁律 4）——删完重算，列表说的永远是当下。
+     * 删掉一张专辑的下载（界面已二次确认）。规则全部在 [DownloadLibrary.delete] 里：
+     * 按名单只删当初下过的那批、正在播的保留、名单缺失时兜底到已有完整副本的那几首。
      *
      * 进度与结果走 state（工单 13）：删除期间 [JellyfinUiState.isDeletingDownload] 为 true
      * （确认框显示进度、禁按钮），删完写一条「已删除 N 首」到
@@ -1513,35 +1512,41 @@ class JellyfinViewModel(
      * 页面切走也不中断——删一半的破坏性操作最难受。
      */
     fun deleteAlbumCopies(album: Album) {
-        val downloads = mediaDownloads ?: return
+        val library = downloadLibrary ?: return
         val tracks = _state.value.tracks ?: return
+        val currentSession = session ?: return
         // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
         if (downloadDeleteInFlight) return
         downloadDeleteInFlight = true
         // 会话代次：删除可能跨过「退出登录 / 会话过期」，结果不该写到新会话的界面上。
         val generation = loginGeneration
+        // target 的归属在挂起点之前定死：删除过程中就算退出登录，这批字节仍按原账号删。
+        val serverUrl = _state.value.serverUrl
+        val userId = currentSession.userId
         _state.value = _state.value.copy(isDeletingDownload = true, downloadDeleteMessage = null)
         viewModelScope.launch(dispatcher) {
             try {
-                val trackIds = downloadTrackIdsFor(album, tracks)
-                val playingId = _currentTrack.value?.id
-                val keys = downloadKeysToDelete(
-                    trackIds = trackIds,
-                    tracks = tracks,
-                    playingTrackId = playingId,
+                val target = buildDownloadTarget(
+                    serverUrl = serverUrl,
+                    userId = userId,
+                    kind = DownloadKind.ALBUM,
+                    id = album.id,
+                    name = album.name,
+                    // 只把这张专辑的曲目交给 module：名单缺失时的字节兜底不能波及其它专辑。
+                    tracks = tracks.filter { it.album == album.name },
                     streamUrl = ::streamUrl
                 )
-                keys.forEach { downloads.remove(it) }
-                // 名单跟着改（跟专辑页的删除按钮同一口径）：删干净就整条去掉，
-                // 留了正在播的那首就只留它。不回写的话，同一个动作在两处会得到两种结果。
-                // 名单是本地数据，与哪个会话正显示在界面上无关，所以不套代次守卫。
-                removeLedgerEntry(album, trackIds.filter { it == playingId })
-                // 界面状态只在会话没换过时写：会话已经换掉的话，这些结果会飘在登录页上。
-                if (generation == loginGeneration) {
-                    refreshCachedAlbums(tracks)
-                    refreshCacheStats()
-                    // 报的是**真删掉的副本数**：正在播的那首被跳过就不算它。
-                    _state.value = _state.value.copy(downloadDeleteMessage = downloadDeletedMessage(keys.size))
+                if (target != null) {
+                    val result = library.delete(target, _currentTrack.value?.id)
+                    // 界面状态只在会话没换过时写：会话已经换掉的话，这些结果会飘在登录页上。
+                    if (generation == loginGeneration) {
+                        refreshCachedAlbums(tracks)
+                        refreshCacheStats()
+                        // 报的是**真删掉的副本数**：正在播的那首被跳过就不算它。
+                        _state.value = _state.value.copy(
+                            downloadDeleteMessage = downloadDeletedMessage(result.deletedCount)
+                        )
+                    }
                 }
             } finally {
                 downloadDeleteInFlight = false
@@ -1553,56 +1558,6 @@ class JellyfinViewModel(
     /** 界面弹完「已删除 N 首」后清掉，避免转屏 / 返回后重复弹。 */
     fun dismissDownloadDeleteMessage() {
         _state.value = _state.value.copy(downloadDeleteMessage = null)
-    }
-
-    /**
-     * 删掉名单里这张专辑的那一条。[keepTrackIds] 非空时只把它留下（正在播的那首），
-     * 其余整条移除。找不到对应条目（迁移失败等）就什么都不做。
-     */
-    private suspend fun removeLedgerEntry(album: Album, keepTrackIds: List<String>) {
-        val store = downloadLedgerStore ?: return
-        val currentSession = session ?: return
-        try {
-            val entries = store.entriesFor(_state.value.serverUrl, currentSession.userId)
-            val entry = entries.firstOrNull {
-                it.kind == DownloadKind.ALBUM && (it.id == album.id || it.name == album.name)
-            } ?: return
-            val others = store.load().entries.filterNot { it == entry }
-            store.replaceAll(
-                if (keepTrackIds.isEmpty()) others else others + entry.copy(trackIds = keepTrackIds)
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            // 名单写不进去不影响删除本身：字节已经删了，界面按字节真相重算
-        }
-    }
-
-    /**
-     * 这张专辑当初下过哪些曲目。名单是唯一依据；找不到这条时退回「已有完整副本的歌」，
-     * 保证删得掉、又不会把服务器新增的歌算进来。
-     */
-    private suspend fun downloadTrackIdsFor(album: Album, tracks: List<Track>): List<String> {
-        val store = downloadLedgerStore
-        val currentSession = session
-        if (store != null && currentSession != null) {
-            val entries = try {
-                store.entriesFor(_state.value.serverUrl, currentSession.userId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                emptyList()
-            }
-            // id 之外再按名字兜一次：迁移来的老条目 id 是专辑名（历史遗留，可能还有）。
-            val entry = entries.firstOrNull {
-                it.kind == DownloadKind.ALBUM && (it.id == album.id || it.name == album.name)
-            }
-            if (entry != null) return entry.trackIds
-        }
-        val downloads = mediaDownloads ?: return emptyList()
-        return tracks.filter { it.album == album.name }
-            .filter { track -> cacheKey(track)?.let { downloads.hasCompleteCopy(it) } == true }
-            .map { it.id }
     }
 
     /** 重算已下载列表。专辑对象从专辑页拿（没加载过就退快照）按专辑名配对。 */

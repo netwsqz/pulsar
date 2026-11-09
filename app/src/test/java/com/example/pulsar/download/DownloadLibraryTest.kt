@@ -5,13 +5,19 @@ import com.example.pulsar.DownloadKind
 import com.example.pulsar.DownloadLedger
 import com.example.pulsar.DownloadLedgerStore
 import com.example.pulsar.DownloadScheduler
+import com.example.pulsar.DownloadState
 import com.example.pulsar.DownloadTarget
 import com.example.pulsar.DownloadTrack
 import com.example.pulsar.MediaDownloads
+import com.example.pulsar.SerializedDownloadLedgerStore
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.targetId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -616,6 +622,150 @@ class DownloadLibraryTest {
         assertEquals(listOf("t1"), ledger.entries.single().trackIds)
     }
 
+    // ── 入队 / 取消 / 统计入口（#6）────────────────────────────────────
+
+    @Test
+    fun `入队：自动包住 scheduler，名单写一次，下载后刷新统计`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            downloadGate = CompletableDeferred()
+            // 造一个「每首 8 字节」的字节层：验证下完后统计跟着刷新（真实层同理）。
+            deriveStatsFromKeys = true
+        }
+        val ledger = FakeDownloadLedgerStore()
+        val scheduler = DownloadScheduler(backgroundScope, downloads, ledger)
+        val library = DownloadLibrary(downloads, ledger, scheduler, backgroundScope)
+        library.setAccount(user1)
+        val target = target(tracks = listOf(track("t1")))
+
+        library.enqueue(target)
+        runCurrent()
+
+        // 入队 = scheduler.enqueue，不需要界面再拿 downloadScheduler
+        assertEquals(DownloadState.Downloading(0, 0), scheduler.state.value[target.targetId])
+        assertEquals(1, ledger.updateCalls)
+
+        // t1 卡住，target 显示下载中
+        assertEquals(DownloadActionState.Downloading(0, 0), library.stateFor(target).value)
+
+        downloads.downloadGate!!.complete(Unit)
+        runCurrent()
+
+        // 下完后 statistics 刷新
+        assertEquals(DownloadStats(usedBytes = 8L, completeCount = 1), library.state.value.stats)
+        assertEquals(DownloadActionState.Downloaded, library.stateFor(target).value)
+    }
+
+    @Test
+    fun `取消保留已下字节，再点继续只补缺口`() = runTest {
+        val downloads = FakeMediaDownloads()
+        downloads.gates += "stream/t2" to CompletableDeferred()
+        val ledger = FakeDownloadLedgerStore()
+        val scheduler = DownloadScheduler(backgroundScope, downloads, ledger)
+        val library = DownloadLibrary(downloads, ledger, scheduler, backgroundScope)
+        library.setAccount(user1)
+        val target = target(tracks = listOf(track("t1"), track("t2")))
+
+        library.enqueue(target)
+        runCurrent()
+        assertTrue("stream/t1" in downloads.completeKeys)
+
+        library.cancel(target)
+        runCurrent()
+
+        assertTrue("取消不能回滚已下字节", "stream/t1" in downloads.completeKeys)
+        assertEquals(DownloadState.Canceled, scheduler.state.value[target.targetId])
+
+        // 再点继续：已下的不重下，只补 t2
+        downloads.gates.clear()
+        library.enqueue(target)
+        runCurrent()
+
+        assertEquals(listOf("stream/t1", "stream/t2", "stream/t2"), downloads.downloadCalls)
+        assertEquals(DownloadState.Downloaded, scheduler.state.value[target.targetId])
+        assertEquals(listOf("t1", "t2"), ledger.entries.single().trackIds)
+    }
+
+    @Test
+    fun `统计随删除刷新快照`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += setOf("stream/t1", "stream/t2")
+            deriveStatsFromKeys = true
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("t1", "t2")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+        val target = target(tracks = listOf(track("t1"), track("t2")))
+        library.refresh(listOf(track("t1"), track("t2")), ::keyOf)
+        assertEquals(DownloadStats(usedBytes = 16L, completeCount = 2), library.state.value.stats)
+
+        library.delete(target, playingTrackId = null)
+
+        assertEquals(DownloadStats(usedBytes = 0L, completeCount = 0), library.state.value.stats)
+    }
+
+    @Test
+    fun `两个协程并发写名单不丢条目`() = runTest {
+        val backing = YieldingLedgerStore()
+        val store = SerializedDownloadLedgerStore(backing)
+
+        val downloads = FakeMediaDownloads()
+        val scheduler = DownloadScheduler(backgroundScope, downloads, store)
+        val library = DownloadLibrary(downloads, store, scheduler, backgroundScope)
+        library.setAccount(user1)
+
+        // 两个协程同时做「读 → 改 → 写」：只有共用同一把锁才不会互相覆盖
+        launch {
+            library.updateLedger { entries ->
+                entries + entry(trackIds = listOf("a"), id = "album-a")
+            }
+        }
+        launch {
+            library.updateLedger { entries ->
+                entries + entry(trackIds = listOf("b"), id = "album-b")
+            }
+        }
+        advanceUntilIdle()
+
+        assertEquals(2, backing.entries.size)
+        assertEquals(setOf("a", "b"), backing.entries.flatMap { it.trackIds }.toSet())
+    }
+
+    // ── 串行化存储（#6 Step 4）─────────────────────────────────────
+
+    private class YieldingLedgerStore : DownloadLedgerStore {
+        var entries = emptyList<DownloadEntry>()
+        var updateCalls = 0
+
+        override suspend fun load(): DownloadLedger {
+            yield()
+            return DownloadLedger(entries)
+        }
+
+        override suspend fun replaceAll(entries: List<DownloadEntry>) {
+            yield()
+            this.entries = entries
+        }
+
+        override suspend fun entriesFor(serverUrl: String, userId: String): List<DownloadEntry> =
+            entries.filter { it.serverUrl == serverUrl && it.userId == userId }
+
+        override suspend fun pruneUnattributed(): Int {
+            val current = load()
+            val kept = current.entries.filter { it.serverUrl.isNotBlank() }
+            val removed = current.entries.size - kept.size
+            if (removed > 0) replaceAll(kept)
+            return removed
+        }
+
+        override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>): Unit {
+            updateCalls++
+            // 读-改-写之间刻意 yield：没有串行化就会丢更新
+            this.entries = block(this.entries)
+        }
+    }
+
     // ── 测试辅助 ────────────────────────────────────────────────────
 
     private fun TestScope.library(
@@ -639,6 +789,9 @@ class DownloadLibraryTest {
     private class FakeMediaDownloads : MediaDownloads {
         val completeKeys = mutableSetOf<String>()
         val removedKeys = mutableListOf<String>()
+        val downloadCalls = mutableListOf<String>()
+        /** key → 下载开始前卡住的闸门，用来复现「取消到一半」。 */
+        val gates = mutableMapOf<String, CompletableDeferred<Unit>>()
         var usedBytesValue = 0L
         var completeCountValue = 0
         var failCompleteKeys: Throwable? = null
@@ -646,6 +799,10 @@ class DownloadLibraryTest {
         var failStats: Throwable? = null
         /** 非空时 [download] 真的挂起，用来把调度器钉在「下载中」。 */
         var downloadGate: CompletableDeferred<Unit>? = null
+        /** true = 统计按 [completeKeys] 推导（每首 8 字节），用来验证完成/删除后的刷新。 */
+        var deriveStatsFromKeys = false
+        var activeDownloads = 0
+        var maxActiveDownloads = 0
 
         override suspend fun hasCompleteCopy(key: String): Boolean {
             failHasCompleteCopy?.let { throw it }
@@ -654,12 +811,12 @@ class DownloadLibraryTest {
 
         override suspend fun usedBytes(): Long {
             failStats?.let { throw it }
-            return usedBytesValue
+            return if (deriveStatsFromKeys) completeKeys.size * 8L else usedBytesValue
         }
 
         override suspend fun completeCount(): Int {
             failStats?.let { throw it }
-            return completeCountValue
+            return if (deriveStatsFromKeys) completeKeys.size else completeCountValue
         }
 
         override suspend fun completeKeys(): Set<String> {
@@ -672,9 +829,17 @@ class DownloadLibraryTest {
             key: String,
             onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
         ): Boolean {
-            downloadGate?.await()
-            completeKeys += key
-            onProgress(1L, 1L)
+            downloadCalls += key
+            activeDownloads++
+            maxActiveDownloads = maxOf(maxActiveDownloads, activeDownloads)
+            try {
+                gates[key]?.await()
+                downloadGate?.await()
+                completeKeys += key
+                onProgress(1L, 1L)
+            } finally {
+                activeDownloads--
+            }
             return true
         }
 
@@ -688,6 +853,7 @@ class DownloadLibraryTest {
         var entries = emptyList<DownloadEntry>()
         var failRead = false
         var failReadWithCancellation = false
+        var updateCalls = 0
 
         override suspend fun load(): DownloadLedger {
             if (failRead) throw RuntimeException("ledger broken")
@@ -702,6 +868,19 @@ class DownloadLibraryTest {
             if (failReadWithCancellation) throw CancellationException("cancel")
             if (failRead) throw RuntimeException("ledger broken")
             return entries.filter { it.serverUrl == serverUrl && it.userId == userId }
+        }
+
+        override suspend fun pruneUnattributed(): Int {
+            val current = load()
+            val kept = current.entries.filter { it.serverUrl.isNotBlank() }
+            val removed = current.entries.size - kept.size
+            if (removed > 0) replaceAll(kept)
+            return removed
+        }
+
+        override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>): Unit {
+            updateCalls++
+            this.entries = block(this.entries)
         }
     }
 }

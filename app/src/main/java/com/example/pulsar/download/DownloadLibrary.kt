@@ -68,7 +68,11 @@ class DownloadLibrary(
         // 不然每个进度回调都逐首 IO 会把按钮拖垮（Step 2 风险表）。
         scope.launch {
             scheduler.state.collect { states ->
+                // 设置页的失败聚合直接读快照里的 running（#6）：这里跟着调度器走，
+                // 不能停在 refresh() 那一刻。
+                _state.update { it.copy(running = states) }
                 val targets = synchronized(actionLock) { actionTargets.values.toList() }
+                var statsDirty = false
                 for (target in targets) {
                     val id = target.targetId
                     val live = states[id]
@@ -95,6 +99,10 @@ class DownloadLibrary(
                             false
                         }
                     }
+                    if (changed && live !is DownloadState.Downloading) {
+                        // 完成 / 失败 / 取消都会改字节统计：设置页读 state.stats 就是新的。
+                        statsDirty = true
+                    }
                     // 下载中 / 部分失败的进度已经直接映射；其余种类变化才需要按字节重算
                     if (changed && live !is DownloadState.Downloading &&
                         live !is DownloadState.PartiallyFailed
@@ -102,6 +110,7 @@ class DownloadLibrary(
                         launchActionComputation(target)
                     }
                 }
+                if (statsDirty) refreshStats()
             }
         }
     }
@@ -117,6 +126,29 @@ class DownloadLibrary(
         account = scope
         _state.update { it.copy(visibleTrackIds = emptySet()) }
         invalidateActionStates()
+    }
+
+    // ── 入队 / 取消（#6）────────────────────────────────────────────
+
+    /**
+     * 入队一个下载目标。**界面只走这里**，不再自己拿 [DownloadScheduler]：
+     * 名单写入、进度映射与统计刷新都挂在 module 上。
+     */
+    fun enqueue(target: DownloadTarget) = scheduler.enqueue(target)
+
+    /**
+     * 取消排队或下载中的目标；已下完的曲目保留（下次重下只补缺口）。
+     * 统计会在调度器状态变化后刷新。
+     */
+    fun cancel(target: DownloadTarget) = scheduler.cancel(target)
+
+    /**
+     * 名单唯一的读-改-写入口（#6）。界面 / 测试要改名单都走这里——
+     * 生产注入的是 [com.example.pulsar.SerializedDownloadLedgerStore]，
+     * 与调度器共用同一把锁；自己 `load()` + `replaceAll()` 会丢条目。
+     */
+    suspend fun updateLedger(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>) {
+        ledger?.update(block)
     }
 
     /**
@@ -141,6 +173,12 @@ class DownloadLibrary(
         )
         _state.value = snapshot
         return snapshot
+    }
+
+    /** 完成 / 失败 / 取消之后重读统计（#6）：设置页读 `state.stats` 不能停在旧值。 */
+    private suspend fun refreshStats() {
+        val stats = readStats()
+        _state.update { it.copy(stats = stats) }
     }
 
     // ── 按钮五态（Step 2）────────────────────────────────────────────
@@ -312,8 +350,9 @@ class DownloadLibrary(
         val keepTrackIds = trackIds.filter { it == playingTrackId }
         val ledgerUpdated = entry != null && updateLedgerAfterDelete(entry, keepTrackIds)
 
-        // 删完立刻重算按钮状态：不让「已下载」多撑几帧。
+        // 删完立刻重算按钮状态与统计：不让「已下载」和占用数字多撑几帧。
         invalidateActionStates()
+        refreshStats()
         return DownloadDeleteResult(deletedCount = keys.size, ledgerUpdated = ledgerUpdated)
     }
 
@@ -340,6 +379,7 @@ class DownloadLibrary(
         downloads.remove(key)
         removeTrackFromLedger(track.id)
         invalidateActionStates()
+        refreshStats()
         return true
     }
 
@@ -374,10 +414,11 @@ class DownloadLibrary(
     ): Boolean {
         val store = ledger ?: return false
         return try {
-            val others = store.load().entries.filterNot { it == entry }
-            store.replaceAll(
+            // 唯一的读-改-写入口（#6）：load + replaceAll 自己拼会与调度器互相覆盖。
+            store.update { entries ->
+                val others = entries.filterNot { it == entry }
                 if (keepTrackIds.isEmpty()) others else others + entry.copy(trackIds = keepTrackIds)
-            )
+            }
             true
         } catch (error: CancellationException) {
             throw error
@@ -392,18 +433,20 @@ class DownloadLibrary(
         val store = ledger ?: return
         val current = account ?: return
         try {
-            val affected = store.entriesFor(current.serverUrl, current.userId)
-                .filter { trackId in it.trackIds }
-            if (affected.isEmpty()) return
-            val updated = store.load().entries.mapNotNull { entry ->
-                if (entry !in affected) {
-                    entry
-                } else {
-                    val remaining = entry.trackIds.filterNot { it == trackId }
-                    if (remaining.isEmpty()) null else entry.copy(trackIds = remaining)
+            // 同样走唯一入口：先读再写会被调度器的入队写名单覆盖（#6）。
+            store.update { entries ->
+                entries.mapNotNull { entry ->
+                    if (entry.serverUrl != current.serverUrl ||
+                        entry.userId != current.userId ||
+                        trackId !in entry.trackIds
+                    ) {
+                        entry
+                    } else {
+                        val remaining = entry.trackIds.filterNot { it == trackId }
+                        if (remaining.isEmpty()) null else entry.copy(trackIds = remaining)
+                    }
                 }
             }
-            store.replaceAll(updated)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {

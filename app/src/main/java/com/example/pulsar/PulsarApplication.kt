@@ -132,8 +132,16 @@ class PulsarApplication : Application(), AuthorizationSink {
         return { libraryFilesApi(settings.serviceUrl(), settings.fileOpsKey()) }
     }
 
-    /** 下载名单（`DownloadLedger`）的持久化。 */
-    fun downloadLedgerStore(): DownloadLedgerStore = DataStoreDownloadLedgerStore(pulsarPreferencesDataStore)
+    /**
+     * 下载名单（`DownloadLedger`）的持久化。**进程级单例**：调度器、下载 module 与
+     * ViewModel 必须共用同一个 [SerializedDownloadLedgerStore]，否则等于各拿各的锁，
+     * 并发的「读 → 改 → 写」仍会互相覆盖（#6）。
+     */
+    private val downloadLedgerStoreInstance: DownloadLedgerStore by lazy {
+        SerializedDownloadLedgerStore(DataStoreDownloadLedgerStore(pulsarPreferencesDataStore))
+    }
+
+    fun downloadLedgerStore(): DownloadLedgerStore = downloadLedgerStoreInstance
 
     /**
      * 下载任务（调度器 + 唯一真相 module）共用的进程级作用域。

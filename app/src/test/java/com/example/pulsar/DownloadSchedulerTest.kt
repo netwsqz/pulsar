@@ -264,6 +264,10 @@ class DownloadSchedulerTest {
         override suspend fun entriesFor(serverUrl: String, userId: String): List<DownloadEntry> =
             entries.filter { it.serverUrl == serverUrl && it.userId == userId }
 
+        override suspend fun pruneUnattributed(): Int = 0
 
+        override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>) {
+            this.entries = block(this.entries.toList()).toMutableList()
+        }
     }
 }

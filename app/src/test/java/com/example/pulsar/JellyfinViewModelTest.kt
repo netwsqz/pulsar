@@ -2248,6 +2248,14 @@ class JellyfinViewModelTest {
         }
         override suspend fun entriesFor(serverUrl: String, userId: String) =
             entries.filter { it.serverUrl == serverUrl && it.userId == userId }
+
+        override suspend fun pruneUnattributed(): Int = 0
+
+        override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>) {
+            if (failWrite) throw RuntimeException("ledger broken")
+            replaceCalls++
+            this.entries = block(this.entries)
+        }
     }
 
     /** 地址历史的内存 Fake：记录写入与读取，验证登录成功时的 record 调用。 */

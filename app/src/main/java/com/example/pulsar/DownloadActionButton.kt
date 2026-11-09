@@ -45,8 +45,8 @@ import kotlinx.coroutines.launch
  * 专辑 / 播放列表详情页的「下载」按钮（工单 05 / 13 / #5）。
  *
  * **这里只画**：五态由 [com.example.pulsar.download.DownloadLibrary.stateFor] 决定，
- * 删除走 `DownloadLibrary.delete(...)`。按钮不再自己读名单、查字节或写名单——
- * 那套规则在 download module 里只有一份。
+ * 删除走 `DownloadLibrary.delete(...)`，入队 / 取消也走 module。按钮不再自己读名单、
+ * 查字节、写名单或持有调度器——那套规则在 download module 里只有一份。
  *
  * 五态：检查中 →「检查中…」（禁用）；未下载 →「下载」；下载中 → 进度环 +「取消」；
  * 已下载 →「已下载」（点开可删）；部分失败 →「N 首失败 · 重试」。
@@ -54,7 +54,6 @@ import kotlinx.coroutines.launch
  * 删除确认后在对话框里显示进度，删完关框并通过 [onMessage] 报告「已删除 N 首」（用户故事 62）。
  * 蜂窝流量下点「下载」/「重试」都先弹一次确认（用户故事 6 / 60）；Wi-Fi 下不弹。
  * **所有入队入口都走 [requestDownload]**——蜂窝确认只在一处判断，不给入口留后门。
- * （入队目前仍暂走旧 scheduler 路径，#6 再统一进 module。）
  */
 @Composable
 internal fun DownloadActionButton(
@@ -71,7 +70,6 @@ internal fun DownloadActionButton(
 ) {
     val context = LocalContext.current
     val application = context.applicationContext as PulsarApplication
-    val scheduler = remember(application) { application.downloadScheduler }
     val library = remember(application) { application.downloadLibrary }
     val sessions = remember(application) { application.sessionRepository() }
 
@@ -123,7 +121,7 @@ internal fun DownloadActionButton(
     val scope = rememberCoroutineScope()
 
     fun enqueue() {
-        target?.let(scheduler::enqueue)
+        target?.let(library::enqueue)
     }
 
     /** 唯一的入队漏斗：蜂窝流量下先问一次，Wi-Fi 直接下。重试与首次下载共用它。 */
@@ -157,7 +155,7 @@ internal fun DownloadActionButton(
         }
 
         is DownloadState.Downloading -> FilledTonalButton(
-            onClick = { target?.let(scheduler::cancel) },
+            onClick = { target?.let(library::cancel) },
             modifier = modifier
         ) {
             val fraction = downloadProgressFraction(state)

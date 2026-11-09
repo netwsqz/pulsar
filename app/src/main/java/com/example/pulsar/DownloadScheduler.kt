@@ -74,9 +74,6 @@ class DownloadScheduler(
     /** 串行队列：一次一个目标。 */
     private val queueMutex = Mutex()
 
-    /** 名单是整表覆写，读-改-写要自己串起来，否则两个目标同时入队会丢条目。 */
-    private val ledgerMutex = Mutex()
-
     // enqueue 在界面线程、完成回调在 IO 线程，用并发 map 免得两边同时改
     private val jobs = java.util.concurrent.ConcurrentHashMap<DownloadTargetId, Job>()
 
@@ -124,12 +121,14 @@ class DownloadScheduler(
             trackIds = target.tracks.map { it.id },
             createdAt = System.currentTimeMillis(),
         )
-        ledgerMutex.withLock {
-            val others = ledger.load().entries.filterNot {
+        // 名单写入只走 store 的唯一入口（#6）：scheduler 不再自己持锁。
+        // 生产注入的是 SerializedDownloadLedgerStore，与 DownloadLibrary / ViewModel 共用同一把锁。
+        ledger.update { entries ->
+            val others = entries.filterNot {
                 it.serverUrl == entry.serverUrl && it.userId == entry.userId &&
                     it.kind == entry.kind && it.id == entry.id
             }
-            ledger.replaceAll(others + entry)
+            others + entry
         }
     }
 

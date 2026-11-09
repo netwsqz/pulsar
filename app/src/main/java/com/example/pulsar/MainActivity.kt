@@ -4375,10 +4375,11 @@ private fun DownloadsSection(
     // 每次进设置页重拉：下载随时在跑，数字不能停在旧值。
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
     val application = LocalContext.current.applicationContext as PulsarApplication
-    val scheduler = remember(application) { application.downloadScheduler }
-    val downloadStates by scheduler.state.collectAsStateWithLifecycle()
+    val library = remember(application) { application.downloadLibrary }
+    // 失败聚合直接读 module 快照（#6）：它跟着调度器走，界面不再自己拿 scheduler。
+    val snapshot by library.state.collectAsStateWithLifecycle()
     // 失败提示（用户故事 20）：调度器只管本次运行，失败数如实汇总在这里。
-    val failedTracks = downloadStates.values.sumOf { (it as? DownloadState.PartiallyFailed)?.failed ?: 0 }
+    val failedTracks = snapshot.running.values.sumOf { (it as? DownloadState.PartiallyFailed)?.failed ?: 0 }
     Column(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)

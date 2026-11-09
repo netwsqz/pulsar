@@ -8,6 +8,8 @@ import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -83,6 +85,57 @@ interface DownloadLedgerStore {
 
     /** 只返回属于 [serverUrl] + [userId] 的条目——换账号看不见别人的名单。 */
     suspend fun entriesFor(serverUrl: String, userId: String): List<DownloadEntry>
+
+    /**
+     * 剔除归属为空的坏条目（历史上迁移遗留的 `serverUrl == ""`），返回剔除条数。
+     * 正常情况是一次纯读；只有真存在坏条目才写回。
+     */
+    suspend fun pruneUnattributed(): Int
+
+    /**
+     * 名单唯一的读-改-写入口：整表覆写的「读 → 改 → 写」必须原子完成，
+     * 否则两个并发写入者会互相覆盖（丢条目）。
+     *
+     * 生产实现是 [SerializedDownloadLedgerStore]（持唯一一把锁）；**不要**在外面
+     * 自己 `load()` + `replaceAll()`，那就是又开了一条无锁写路径（#6）。
+     */
+    suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>)
+}
+
+/**
+ * 名单写入的唯一串行化点（#6 Step 4）：包一个 [Mutex]，让所有读-改-写调用排成一个队。
+ *
+ * scheduler（入队写名单）、DownloadLibrary（删除后改名单）与 ViewModel（读名单）
+ * 都共用**同一个**实例，否则等于各自有一把锁，并发写入仍会丢条目。
+ * 由 [PulsarApplication.downloadLedgerStore] 统一提供。
+ */
+class SerializedDownloadLedgerStore(
+    private val delegate: DownloadLedgerStore,
+) : DownloadLedgerStore {
+
+    private val mutex = Mutex()
+
+    override suspend fun load(): DownloadLedger = delegate.load()
+
+    override suspend fun replaceAll(entries: List<DownloadEntry>) = delegate.replaceAll(entries)
+
+    override suspend fun entriesFor(serverUrl: String, userId: String): List<DownloadEntry> =
+        delegate.entriesFor(serverUrl, userId)
+
+    override suspend fun pruneUnattributed(): Int = mutex.withLock {
+        // prune 也是「读 → 判断 → 写回」：不持锁就可能盖掉同时入队写进来的名单。
+        delegate.pruneUnattributed()
+    }
+
+    override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>) {
+        mutex.withLock {
+            val current = delegate.load()
+            val updated = block(current.entries)
+            if (updated != current.entries) {
+                delegate.replaceAll(updated)
+            }
+        }
+    }
 }
 
 private val ledgerJsonKey = stringPreferencesKey("download_ledger_json")
@@ -127,11 +180,21 @@ class DataStoreDownloadLedgerStore(private val dataStore: DataStore<Preferences>
      *
      * 只在读到的名单里**确实有**这种条目时才写回一次，正常情况是一次纯读。返回剔除的条数。
      */
-    suspend fun pruneUnattributed(): Int = guardedSuspendIo(0) {
+    override suspend fun pruneUnattributed(): Int = guardedSuspendIo(0) {
         val current = load()
         val kept = current.entries.filter { it.serverUrl.isNotBlank() }
         val removed = current.entries.size - kept.size
         if (removed > 0) replaceAll(kept)
         removed
+    }
+
+    /**
+     * 未串行化的读-改-写。生产路径走 [SerializedDownloadLedgerStore.update]（唯一一把锁），
+     * 这里只是接口契约的兜底实现，供没有并发写入者的场景使用。
+     */
+    override suspend fun update(block: suspend (List<DownloadEntry>) -> List<DownloadEntry>) {
+        val current = load()
+        val updated = block(current.entries)
+        if (updated != current.entries) replaceAll(updated)
     }
 }

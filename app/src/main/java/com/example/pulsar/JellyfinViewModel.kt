@@ -124,7 +124,7 @@ class JellyfinViewModel(
         // 界面上看不见却占着名单）。正常情况这里是一次纯读，只有真存在坏条目才写回。
         viewModelScope.launch(dispatcher) {
             try {
-                (downloadLedgerStore as? DataStoreDownloadLedgerStore)?.pruneUnattributed()
+                downloadLedgerStore?.pruneUnattributed()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

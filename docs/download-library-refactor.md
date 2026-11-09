@@ -1,6 +1,7 @@
 # DownloadLibrary 重构执行计划
 
-> 状态：**待研究**。本文是 candidate 4（下载真相只留一个 module）的执行规格，不是 ADR。
+> 状态：**进行中（2026-11-09）**。#4 / #5 已完成并本地提交；#6 进行中；#7 未开始。
+> 本文是 candidate 4（下载真相只留一个 module）的执行规格，不是 ADR。
 > 相关：`docs/session-scope-refactor.md`（账号作用域）、`docs/library-state-refactor.md`（DownloadState slice）。
 > ADR 边界：**ADR-0007 决定「音频字节共享、可见性按账号、退出登录不清下载、只有完整副本才算数」**。本方案不改任何一条，只把同一批规则从五处收成一处。
 
@@ -51,7 +52,7 @@
 | D2 | 账号作用域 | 引入 `AccountScope(serverUrl, userId)`；暂时由 `SessionRepository` 提供，candidate 6 落地后换成 `SessionScope` |
 | D3 | 五态 | `Checking / NotDownloaded / Downloading(progress) / Downloaded / PartiallyFailed(n)`；`stateFor(target)` 输出 |
 | D4 | 删除 | 只有一条 `delete(target)`；单曲删除 `deleteTrack(track, key, playingTrackId)` |
-| D5 | 名单写 | `DownloadLibrary` 内部一把 `Mutex`，scheduler 写名单也走它（或把写名单职责整体上收） |
+| D5 | 名单写 | **已定（#6）**：`DownloadLibrary` 内部一把 `Mutex`；`DownloadScheduler` 不再自己持锁，写名单统一走 library 的入口 |
 | D6 | 统计 | `stats()` 返回 `DownloadStats(bytes, completeCount)`；设置页只读 |
 | D7 | 调度器 | `DownloadScheduler` 保留为串行 worker；`DownloadLibrary` 组合它，不复制重试/队列逻辑 |
 | D8 | 账号隔离 | 字节共享；可见性 = 名单 ∩ 当前账号；删除仍按名单走，正在播的跳过 |
@@ -101,6 +102,24 @@ class DownloadLibrary(
     fun refresh()
 }
 ```
+
+### 5.1 落地时确认的差异（#4 / #5 / #6 实测）
+
+> **最重要的一个坑**：缓存键是**播放流 URL**，名单存的是**曲目 id**，两套 key 对不上。
+> 所以「字节 ∩ 名单」不能直接相交，必须先把曲目映射成缓存键。落地时改成：
+>
+> ```kotlin
+> suspend fun refresh(tracks: List<Track>, cacheKeyOf: (Track) -> String?): DownloadSnapshot
+> ```
+>
+> - `tracks` 是「当前可能出现在界面上的全部曲目」，`cacheKeyOf` 由调用方给（生产是 `viewModel::cacheKey`）；
+> - 映射和相交**都在 module 里算**，ViewModel 不再保留第二份交集——否则「一个真相」当场作废；
+> - 曲目算不出 URL（离线 / 未登录）→ 该曲目不可见，不猜。
+>
+> 另外两处与草图不同：
+> - `stateFor` 返回的是缓存过的 `StateFlow`，不是每次新建——否则每个按钮一个 flow，重组时抖动；
+> - `delete` / `deleteTrack` 返回 `DownloadDeleteResult(deletedCount, ledgerUpdated)` 由 `DownloadLibrary` 组装，
+>   UI 只负责弹「已删除 N 首」。
 
 设计要点：
 - `stateFor` 需要知道目标曲目表才能查字节；`target` 已包含 `tracks`（`DownloadTrack.key`），所以够了。
@@ -239,3 +258,15 @@ computeDownloadedTrackIds 改为从 library 的 visibleTrackIds 读。先写 Dow
 （账号隔离、字节完整但不在名单、名单有但字节不完整、stats 账号无关）再实现。
 完成后跑全量单测 + assembleDebug，报告改动与验证结果。
 ```
+
+## 11. 回退策略
+
+| Step | 怎么退 |
+|---|---|
+| Step 1 | `computeDownloadedTrackIds()` 改回 `legacyComputeDownloadedTrackIds()`（旧实现保留为 fallback，本步就是为它留的） |
+| Step 2 | `DownloadActionButton` 恢复旧的 `resolveDownloadState` / 本地 ledger 读写；`library.stateFor` 不接线 |
+| Step 3 | UI 改回直接拿 `application.downloadScheduler` / `mediaDownloads()` |
+| Step 4 | 名单写回 scheduler 自己的 `ledgerMutex`；`pruneUnattributed` 恢复向下转型 |
+| Step 5 | 只删代码/改文档，回退即恢复上一 commit |
+
+关键：**每一小步都保留旧实现不删**（Step 5 才统一删），所以任何一步都能单独退。

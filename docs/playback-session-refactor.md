@@ -1,8 +1,9 @@
 # PlaybackSession 重构执行计划
 
-> 状态：**待确认**。本文是 candidate 1（把播放会话收成一个 module）的执行规格，不是 ADR。
+> 状态：**已落地（2026-11-09），待真机确认**。对应 #1 / #2 / #3，三张票代码完成、单测全绿、
+> 已本地提交。本节保留决策历史；「队列单一真相」拆到了 #28。本文是 candidate 1 的执行规格，不是 ADR。
 > 默认决策取自架构评审的推荐答案；每一步开工前可以改，改了就更新本文。
-> 全部完成后，再决定是否把 `PlaybackSession` / `PlaybackRemote` 写进 `CONTEXT.md`。
+> `PlaybackSession` / `PlaybackRemote` 已写进 `CONTEXT.md`。
 
 ---
 
@@ -39,6 +40,15 @@
 > D6 的影响：`playbackMode` 虽然进了 module，但 module 仍随 composition 重建，所以转屏会重置。要真正跨转屏保留，需要 slice 4 的 ViewModel/Activity 级持有；这一点在 slice 3 的验收里单独标注。
 
 ## 4. 目标形状（sketch，slice 2 再定稿）
+
+> **2026-11-09 注**：本节是开工前的草图，**落地后与草图有出入，以代码为准**。已知差异：
+> - `dispatch(intent)` 实际返回 `Boolean`（界面用它判断这次点击有没有被接住），不是 `Unit`；
+> - `PlaybackIntent` 多了 `PlayLocalFile(uri)`、`PlayQueueItem(index)`、`AdjustVolume`、`SetUsbExclusive`、`SetUsbVolume`、`SetSilenceSkip`；
+> - `PlaybackUiState` 多了 `currentMediaItem`（迷你条/全屏页要拿它画封面）；
+> - `PlaybackEvent` 有四个变体：`Message` / `Unplayable` / `PlaybackQueuePrepared` / `VolumeApplied`；
+> - `PlaybackModeStore` 是后加的第五个文件，负责播放模式落盘（DataStore 键 `playback_mode`）。
+>
+> 读代码：`app/src/main/java/com/example/pulsar/playback/PlaybackSession.kt`。
 
 ```kotlin
 // playback/PlaybackRemote.kt
@@ -317,13 +327,17 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 
 ### Step 4 — 清理 + 文档 + 删除测试
 
+> **2026-11-09 更新**：#2 / #3 已经把动作 1 的四个符号全部删掉了（`ControllerState` / `queueSnapshot` /
+> `applyQueueOrder` / `playTracks` 在 `MainActivity.kt` 里各 0 处）。动作 2 的 grep 也已经干净。
+> **剩下的只有动作 3、4、5、6（文档 + 回归）**。开工前先跑一遍 grep 确认没有再冒出来。
+
 **目标**：把旧形状彻底删掉，确认没有浅层残留。
 
 **动作**
-1. 删除不再使用的 `ControllerState`、旧的 `queueSnapshot`、`applyQueueOrder`、`playTracks`、`toPlaybackMetadata` 旧副本。
+1. ~~删除不再使用的 `ControllerState`、旧的 `queueSnapshot`、`applyQueueOrder`、`playTracks`、`toPlaybackMetadata` 旧副本。~~（#2/#3 已完成）
 2. `grep -rn "controllerState.controller"` 确认没有 UI 直接操作控制器；如果还有，逐个改成 intent 或明确记录为例外。
-3. 更新 `CLAUDE.md` 的播放章节：加 `PlaybackSession` / `PlaybackRemote` / `PlaybackUiState` 的职责与红线。
-4. 更新 `CONTEXT.md`：加 **播放会话（PlaybackSession）**、**播放 remote（PlaybackRemote）** 两个术语；说明「队列真相在 session，不在两份 UI 本地副本」。
+3. 更新 `CLAUDE.md` 的播放章节：加 `PlaybackSession` / `PlaybackRemote` / `PlaybackUiState` 的职责与红线。（#3 已完成）
+4. 更新 `CONTEXT.md`：加 **播放会话（PlaybackSession）**、**播放 remote（PlaybackRemote）** 两个术语；说明「队列真相在 session，不在两份 UI 本地副本」。（已加，但**「队列单一真相」还没做**，见 #28）
 5. 跑全量测试 + `assembleDebug`；真机回归。
 6. 跑一次 `git diff` 自查：没有无关格式化、没有删用户数据、没有改 ADR。
 

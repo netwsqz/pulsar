@@ -108,10 +108,11 @@ data class LibraryState(
 )
 
 data class DownloadState(
-    val cachedTrackIds: Set<String>? = null,
-    val cachedAlbums: List<CachedAlbum>? = null,
-    val cacheBytes: Long = 0,
-    val cacheTrackCount: Int = 0,
+    /**
+     * 直接内嵌 candidate 4 的 DownloadLibrary 快照。
+     * 不要在这里重新派生「已下载」——字节 ∩ 名单只允许有一处算法。
+     */
+    val snapshot: DownloadSnapshot = DownloadSnapshot(),
     val isDeleting: Boolean = false,
     val deleteMessage: String? = null,
 )
@@ -134,6 +135,13 @@ class LibraryCache(
     fun leaveOffline(tracks: List<Track>)
 }
 ```
+
+> **2026-11-09 改口径（与 candidate 4 对齐）**：`DownloadState` 原草图里的
+> `cachedTrackIds` / `cachedAlbums` / `cacheBytes` / `cacheTrackCount` 会变成**第五份「已下载」派生**，
+> 与 `DownloadLibrary` 的「一个真相」直接冲突。candidate 4 已经落地（#4 / #5），
+> 所以这里改成内嵌 `DownloadSnapshot`：状态来自 `DownloadLibrary.state`，
+> `DownloadState` 只额外持有纯 UI 的删除进度与提示。
+> **`cachedAlbums`（已下载专辑列表）也由 DownloadLibrary 提供**，不要在 ViewModel 里重算。
 
 设计要点：
 - `LibraryCache.onSectionEntered(section)` 替换 UI 里的 `LaunchedEffect` 分支；UI 只报「进了哪一节」，不再知道 load 方法名、幂等守卫、session ready。
@@ -254,6 +262,8 @@ class LibraryCache(
 2. `LibraryCache` 是 class 还是继续留在 ViewModel？推荐 class。
 3. 是否顺手修 `section` / `playbackMode` 的 saveable 问题？推荐单独 ticket。
 4. 是否把 `QQDownloadViewModel` 的 24 字段也按同样方式拆？推荐另开，不要混。
+5. `DownloadState` 内嵌 `DownloadSnapshot`（本文 2026-11-09 的改法）是否接受？推荐接受——
+   否则 candidate 4 的「一个真相」会被这项重构重新拆成两份。
 
 ## 10. 新窗口开工提示词
 

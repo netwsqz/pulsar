@@ -208,6 +208,9 @@ fun SearchContent(
 
 ## 9. 风险与待确认
 
+> **命名对齐（2026-11-09）**：candidate 2 的 `OfflineView` 里这个字段叫 `isFiltering`，
+> 本文草图写的是 `isOfflineFiltered`。以 candidate 2 为准，落地时别造第二个名字。
+
 | 风险 | 缓解 |
 |---|---|
 | 纯函数吃整个 UiState，变成另一个大 interface | 用窄输入 `SearchInput` / `QqSearchInput` |

@@ -142,8 +142,13 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 
 ### Step 2 — 把 `isPlayable` / `unplayableReason` 收进 policy
 
+> **2026-11-09 更新**：候选 1 已落地（#1–#3）。守门现在在 `PlaybackSession` 里，通过
+> `PlaybackGate` 这个 port 调 `viewModel::isPlayable` / `viewModel::unplayableReason`。
+> 所以本步只改 ViewModel 的两个方法体，**播放侧一行都不用动**——session 拿到的就是新判定。
+> 界面上的 `onPlayTrack` / `onAddToQueue` 现在只是 `dispatch(PlayIntent)` 的薄包装。
+
 1. `JellyfinViewModel.isPlayable` / `unplayableReason` 改成调用 `offlineIsPlayable` / `offlineUnplayableReason`。
-2. 播放守门（`onPlayTrack` / `onAddToQueue`）仍然调 ViewModel，不动调用方。
+2. 播放守门（`PlaybackGate` → `PlaybackSession`）不动，它本来就只认这两个方法。
 3. 测试：现有 `JellyfinViewModelTest` 的离线可播断言保持绿。
 
 **验收**：离线点未下载歌的提示与改前一字不差；在线一律可播。
@@ -217,3 +222,15 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 visible / offlineNotice 换成 offlineView(...)。行为不变，先写 OfflinePolicyTest 再实现。
 完成后跑全量单测 + assembleDebug，报告改动与验证结果。
 ```
+
+## 11. 回退策略
+
+| Step | 怎么退 |
+|---|---|
+| Step 1 | 恢复 `MusicLibraryScreen` 里的 `offlineFilter` / `visible` 旧 if/else；保留 `OfflinePolicy.kt` 不接线（纯函数不影响行为） |
+| Step 2 | ViewModel 的两个方法体改回旧实现（一行 if）；policy 里的函数留着 |
+| Step 3 | 三处分组各自恢复原来的 helper；`AlbumIdentity` 留着不用 |
+| Step 4 | 文案常量改回字面量；`OfflineNotice.message()` 留着不用 |
+| Step 5 | 只删代码/改文档，回退即恢复上一 commit |
+
+每一步都是「新 module 先并存、调用点后切换」，所以任何一步出事都能单独退，不用整体回滚。

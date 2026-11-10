@@ -104,6 +104,7 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 
 - **曲库快照 `LibrarySnapshot.kt`**：手机上的「曲库里有哪些歌」清单（JSON，`filesDir/library-snapshot.json`）。**只在线下兜底，不在线上抢活**——能连上 Jellyfin 时一律以服务器为准，请求失败才顶上。覆盖发现 / 全部音乐 / 专辑 + 离线搜索；**播放列表不在快照里**，除非那个列表被下载过（已下载列表另存一份本地清单）。
 - **下载 `MediaDownloads.kt`**（原 `MediaCache.kt`）：**用户主动**存到手机上的原文件副本（`SimpleCache`，目录 `filesDir/media_cache`，**不是 `cacheDir`**——后者会被系统清掉）。**播放链路纯只读，绝不写盘**（`CacheDataSource.Factory.setCacheWriteDataSinkFactory(null)`）；写盘只有一条路：`CacheWriter` + `createDataSourceForDownloading()`。**没有自动淘汰**（`NoOpCacheEvictor`），没有总量上限，没有一键清空。**只有完整副本才算数**（`isCompleteCopy`）。
+- **下载库 `download/DownloadLibrary.kt`**：**「已下载」的唯一真相**——`已下载 = 字节完整 ∩ 当前账号名单`（ADR-0007）。交集只在 module 内算一次：界面只读 `DownloadSnapshot`（`visibleTrackIds` / `stats` / `running`），只发 `enqueue` / `cancel` / `delete`；**不要再自己查字节、自己算交集或直接拿 `DownloadScheduler`**。统计也从 `refreshStats()` + `state.stats` 取。名单的读-改-写只走 `DownloadLedgerStore.update`（生产是进程级 `SerializedDownloadLedgerStore`，所有写者共用一把锁）。
 
 关键约定（ADR-0007 / ADR-0008）：
 

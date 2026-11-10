@@ -3995,7 +3995,7 @@ private fun SettingsContent(
         SurfaceCard { RecycleBinSection(state = state, viewModel = viewModel) }
         // 下载（ADR-0007）：占用 + 首数 + 「已下载」入口。没有清空按钮——没有一键清空。
         SurfaceCard {
-            DownloadsSection(state = state, viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
+            DownloadsSection(viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
         }
     }
 }
@@ -4368,7 +4368,6 @@ private fun DownloadedAlbumRow(
  * **没有清空按钮**——没有「一键清空全部」是有意的摩擦（ADR-0007 / spec 铁律 2）。 */
 @Composable
 private fun DownloadsSection(
-    state: JellyfinUiState,
     viewModel: JellyfinViewModel,
     onOpenCachedCopies: () -> Unit
 ) {
@@ -4376,10 +4375,11 @@ private fun DownloadsSection(
     LaunchedEffect(Unit) { viewModel.loadCacheStats() }
     val application = LocalContext.current.applicationContext as PulsarApplication
     val library = remember(application) { application.downloadLibrary }
-    // 失败聚合直接读 module 快照（#6）：它跟着调度器走，界面不再自己拿 scheduler。
+    // 失败聚合与占用统计都读 module 快照（#7）：界面不再自己拿 scheduler 或查字节层。
     val snapshot by library.state.collectAsStateWithLifecycle()
     // 失败提示（用户故事 20）：调度器只管本次运行，失败数如实汇总在这里。
     val failedTracks = snapshot.running.values.sumOf { (it as? DownloadState.PartiallyFailed)?.failed ?: 0 }
+    val stats = snapshot.stats
     Column(
         Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
@@ -4388,15 +4388,15 @@ private fun DownloadsSection(
             Column(Modifier.weight(1f)) {
                 Text("下载", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (state.cacheTrackCount == 0) "点专辑或播放列表上的「下载」，就能离线听"
-                    else "${state.cacheTrackCount} 首 · ${formatBytes(state.cacheBytes)}",
+                    if (stats.completeCount == 0) "点专辑或播放列表上的「下载」，就能离线听"
+                    else "${stats.completeCount} 首 · ${formatBytes(stats.usedBytes)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             TextButton(
                 onClick = onOpenCachedCopies,
-                enabled = state.cacheTrackCount > 0
+                enabled = stats.completeCount > 0
             ) { Text("已下载") }
         }
         if (failedTracks > 0) {

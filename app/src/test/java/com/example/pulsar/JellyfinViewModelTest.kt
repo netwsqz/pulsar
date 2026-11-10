@@ -1432,9 +1432,12 @@ class JellyfinViewModelTest {
         val ledger = FakeDownloadLedgerStore().apply {
             entries = listOf(downloadedEntry(listOf("t1", "t2"), id = "a1", name = "Album A"))
         }
-        val viewModel = createDeleteTestViewModel(
+        // 统计来自 module 快照（#7）：ViewModel 不再自己查字节层。
+        val library = downloadLibraryFor(mediaDownloads, ledger)
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
-            mediaDownloads, ledger
+            mediaDownloads = mediaDownloads, downloadLedgerStore = ledger, downloadLibrary = library
         )
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -1448,7 +1451,7 @@ class JellyfinViewModelTest {
 
         assertEquals(setOf("stream/t1"), mediaDownloads.completeKeys)
         assertTrue(mediaDownloads.removedKeys.contains("stream/t2"))
-        assertEquals(1, viewModel.state.value.cacheTrackCount)
+        assertEquals(1, library.state.value.stats.completeCount)
         // 提示报的是**真删掉的副本数**：正在播的那首被跳过，所以是 1 不是 2（用户故事 62）
         assertEquals("已删除 1 首", viewModel.state.value.downloadDeleteMessage)
         assertEquals(
@@ -1722,18 +1725,21 @@ class JellyfinViewModelTest {
     fun `下载统计照旧：占用与首数来自下载层`() = runTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/track-1"
+        val ledger = FakeDownloadLedgerStore()
+        // 统计的唯一出口是 module 快照（#7）：设置页读 library.state.stats。
+        val library = downloadLibraryFor(mediaDownloads, ledger)
         val viewModel = createViewModel(
             FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
-            mediaDownloads = mediaDownloads
+            mediaDownloads = mediaDownloads, downloadLedgerStore = ledger, downloadLibrary = library
         )
         advanceUntilIdle()
 
         viewModel.loadCacheStats()
         advanceUntilIdle()
 
-        assertEquals(1, viewModel.state.value.cacheTrackCount)
-        assertEquals(36_000_000L, viewModel.state.value.cacheBytes)
+        assertEquals(1, library.state.value.stats.completeCount)
+        assertEquals(36_000_000L, library.state.value.stats.usedBytes)
     }
 
     // ── 播放历史（工单 02：发现页个人化聚合的数据基础） ──────────────────
@@ -2196,11 +2202,12 @@ class JellyfinViewModelTest {
     /** 真 module + Fake 字节/名单：验证 ViewModel 接线，不复制交集逻辑。 */
     private fun TestScope.downloadLibraryFor(
         downloads: FakeMediaDownloads,
-        ledger: FakeDownloadLedgerStore
+        ledger: DownloadLedgerStore?
     ): DownloadLibrary = DownloadLibrary(
         downloads = downloads,
         ledger = ledger,
-        scheduler = DownloadScheduler(backgroundScope, downloads, ledger),
+        // 名单为 null = 测试「只看字节真相」的兜底；scheduler 仍要一个可写的 store。
+        scheduler = DownloadScheduler(backgroundScope, downloads, ledger ?: FakeDownloadLedgerStore()),
         scope = backgroundScope
     )
 
@@ -2227,11 +2234,16 @@ class JellyfinViewModelTest {
         serverUrlHistory: FakeServerUrlHistory? = null,
         downloadLedgerStore: FakeDownloadLedgerStore? = null,
         downloadLibrary: DownloadLibrary? = null
-    ): JellyfinViewModel = JellyfinViewModel(
-        sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
-        libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory, downloadLedgerStore,
-        downloadLibrary
-    )
+    ): JellyfinViewModel {
+        // 生产路径只有一条：有下载能力就一定接真 module（旧 ViewModel 派生已在 #7 删除）。
+        val library = downloadLibrary
+            ?: mediaDownloads?.let { downloadLibraryFor(it, downloadLedgerStore) }
+        return JellyfinViewModel(
+            sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
+            libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory,
+            downloadLedgerStore, library
+        )
+    }
 
     /** 下载名单的内存 Fake（迁移测试用）。 */
     private class FakeDownloadLedgerStore : DownloadLedgerStore {

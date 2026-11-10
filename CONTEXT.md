@@ -100,6 +100,17 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 - **名单不等于状态**：名单里有、字节不全的，仍然算「没下载」。**判定永远是字节真相**
 - **升级时反推一次**：老版本自动攒的副本会被扫一遍反推成名单，反查不到的进「其他」组
 
+### 下载库（Download library）
+
+`download/DownloadLibrary.kt`。**「已下载」的唯一真相**：`已下载 = 字节完整 ∩ 当前账号名单`，
+交集只在 module 里算一次——界面和 ViewModel 都**不要再自己查字节或算交集**。
+
+- 界面只认它：五态走 `stateFor(target)`，删除走 `delete(...)`，入队 / 取消走
+  `enqueue` / `cancel`，统计走 `refreshStats()`；不要再直接拿 `DownloadScheduler` 或 `MediaDownloads`
+- `DownloadSnapshot` 是它输出的快照：`completeKeys`（账号无关的共享字节）、
+  `visibleTrackIds`（当前账号可见的曲目 id）、`stats`（占用统计）、
+  `running`（调度器本次运行状态）
+
 ### 已下载列表（Downloaded view）
 
 设置页「下载」卡片进入的子页面，**按专辑分组**看手机上已有的完整副本。可以整张删，也可以展开逐首删。下到一半的不显示——判据与离线可见性同一套（「只有完整的一份才算数」）。

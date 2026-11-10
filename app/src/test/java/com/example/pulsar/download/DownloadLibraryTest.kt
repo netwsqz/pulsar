@@ -17,6 +17,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -501,6 +502,28 @@ class DownloadLibraryTest {
         assertEquals(DownloadActionState.Downloaded, state.value)
     }
 
+    @Test
+    fun `stateFor：部分失败直接照抄调度器，不按字节猜`() = runTest {
+        // t2 每次下载都失败（重试 3 次后跳过），t1 正常完成
+        val downloads = FakeMediaDownloads().apply { failKeys += "stream/t2" }
+        val ledger = FakeDownloadLedgerStore()
+        val scheduler = DownloadScheduler(backgroundScope, downloads, ledger)
+        val library = DownloadLibrary(downloads, ledger, scheduler, backgroundScope)
+        library.setAccount(user1)
+        val target = target(tracks = listOf(track("t1"), track("t2")))
+        val state = library.stateFor(target)
+
+        library.enqueue(target)
+        // 失败重试退避 1s/2s/4s，必须用有界时间推进；advanceUntilIdle 在常驻 collect 下推不动。
+        runCurrent()
+        advanceTimeBy(20_000)
+        runCurrent()
+
+        // 「N 首失败 · 重试」是本次运行的事实，字节真相（t1 已完整）不能把它盖成未下载
+        assertEquals(DownloadActionState.PartiallyFailed(1), state.value)
+        assertTrue("stream/t1" in downloads.completeKeys)
+    }
+
     // ── 删除（#5）──────────────────────────────────────────────────
 
     @Test
@@ -706,6 +729,30 @@ class DownloadLibraryTest {
     }
 
     @Test
+    fun `refreshStats 只重读统计，不动可见集合`() = runTest {
+        val downloads = FakeMediaDownloads().apply {
+            completeKeys += "stream/a"
+            usedBytesValue = 1L
+            completeCountValue = 1
+        }
+        val ledger = FakeDownloadLedgerStore().apply {
+            entries = listOf(entry(trackIds = listOf("a")))
+        }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+        val before = library.refresh(listOf(track("a")), ::keyOf)
+        assertEquals(setOf("a"), before.visibleTrackIds)
+
+        // 设置页进页时只刷新占用数字：统计账号无关，不需要曲目表，也不该动可见集合。
+        downloads.usedBytesValue = 9L
+        downloads.completeCountValue = 2
+        library.refreshStats()
+
+        assertEquals(DownloadStats(usedBytes = 9L, completeCount = 2), library.state.value.stats)
+        assertEquals(before.visibleTrackIds, library.state.value.visibleTrackIds)
+    }
+
+    @Test
     fun `两个协程并发写名单不丢条目`() = runTest {
         val backing = YieldingLedgerStore()
         val store = SerializedDownloadLedgerStore(backing)
@@ -790,6 +837,8 @@ class DownloadLibraryTest {
         val completeKeys = mutableSetOf<String>()
         val removedKeys = mutableListOf<String>()
         val downloadCalls = mutableListOf<String>()
+        /** 这些 key 的下载永远失败（用来造「部分失败」）。 */
+        val failKeys = mutableSetOf<String>()
         /** key → 下载开始前卡住的闸门，用来复现「取消到一半」。 */
         val gates = mutableMapOf<String, CompletableDeferred<Unit>>()
         var usedBytesValue = 0L
@@ -830,6 +879,7 @@ class DownloadLibraryTest {
             onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
         ): Boolean {
             downloadCalls += key
+            if (key in failKeys) return false
             activeDownloads++
             maxActiveDownloads = maxOf(maxActiveDownloads, activeDownloads)
             try {

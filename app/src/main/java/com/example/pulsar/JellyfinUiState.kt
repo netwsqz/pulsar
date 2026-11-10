@@ -91,9 +91,6 @@ data class JellyfinUiState(
     val isOfflineSearch: Boolean = false,
     /** 已下载列表（设置页进）：按专辑分组的完整副本进度。null = 还没进过这页。 */
     val cachedAlbums: List<CachedAlbum>? = null,
-    /** 下载占用字节数 / 完整副本首数（设置页「下载」区块）。 */
-    val cacheBytes: Long = 0,
-    val cacheTrackCount: Int = 0,
     /**
      * 整张专辑的下载正在删（工单 13）。已下载列表的确认框据此显示进度、禁用按钮，
      * 删完落回 false 才关框——删除跑在 [JellyfinViewModel] 里，页面切走也不中断。

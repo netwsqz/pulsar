@@ -49,17 +49,20 @@ class JellyfinViewModel(
     private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     /** 曲库文件操作的 API 工厂（删除/改名走 PC 伴生服务，与 Jellyfin 会话无关）。测试注入 Fake。 */
     private val libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
-    /** 手机本地音频下载（离线能听）。null = 没有下载能力，一切照常走网络。 */
+    /**
+     * 手机本地音频下载的字节层。**只用于删歌时顺手移除本地副本**；
+     * 已下载判定、统计与删除一律走 [downloadLibrary]。
+     */
     private val mediaDownloads: MediaDownloads? = null,
     /** 曲库快照：断网时撑起界面。null = 没有离线兜底。 */
     private val snapshotRepository: LibrarySnapshotRepository? = null,
     /** 服务器地址历史：登录页下拉选 + 登录成功后记录。null = 无历史。 */
     private val serverUrlHistory: ServerUrlHistory? = null,
-    /** 下载名单：存量副本迁移（工单 07）写这里。null = 不迁移。 */
+    /** 下载名单：已下载列表清单与无归属条目清理用；可见性交集在 [DownloadLibrary] 内算。 */
     private val downloadLedgerStore: DownloadLedgerStore? = null,
     /**
      * 「已下载」唯一真相（工单 #4）：字节完整 ∩ 当前账号名单。
-     * null = 旧兜底路径（历史测试 / 未接线调用方），行为与改前一致。
+     * null = 没有下载能力（仅测试 / 未接线调用方）；生产由 [PulsarApplication.downloadLibrary] 注入。
      */
     private val downloadLibrary: DownloadLibrary? = null
 ) : ViewModel() {
@@ -1239,65 +1242,18 @@ class JellyfinViewModel(
 
     /**
      * 算出「哪些歌**已下载**」（离线可见性用：离线时界面上只显示这一批，ADR-0008）。
-     * **两个概念求交集**，别混：
      *
-     * 1. **字节真相**（`completeKeys` / `hasCompleteCopy`）：这首歌在不在盘上。半截的不算。
-     *    判定永远是字节真相，不是名单真相（spec 铁律 3）。
-     * 2. **可见性**（下载名单里属于当前账号的 `trackIds`）：当前账号有没有「拥有」它。
-     *    下载键只带服务器地址、不带用户 ID，所以光看字节分不出是谁下的；
-     *    换账号后要看不见上一个账号的下载（用户故事 17），只能靠名单筛。
-     *
-     * 名单没注入 / 读不出来时**退化成只看字节真相**——没有名单就无从判断归属，
-     * 此时宁可多显示也不误筛（跟「判不出来就全按不能放」的旧口径相反：那条是字节层
-     * 整体坏掉，这里是可见性层缺信息）。
-     *
-     * 失败 = 判不出来 = 全部按没下载处理，绝不把异常抛给界面（铁律 1）。
+     * **交集只在 [DownloadLibrary] 里算**：这里只交出「当前可能出现在界面上的全部曲目」
+     * 和「曲目 → 缓存键」映射，拿回 module 算好的 `visibleTrackIds`。口径是
+     * 字节完整 ∩ 当前账号名单（ADR-0007）；名单不可用 / 字节层失败时 module 内部已按
+     * 改前口径降级，ViewModel 不再保留第二份实现。
      *
      * 只在**进离线态之前**算一次：isOffline 一翻 true 界面马上要用它筛列表，拿未算完的
      * null 硬撑会把能放的歌也拦成「没下载」——对能播的歌说谎比等一下更糟。
      * 在线时不需要知道（一律能放），所以不提前算。
      */
     private suspend fun computeDownloadedTrackIds(): Set<String> =
-        // 主路径：交集只在 DownloadLibrary 里算（唯一真相）。module 未注入才走旧兜底。
-        downloadLibrary?.refresh(knownTracks(), ::cacheKey)?.visibleTrackIds
-            ?: legacyComputeDownloadedTrackIds()
-
-    /**
-     * 旧兜底：module 未注入时（历史测试 / 尚未接线的调用方）沿用改前的本地实现。
-     * **生产路径不应走到这里**；接线完成后由 #7 删除，别再往这里加新逻辑。
-     */
-    private suspend fun legacyComputeDownloadedTrackIds(): Set<String> {
-        val downloads = mediaDownloads ?: return emptySet()
-        val completeKeys = try {
-            downloads.completeKeys()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            emptySet()
-        }
-        val visible = visibleDownloadedTrackIds()
-        return knownTracks().filter { track ->
-            (visible == null || track.id in visible) &&
-                cacheKey(track)?.let { it in completeKeys } == true
-        }.map { it.id }.toSet()
-    }
-
-    /**
-     * 当前账号下载名单里的曲目 id。null = 没有名单可用（未注入 / 读失败），
-     * 调用方据此跳过可见性过滤。
-     */
-    private suspend fun visibleDownloadedTrackIds(): Set<String>? {
-        val store = downloadLedgerStore ?: return null
-        val currentSession = session ?: return null
-        val entries = try {
-            store.entriesFor(_state.value.serverUrl, currentSession.userId)
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            return null
-        }
-        return entries.flatMap { it.trackIds }.toSet()
-    }
+        downloadLibrary?.refresh(knownTracks(), ::cacheKey)?.visibleTrackIds ?: emptySet()
 
     /** 当前可能出现在界面上的所有曲目（去重）。离线可见性判定要覆盖每一屏。 */
     private fun knownTracks(): List<Track> {
@@ -1441,18 +1397,12 @@ class JellyfinViewModel(
         offlineRetryJob = null
     }
 
-    /** 拉下载占用（进设置页时调）。 */
+    /**
+     * 拉下载占用（进设置页时调）。**统计只在 [DownloadLibrary] 里查**：ViewModel 不再
+     * 直接碰字节层，界面读 module 快照里的 `stats`。
+     */
     fun loadCacheStats() {
-        viewModelScope.launch(dispatcher) { refreshCacheStats() }
-    }
-
-    /** 下载统计（设置页卡片）：占用 + 完整副本首数。 */
-    private suspend fun refreshCacheStats() {
-        val downloads = mediaDownloads ?: return
-        // 先算完再写 state：这两个调用都会挂起，别在挂起点前攥着 _state 的旧快照。
-        val bytes = downloads.usedBytes()
-        val count = downloads.completeCount()
-        _state.value = _state.value.copy(cacheBytes = bytes, cacheTrackCount = count)
+        viewModelScope.launch(dispatcher) { downloadLibrary?.refreshStats() }
     }
 
     /** 删歌成功顺带清掉这首的下载（工单 06）。失败不影响删歌结果（铁律 4）。 */
@@ -1495,10 +1445,10 @@ class JellyfinViewModel(
         if (_currentTrack.value?.id == track.id) return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
-            // module 内部会再挡一道「正在播的不删」，并顺手把名单里的这一首去掉。
+            // module 内部会再挡一道「正在播的不删」，并顺手把名单里的这一首去掉；
+            // 统计也在删除后由 module 刷新。
             library.deleteTrack(track, key, _currentTrack.value?.id)
             refreshCachedAlbums(tracks)
-            refreshCacheStats()
         }
     }
 
@@ -1541,7 +1491,7 @@ class JellyfinViewModel(
                     // 界面状态只在会话没换过时写：会话已经换掉的话，这些结果会飘在登录页上。
                     if (generation == loginGeneration) {
                         refreshCachedAlbums(tracks)
-                        refreshCacheStats()
+                        // 统计由 module 在 delete() 内部刷新（#7），这里不再重复查字节。
                         // 报的是**真删掉的副本数**：正在播的那首被跳过就不算它。
                         _state.value = _state.value.copy(
                             downloadDeleteMessage = downloadDeletedMessage(result.deletedCount)

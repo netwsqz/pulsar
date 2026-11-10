@@ -175,8 +175,13 @@ class DownloadLibrary(
         return snapshot
     }
 
-    /** 完成 / 失败 / 取消之后重读统计（#6）：设置页读 `state.stats` 不能停在旧值。 */
-    private suspend fun refreshStats() {
+    /**
+     * 重读设置页统计（占用字节 / 完整副本首数）。
+     *
+     * 这是统计的**唯一入口**：设置页进页时调它，界面读 [state] 里的 `stats` 即可，
+     * 不再直接问字节层。统计与前账号无关，所以不需要曲目表，也不改可见集合。
+     */
+    suspend fun refreshStats() {
         val stats = readStats()
         _state.update { it.copy(stats = stats) }
     }

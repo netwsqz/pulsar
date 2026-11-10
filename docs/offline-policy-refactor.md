@@ -175,6 +175,18 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 
 ### Step 3 — 统一专辑身份（三处分组）
 
+> **已完成 2026-11-11（#9）**：新增 `com.example.pulsar.offline.AlbumIdentity`（`AlbumIdentity` +
+> `albumIdentityOf` / `albumsFromTracks` / `toAlbumCard`）。`offlineVisibleLibrary` 与
+> `groupCachedByAlbum` 改用它配对专辑、反推专辑卡；`LibraryGroups` 只共用名字归一化
+> （`normalizedNameKey`），**按艺术家分组的规则一字未改**（原文最后一条风险）。
+> 与原文的差异：
+> - 专辑名归一化为「去首尾空白 + 大小写不敏感」，与艺术家分组同一套规则；
+> - 空白专辑名在三处都不建组（旧 `offlineVisibleLibrary` 反推时已跳过，另外两处对齐）；
+> - 旧 `Track.toAlbumCard` 与两处内部分组实现已删，`AlbumIdentity` 在 `offline/` 包内。
+>
+> 新测试：`offline/AlbumIdentityTest`（5 项）；`CachedAlbumsTest` / `OfflineVisibleLibraryTest`
+> 各补大小写/空白/空白专辑名边界。
+
 1. `offlineVisibleLibrary` 的 `toAlbumCard` / `downloadedAlbumNames`；
 2. `groupCachedByAlbum`；
 3. `LibraryGroups.groupAlbums` 的按名归并。

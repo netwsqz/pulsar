@@ -65,6 +65,33 @@ class CachedAlbumsTest {
     }
 
     @Test
+    fun `专辑名大小写或空白不同也归到同一张卡`() {
+        val trackACaseVariant = Track("t4", "Song A3", "Artist X", " album a ", 1000L, null)
+        val result = groupCachedByAlbum(
+            tracks = listOf(trackA1, trackACaseVariant, trackB1),
+            albums = listOf(albumB, albumA),
+            cachedTrackIds = setOf("t1", "t4")
+        )
+        // 归一化后是同一张专辑：真专辑对象仍优先，统计按归一化名算。
+        assertEquals(
+            listOf(CachedAlbum(albumA, tracks = listOf(trackA1, trackACaseVariant), totalCount = 2)),
+            result
+        )
+    }
+
+    @Test
+    fun `空白专辑名的曲目不建组`() {
+        val blankAlbum = Track("t9", "Song Z", "Artist X", "   ", 1000L, null)
+        val result = groupCachedByAlbum(
+            tracks = listOf(trackA1, blankAlbum),
+            albums = listOf(albumA),
+            cachedTrackIds = setOf("t1", "t9")
+        )
+        // 没有专辑名就不该造一行空名字的专辑。
+        assertEquals(listOf(CachedAlbum(albumA, tracks = listOf(trackA1), totalCount = 1)), result)
+    }
+
+    @Test
     fun `没有完整副本时列表为空`() {
         val result = groupCachedByAlbum(
             tracks = listOf(trackA1),

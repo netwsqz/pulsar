@@ -3,6 +3,8 @@ package com.example.pulsar
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.offline.albumIdentityOf
+import com.example.pulsar.offline.albumsFromTracks
 
 /**
  * 离线时界面上**实际能显示**的那一份曲库（ADR-0008）。
@@ -22,18 +24,12 @@ internal data class VisibleLibrary(
 )
 
 /**
- * 从一首曲目反推专辑卡片：没拉到专辑列表时（快照里只有曲目表）拿它顶上。
- * id 用专辑名——离线详情页本来就按专辑名匹配（`offlineAlbumTracks`）。
- */
-internal fun Track.toAlbumCard(): Album =
-    Album(id = album, name = album, artist = artist, trackCount = null, imageTag = null)
-
-/**
  * 按「已下载的曲目 id」把曲库筛一遍。
  *
  * - 曲目：只留 [visibleTrackIds] 里的。
- * - 专辑：**有一首已下载曲目就保留**（选曲下载的专辑不该整张消失）。按专辑名配对——
- *   [Track] 只有专辑名没有专辑 id，同名不同歌手的会并在一起，与 [groupCachedByAlbum] 同一代价。
+ * - 专辑：**有一首已下载曲目就保留**（选曲下载的专辑不该整张消失）。按**专辑身份**
+ *   （`offline.AlbumIdentity`：去空白 + 大小写不敏感）配对——[Track] 只有专辑名没有专辑 id，
+ *   同名不同歌手的会并在一起，与 [groupCachedByAlbum] 同一代价。
  * - 搜索：曲目/专辑同一口径，播放列表原样（离线搜索本来就搜不到列表）。
  *
  * [discoverAlbums] 默认跟随 [albums]：发现页的随机专辑墙和专辑页同一套「有没有下载」判断。
@@ -54,13 +50,13 @@ internal fun offlineVisibleLibrary(
     visibleTrackIds: Set<String>
 ): VisibleLibrary {
     val downloaded = tracks.orEmpty().filter { it.id in visibleTrackIds }
-    val downloadedAlbumNames = downloaded.mapTo(mutableSetOf()) { it.album }
+    val downloadedAlbumKeys = downloaded
+        .map { albumIdentityOf(it) }
+        .filter { it.key.isNotEmpty() }
+        .mapTo(mutableSetOf()) { it.key }
 
-    /** 真专辑对象缺席时，从已下载曲目拼出卡片（每张专辑取第一首的歌手）。 */
-    fun albumsFromTracks(): List<Album> = downloaded
-        .filter { it.album.isNotBlank() }
-        .distinctBy { it.album }
-        .map { it.toAlbumCard() }
+    /** 从已下载曲目反推的专辑卡（空白专辑名不建组）。 */
+    fun derivedAlbums(): List<Album> = albumsFromTracks(downloaded)
 
     /**
      * 筛一张专辑列表，并用反推结果补上列表里缺席的那些（快照过旧 / 压根没拉到）。
@@ -68,10 +64,12 @@ internal fun offlineVisibleLibrary(
      * 别把骨架屏换成空态。
      */
     fun albumsWithDownloads(list: List<Album>?): List<Album>? {
-        val filtered = list?.filter { it.name in downloadedAlbumNames }.orEmpty()
-        val merged = filtered + albumsFromTracks().filter { derived ->
-            filtered.none { it.name == derived.name }
-        }
+        val matched = list.orEmpty()
+            .map { it to albumIdentityOf(it).key }
+            .filter { (_, key) -> key in downloadedAlbumKeys }
+        val matchedKeys = matched.mapTo(mutableSetOf()) { (_, key) -> key }
+        val merged = matched.map { (album, _) -> album } +
+            derivedAlbums().filter { albumIdentityOf(it).key !in matchedKeys }
         return merged.ifEmpty { if (list == null) null else emptyList() }
     }
 

@@ -125,6 +125,40 @@ class OfflineVisibleLibraryTest {
     }
 
     @Test
+    fun `专辑名大小写或空白不同也匹配到同一张专辑`() {
+        val variant = Track("t4", "A3", "Artist X", " album a ", 1000L, null)
+        val visible = offlineVisibleLibrary(
+            tracks = listOf(variant),
+            albums = listOf(albumA),
+            visibleTrackIds = setOf("t4")
+        )
+        // 按专辑身份匹配（去空白 + 大小写不敏感），不再是逐字符相等。
+        assertEquals(listOf(albumA), visible.albums)
+    }
+
+    @Test
+    fun `反推的专辑卡按归一化名去重`() {
+        val variant = Track("t4", "A3", "Artist X", "album a", 1000L, null)
+        val visible = offlineVisibleLibrary(
+            tracks = listOf(a1, variant),
+            albums = null,
+            visibleTrackIds = setOf("t1", "t4")
+        )
+        assertEquals(listOf("Album A"), visible.albums?.map { it.name })
+    }
+
+    @Test
+    fun `空白专辑名不反推专辑卡`() {
+        val blankAlbum = Track("t9", "Song Z", "Artist X", "   ", 1000L, null)
+        val visible = offlineVisibleLibrary(
+            tracks = listOf(blankAlbum),
+            albums = null,
+            visibleTrackIds = setOf("t9")
+        )
+        assertNull(visible.albums)
+    }
+
+    @Test
     fun `专辑列表没拉到（null）时从已下载曲目反推专辑卡片`() {
         // 回归：登录只写曲目表、快照里没有专辑、用户也没逛过专辑页 → state.albums 为 null。
         // 之前这里直接返回 null，专辑页显示「手机里还没有下载的专辑」，而歌曲页明明有歌。

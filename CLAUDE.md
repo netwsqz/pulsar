@@ -109,7 +109,9 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 关键约定（ADR-0007 / ADR-0008）：
 
 - `JellyfinUiState.isOffline` 是全局离线态；`goOffline()` 由**任意**网络请求的 `Network` 错误触发（探活/离线可见性全 App 共用），不是某一节自己的事。
-- **离线时曲库各屏只显示已下载的东西**（ADR-0008），不再「全量 + 标灰」——置灰那套 UI 已整体删除。过滤是**界面层派生**（`offlineVisibleLibrary()`，纯函数）：原始 `tracks/albums/...` 保持全量，回在线自动恢复，别去改 state（探活回在线时「歌曲」页不会重拉，改 state 会让列表永久缩水）。
+- **离线策略 `offline/OfflinePolicy.kt`**：纯 module，不持有状态、不做 IO。输入 `OfflineInput`（`isOffline`、`downloadedTrackIds`（null = 未知）、`isOfflineSearch`、六份原始列表 + 三节历史、`tracksLoaded` / `isLoading`），输出 `OfflineView`（`visibleLibrary` / `isFiltering` / `notice` / `discover` / `emptyKind` / `searchNotice`）。**界面只读 `OfflineView`**，不要再自己拼 `isOffline && cachedTrackIds`；`isPlayable` / `unplayableReason` 也委托 `offlineIsPlayable` / `offlineUnplayableReason`。
+- **离线文案的唯一出处**在同一个 module：`OfflineNotice.message()`（标题下「离线 · 只显示已下载」）、`OfflineEmpty.message()`（专辑/歌曲两种空态）、`OfflineSearchNotice.message()`（搜索页两种离线标识）。界面按类型取值，**别在 Composable 里再写字面量**。
+- **离线时曲库各屏只显示已下载的东西**（ADR-0008），不再「全量 + 标灰」——置灰那套 UI 已整体删除。过滤是**界面层派生**（`offlineView()`，纯函数；内部委托 `offlineVisibleLibrary()`）：原始 `tracks/albums/...` 保持全量，回在线自动恢复，别去改 state（探活回在线时「歌曲」页不会重拉，改 state 会让列表永久缩水）。
 - 专辑**有一首已下载就显示**；详情页只列已下载曲目并隐藏下载按钮；离线搜索只搜已下载（`isOfflineSearch` 时必须标明）。`cachedTrackIds` 为 `null` = 还不知道（在线），界面不筛。
 - 离线时**播放队列不动**；`isPlayable` / `unplayableReason` 只服务队列里遗留的未下载歌与新点播守门。
 - `PulsarApplication.mediaCacheStore` 是**进程级单例**：`SimpleCache` 对同一目录只允许一个实例，且界面（查副本/报占用）与播放服务共用它。**服务销毁时不能释放它**。

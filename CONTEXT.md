@@ -131,6 +131,14 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 只存被下载过的那些，**不是全量播放列表快照**——没下载过的列表离线时照旧「需要联网」。
 
+### 离线视图（OfflineView）
+
+`offline/OfflinePolicy.kt` 的纯函数输出：把「离线时能看见什么 / 哪一节不显示 / 提示什么」算成一份**渲染用的视图**（可见曲库、是否在筛、提示类型、发现页节组合、空态类型、搜索页离线标识）。
+
+- **输入 `OfflineInput`，输出 `OfflineView`**，不持有状态、不做 IO；界面只渲染它，不再自己拼 `isOffline && cachedTrackIds`
+- `downloadedTrackIds == null`（还没算出来）**不筛**；空集才是「一首都没下载」
+- 离线文案也由这里给**类型**，字面量只在 `OfflineNotice` / `OfflineEmpty` / `OfflineSearchNotice` 的 `message()` 里定义一次
+
 ## 服务与链路
 
 ### PC 服务 / 伴生服务（Companion service）

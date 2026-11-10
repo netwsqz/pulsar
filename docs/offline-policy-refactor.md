@@ -200,6 +200,17 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 
 ### Step 4 — 收口提示与空态文案
 
+> **已完成 2026-11-11（#10）**：新增 `OfflineNotice.message()` / `OfflineEmpty.message()` /
+> `OfflineSearchNotice.message()`（都在 `offline/OfflineModels.kt`），三条文案全 App 只剩这一处定义。
+> `OfflineView` 增加 `searchNotice`（来自 `OfflineInput.isOfflineSearch`），搜索页改读类型，
+> `SearchContent` 的 `isOfflineFiltered` 参数删除；发现页空态的离线分支改为委托
+> `OfflineEmpty.Tracks.message()`。文案与改前逐字一致（`OfflineMessagesTest` 钉死 5 条字面量）。
+>
+> 与原文的差异：
+> - `OfflineEmpty` 只有 `Albums` / `Tracks` 两种（原文只要求两种空态）；
+> - 搜索结果页的「没找到」空态也顺势按 `searchNotice` 类型分支（文案不变）；
+> - 播放列表详情那句「需要联网」没有并入：它只在一个页面出现一次，不属于本次「多处重复」的范围。
+
 1. 把 `"离线 · 只显示已下载"`、`"离线 · 手机里还没有下载的专辑"`、`"离线 · 手机里还没有下载的歌曲"` 收进 `OfflineNotice` / `OfflineEmpty.message()`。
 2. 搜索结果页的离线提示也走同一套（现在 `SearchContent` 自己写了一行）。
 3. 不改字，只改出处。
@@ -207,6 +218,15 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 **验收**：全 App 搜索这三个字符串只剩一处定义；真机对照文案无变化。
 
 ### Step 5 — 清理 + 文档
+
+> **已完成 2026-11-11（#10）**：
+> - 删除旧的多列表 `discoverSections(dailyPicks: List<Track>, …)` 重载（测试改用布尔入口）；
+> - `SearchContent` 的 `isOfflineFiltered` 参数与 MainActivity 里的 `OfflineNotice` 映射删除；
+> - `DiscoverEmpty.Downloaded.message()` 改为委托 `OfflineEmpty.Tracks.message()`；
+> - `offlineVisibleLibrary` **保留**为 `OfflinePolicy` 的内部委托：它是过滤实现本身，不是重复文案，
+>   删掉只会把 90 行逻辑搬进 `offlineView`，不影响「单点定义」的目标；
+> - `CLAUDE.md` 补 `OfflinePolicy` 的职责与输入/输出、文案唯一出处；`CONTEXT.md` 补「离线视图」术语；
+> - 验证：全量单测 + `assembleDebug` 通过；§8 真机清单待用户确认（issue #10 留了待确认评论）。
 
 1. 删除旧的重复 helper（保留测试覆盖）。
 2. 更新 `CLAUDE.md` 的离线章节：加 `OfflinePolicy` 的职责与输入/输出。

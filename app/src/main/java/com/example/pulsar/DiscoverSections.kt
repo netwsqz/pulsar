@@ -2,6 +2,8 @@ package com.example.pulsar
 
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.offline.OfflineEmpty
+import com.example.pulsar.offline.message
 
 /**
  * 发现页「这一页有哪些节」的组合规则（工单 12）。
@@ -57,10 +59,12 @@ internal fun discoverEmptyNotice(isOffline: Boolean): DiscoverEmpty =
 /**
  * 空态文案。放在这里而不是散在 Composable 里，是为了让「提示的入口真实存在」（报告 #26）
  * 这条约束可测、且两处空态不会各写一份走样。
+ *
+ * 离线那一句的唯一出处是 `offline/OfflineEmpty`（#10）——这里只委托，不再写第二份字面量。
  */
 internal fun DiscoverEmpty.message(): String = when (this) {
     DiscoverEmpty.Library -> "曲库为空 —— 去搜索页搜歌并下载"
-    DiscoverEmpty.Downloaded -> "离线 · 手机里还没有下载的歌曲"
+    DiscoverEmpty.Downloaded -> OfflineEmpty.Tracks.message()
 }
 
 /**
@@ -69,29 +73,10 @@ internal fun DiscoverEmpty.message(): String = when (this) {
  *
  * [tracksLoaded] / [isLoading] 只为整页空态服务：还在加载或会话没恢复完（`state.tracks == null`）
  * 时**不给**整页空态——那是"还在连"，不是"确实没有"。
+ *
+ * 旧的多列表入口（`dailyPicks: List<Track>`）已删（#10）：判据只需要「有没有曲目」，
+ * 选曲与文案在上层，界面的调用点也早已收敛到 `OfflinePolicy`。
  */
-internal fun discoverSections(
-    dailyPicks: List<Track>,
-    recentlyPlayed: List<Track>?,
-    mostPlayed: List<Track>?,
-    recentlyAdded: List<Album>?,
-    discoverAlbums: List<Album>?,
-    isOffline: Boolean,
-    tracksLoaded: Boolean,
-    isLoading: Boolean
-): DiscoverSections = discoverSections(
-    // 这一页只关心「每日推荐有没有曲目」；文案与选曲在上层。
-    dailyPicksAvailable = dailyPicks.isNotEmpty(),
-    recentlyPlayed = recentlyPlayed,
-    mostPlayed = mostPlayed,
-    recentlyAdded = recentlyAdded,
-    discoverAlbums = discoverAlbums,
-    isOffline = isOffline,
-    tracksLoaded = tracksLoaded,
-    isLoading = isLoading
-)
-
-/** [discoverSections] 的布尔入口：离线策略（OfflinePolicy）只拿得到「推荐有没有曲目」。 */
 internal fun discoverSections(
     dailyPicksAvailable: Boolean,
     recentlyPlayed: List<Track>?,

@@ -36,6 +36,7 @@ class OfflinePolicyTest {
         albumTracks: List<Track>? = null,
         playlistTracks: List<Track>? = null,
         searchResults: SearchResults? = null,
+        isOfflineSearch: Boolean = false,
         recentlyPlayed: List<Track>? = null,
         mostPlayed: List<Track>? = null,
         recentlyAdded: List<Album>? = null,
@@ -50,6 +51,7 @@ class OfflinePolicyTest {
         albumTracks = albumTracks,
         playlistTracks = playlistTracks,
         searchResults = searchResults,
+        isOfflineSearch = isOfflineSearch,
         recentlyPlayed = recentlyPlayed,
         mostPlayed = mostPlayed,
         recentlyAdded = recentlyAdded,
@@ -146,6 +148,28 @@ class OfflinePolicyTest {
         )
 
         assertEquals(SearchResults(tracks = listOf(a1), albums = listOf(albumA)), view.visibleLibrary.searchResults)
+    }
+
+    // ── 离线搜索标识 ────────────────────────────────────────────────────
+
+    @Test
+    fun `离线搜索的提示类型由策略给出`() {
+        // 在线搜索不打标。
+        assertNull(offlineView(input(isOfflineSearch = false)).searchNotice)
+        // 离线 + 已下载集合已知：列表筛过，范围 = 下载过的歌。
+        assertEquals(
+            OfflineSearchNotice.DownloadedOnly,
+            offlineView(
+                input(isOffline = true, downloadedTrackIds = emptySet(), isOfflineSearch = true)
+            ).searchNotice
+        )
+        // 离线 + 集合未知：列表没筛，只能说「只搜快照」。
+        assertEquals(
+            OfflineSearchNotice.SnapshotOnly,
+            offlineView(
+                input(isOffline = true, downloadedTrackIds = null, isOfflineSearch = true)
+            ).searchNotice
+        )
     }
 
     // ── 离线 + 专辑列表缺席（反推）──────────────────────────────────────

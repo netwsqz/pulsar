@@ -33,8 +33,10 @@ import com.example.pulsar.ui.theme.ThemePresets
 import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.deepened
 import com.example.pulsar.ui.theme.rememberCoverGradient
+import com.example.pulsar.offline.OfflineEmpty
 import com.example.pulsar.offline.OfflineInput
-import com.example.pulsar.offline.OfflineNotice
+import com.example.pulsar.offline.OfflineSearchNotice
+import com.example.pulsar.offline.message
 import com.example.pulsar.offline.offlineView
 import android.content.ComponentName
 import android.os.Bundle
@@ -510,7 +512,7 @@ private fun LibraryGroupsContent(
                 albums == null && state.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 groups.isEmpty() -> EmptyState(
-                    if (offlineNotice != null) "离线 · 手机里还没有下载的专辑" else "暂无艺术家"
+                    if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无艺术家"
                 )
                 else -> LazyColumn(
                     Modifier.fillMaxSize(),
@@ -891,6 +893,7 @@ private fun MusicLibraryScreen(
         OfflineInput(
             isOffline = state.isOffline,
             downloadedTrackIds = state.cachedTrackIds,
+            isOfflineSearch = state.isOfflineSearch,
             tracks = state.tracks,
             albums = state.albums,
             discoverAlbums = state.discoverAlbums,
@@ -958,11 +961,8 @@ private fun MusicLibraryScreen(
         playbackSession.dispatch(PlaybackIntent.Play(trackList, trackId))
     }
     // 离线过滤生效时给各内容页的统一小字（ADR-0008）：歌变少了得有一句解释。
-    // 提示要不要出、出哪一句由策略给类型，界面只负责映射成文案（文案收口见 #10）。
-    val offlineNotice = when (offline.notice) {
-        null -> null
-        OfflineNotice.VisibleOnly -> "离线 · 只显示已下载"
-    }
+    // 提示要不要出、出哪一句由策略给类型，文案只从 OfflineNotice.message() 取（#10）。
+    val offlineNotice = offline.notice?.message()
     val onAddToQueue: (Track) -> Unit = { track ->
         playbackSession.dispatch(PlaybackIntent.AddToQueue(track))
     }
@@ -1196,7 +1196,7 @@ private fun MusicLibraryScreen(
                     LibrarySection.Search -> SearchContent(
                         state = state,
                         results = visible.searchResults,
-                        isOfflineFiltered = offline.isFiltering,
+                        searchNotice = offline.searchNotice,
                         qqState = qqState,
                         // 一次输入同时问两边：两个 ViewModel 各跑各的 300ms 防抖，同时到期 = 一次防抖。
                         onSearchQueryChange = { query ->
@@ -1791,7 +1791,7 @@ private fun TracksContent(
         if (state.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) {
             item {
                 EmptyState(
-                    if (offlineNotice != null) "离线 · 手机里还没有下载的歌曲" else "暂无音乐"
+                    if (offlineNotice != null) OfflineEmpty.Tracks.message() else "暂无音乐"
                 )
             }
         }
@@ -2579,7 +2579,7 @@ private fun DiscoverContent(
             }
             albums.orEmpty().isEmpty() -> {
                 item(key = "albumEmpty") {
-                    EmptyState(if (isFiltering) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
+                    EmptyState(if (isFiltering) OfflineEmpty.Albums.message() else "暂无专辑")
                 }
             }
             else -> {
@@ -3074,7 +3074,7 @@ private fun AlbumsContent(
                 }
                 albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState(
-                    if (offlineNotice != null) "离线 · 手机里还没有下载的专辑" else "暂无专辑"
+                    if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无专辑"
                 )
                 else -> {
                     val albumList = albums.orEmpty()
@@ -3448,7 +3448,7 @@ private fun PlaylistsContent(
 private fun SearchContent(
     state: JellyfinUiState,
     results: SearchResults?,
-    isOfflineFiltered: Boolean,
+    searchNotice: OfflineSearchNotice?,
     qqState: QQDownloadUiState,
     onSearchQueryChange: (String) -> Unit,
     trackCoverFor: (Track) -> JellyfinRequest?,
@@ -3508,11 +3508,10 @@ private fun SearchContent(
             singleLine = true
         )
         // 离线搜索标识：这轮曲库结果来自手机上的快照，且只含已下载（ADR-0008）。
-        // QQ 是另一个服务，不受影响。
-        if (state.isOfflineSearch) {
+        // QQ 是另一个服务，不受影响。提示类型由离线策略给，这里只渲染文案（#10）。
+        searchNotice?.let { notice ->
             Text(
-                if (isOfflineFiltered) "曲库离线 · 只搜已下载；QQ 音乐不受影响"
-                else "曲库离线 · 只搜手机上的快照；QQ 音乐不受影响",
+                notice.message(),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -3557,9 +3556,9 @@ private fun SearchContent(
                     )
                     TextButton(onClick = onRetryQqSearch) { Text("重试") }
                 }
-                bothEmpty && state.isOfflineSearch ->
+                bothEmpty && searchNotice != null ->
                     EmptyState(
-                        if (isOfflineFiltered) "已下载的歌曲里没找到「${state.searchQuery}」\n联网后能搜全曲库"
+                        if (searchNotice == OfflineSearchNotice.DownloadedOnly) "已下载的歌曲里没找到「${state.searchQuery}」\n联网后能搜全曲库"
                         else "快照里没找到「${state.searchQuery}」\n联网后能搜全曲库"
                     )
                 bothEmpty && !qqState.isSearching -> EmptyState("未找到相关内容")

@@ -12,14 +12,15 @@ import com.example.pulsar.offlineVisibleLibrary
  * 离线策略（ADR-0008）把「能看见什么 / 能不能播 / 哪一节不显示 / 提示什么」收成一份纯函数判据：
  * 界面喂进 [OfflineInput]、只渲染 [OfflineView]，不再自己组合 `isOffline + cachedTrackIds`。
  * 过滤仍委托 `offlineVisibleLibrary`、节组合仍委托 `discoverSections`——本模块负责把几份判据
- * 收口到一处，旧的纯函数暂时保留（#9 / #10 再清理）。
+ * 收口到一处。
  *
  * 关键规则：
  * - `downloadedTrackIds == null`（还没算出来）时**不筛**——把能播的歌藏掉比多显示几首更糟；
  * - `isFiltering = isOffline && downloadedTrackIds != null`，只在这里算一次；
  * - 在线一律全量、不提示（ADR-0008：过滤不是「在线也过滤」）；
  * - 发现页三节服务器历史离线时整节不显示，每日推荐/专辑墙仍按已下载内容显示；
- * - 发现页空态类型：离线说「还没下载」，在线说「曲库为空」。
+ * - 发现页空态类型：离线说「还没下载」，在线说「曲库为空」；
+ * - 搜索页的离线标识也在这里给类型（[OfflineSearchNotice]），界面只渲染文案。
  */
 internal fun offlineView(input: OfflineInput): OfflineView {
     val filtering = input.isOffline && input.downloadedTrackIds != null
@@ -59,7 +60,8 @@ internal fun offlineView(input: OfflineInput): OfflineView {
         isFiltering = filtering,
         notice = if (filtering) OfflineNotice.VisibleOnly else null,
         discover = discover,
-        emptyKind = discoverEmptyNotice(input.isOffline)
+        emptyKind = discoverEmptyNotice(input.isOffline),
+        searchNotice = offlineSearchNotice(input.isOfflineSearch, filtering)
     )
 }
 

@@ -18,6 +18,8 @@ internal data class OfflineInput(
     val isOffline: Boolean,
     /** 离线时能显示也能播的曲目 id。null = 还没算出来（不筛）；空集 = 确实一首都没下载。 */
     val downloadedTrackIds: Set<String>?,
+    /** 这轮曲库搜索结果是否来自本地快照（`JellyfinUiState.isOfflineSearch`）。 */
+    val isOfflineSearch: Boolean = false,
     val tracks: List<Track>?,
     val albums: List<Album>?,
     val discoverAlbums: List<Album>?,
@@ -48,11 +50,70 @@ internal data class OfflineView(
     /** 发现页「哪几节显示」——三节服务器历史离线时整节不显示（spec §7）。 */
     val discover: DiscoverSections,
     /** 发现页空态该说哪句话（在线 = 曲库为空，离线 = 还没下载）。 */
-    val emptyKind: DiscoverEmpty
+    val emptyKind: DiscoverEmpty,
+    /** 搜索页的离线标识；null = 在线搜索，不打标。 */
+    val searchNotice: OfflineSearchNotice?
 )
 
-/** 离线提示的类型。文案收口在 #10，这里只定「提示哪种」。 */
+/**
+ * 页面标题下那行离线小字。文案见 [message]，**全 App 只有这一处定义**（#10）。
+ */
 internal enum class OfflineNotice {
     /** 离线 · 只显示已下载 */
     VisibleOnly
 }
+
+/** 离线提示文案的唯一出处：界面按类型取值，不再自己写字面量。 */
+internal fun OfflineNotice.message(): String = when (this) {
+    OfflineNotice.VisibleOnly -> "离线 · 只显示已下载"
+}
+
+/**
+ * 离线空态：列表已经被离线策略筛过，但确实没有可显示的内容。
+ *
+ * 只在 `isFiltering == true` 时使用。在线空态是另一套文案（「暂无专辑」「暂无音乐」…），
+ * 不在这里；离线空态与在线空态不能互相顶替——用户要能分清「曲库空了」和「离线只能看下载」。
+ */
+internal enum class OfflineEmpty {
+    /** 离线 · 手机里还没有下载的专辑 */
+    Albums,
+
+    /** 离线 · 手机里还没有下载的歌曲 */
+    Tracks
+}
+
+/** 离线空态文案的唯一出处。 */
+internal fun OfflineEmpty.message(): String = when (this) {
+    OfflineEmpty.Albums -> "离线 · 手机里还没有下载的专辑"
+    OfflineEmpty.Tracks -> "离线 · 手机里还没有下载的歌曲"
+}
+
+/**
+ * 搜索页的离线标识。只描述曲库那一半——QQ 音乐是另一个服务，离线也照常能搜（ADR-0006）。
+ */
+internal enum class OfflineSearchNotice {
+    /** 离线搜索且列表已按已下载集合筛过：范围 = 下载过的歌。 */
+    DownloadedOnly,
+
+    /** 离线搜索但已下载集合还没算出来（列表没筛）：范围 = 手机上的快照。 */
+    SnapshotOnly
+}
+
+/** 离线搜索提示文案的唯一出处。 */
+internal fun OfflineSearchNotice.message(): String = when (this) {
+    OfflineSearchNotice.DownloadedOnly -> "曲库离线 · 只搜已下载；QQ 音乐不受影响"
+    OfflineSearchNotice.SnapshotOnly -> "曲库离线 · 只搜手机上的快照；QQ 音乐不受影响"
+}
+
+/**
+ * 搜索页该不该打离线标识、打哪一句；null = 不打（在线搜索）。
+ *
+ * [isFiltering] 必须来自 [OfflineView.isFiltering]（离线且已下载集合已知），
+ * 界面不要自己拼 `isOffline && downloadedTrackIds != null`。
+ */
+internal fun offlineSearchNotice(isOfflineSearch: Boolean, isFiltering: Boolean): OfflineSearchNotice? =
+    when {
+        !isOfflineSearch -> null
+        isFiltering -> OfflineSearchNotice.DownloadedOnly
+        else -> OfflineSearchNotice.SnapshotOnly
+    }

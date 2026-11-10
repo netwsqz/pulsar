@@ -2,6 +2,8 @@ package com.example.pulsar
 
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.offline.OfflineEmpty
+import com.example.pulsar.offline.message
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -43,7 +45,7 @@ class DiscoverSectionsTest {
         tracksLoaded: Boolean = true,
         isLoading: Boolean = false
     ) = discoverSections(
-        dailyPicks = dailyPicks,
+        dailyPicksAvailable = dailyPicks.isNotEmpty(),
         recentlyPlayed = recentlyPlayed,
         mostPlayed = mostPlayed,
         recentlyAdded = recentlyAdded,
@@ -144,7 +146,7 @@ class DiscoverSectionsTest {
     fun `曲库还没拉到（tracks 为 null）时不给整页空态`() {
         // state.tracks == null = 会话还没恢复完，界面正在骨架屏；这不是「确实没有内容」。
         val sut = discoverSections(
-            dailyPicks = emptyList(),
+            dailyPicksAvailable = false,
             recentlyPlayed = null,
             mostPlayed = null,
             recentlyAdded = null,
@@ -159,7 +161,7 @@ class DiscoverSectionsTest {
     @Test
     fun `加载中的骨架期间不给整页空态`() {
         val sut = discoverSections(
-            dailyPicks = emptyList(),
+            dailyPicksAvailable = false,
             recentlyPlayed = null,
             mostPlayed = null,
             recentlyAdded = null,
@@ -202,6 +204,8 @@ class DiscoverSectionsTest {
         assertEquals(DiscoverEmpty.Downloaded, discoverEmptyNotice(isOffline = true))
         assertEquals(DiscoverEmpty.Library, discoverEmptyNotice(isOffline = false))
         assertEquals("离线 · 手机里还没有下载的歌曲", discoverEmptyNotice(isOffline = true).message())
+        // 离线空态文案的唯一出处是 offline/OfflineEmpty（#10）：发现页这里只委托，别各写一份。
+        assertEquals(OfflineEmpty.Tracks.message(), discoverEmptyNotice(isOffline = true).message())
         assertEquals("曲库为空 —— 去搜索页搜歌并下载", discoverEmptyNotice(isOffline = false).message())
     }
 

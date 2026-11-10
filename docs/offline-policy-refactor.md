@@ -110,6 +110,10 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 
 ### Step 0 — 基线 + 行为快照
 
+> **已完成 2026-11-11（#8）**：基线全量单测通过（66 个测试类、0 失败）。
+> `OfflineVisibleLibraryTest` / `DiscoverSectionsTest` / `CachedAlbumsTest` / `LibraryGroupsTest`
+> 已覆盖对应行为，未新增快照测试；本步未碰生产代码。
+
 1. 跑全量单测，记录基线。
 2. 给现有纯函数补一组「行为快照」测试（如果已覆盖就跳过）：
    - `OfflineVisibleLibraryTest` 已覆盖 null/空/反推专辑；
@@ -120,6 +124,18 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 **验收**：全量测试通过；知道哪些行为已经被钉住。
 
 ### Step 1 — 引入 `OfflinePolicy`，路由界面派生（行为不变）
+
+> **已完成 2026-11-11（#8）**：新增 `com.example.pulsar.offline`（`OfflineModels.kt` + `OfflinePolicy.kt`）。
+> `MusicLibraryScreen` 的 `offlineFilter` / `visible` / `offlineNotice` 与发现页节组合全部改读
+> `offlineView(OfflineInput)`；`DiscoverContent` 改为接收策略算好的 `sections` / `emptyKind` /
+> `isFiltering`。与原文的差异：
+> - `OfflineInput` 额外带三节历史列表与 `tracksLoaded` / `isLoading`——`OfflineView.discover` 要它们才能算；
+> - `dailyPicks` 不进输入：`showDailyPicks` 由「过滤后曲目表非空」推导（界面固定挑 4 首，非空 ⇔ 有内容）；
+> - `DiscoverSections` 加了一个 `dailyPicksAvailable: Boolean` 入口，旧的列表入口保留并委托；
+> - `OfflineNotice` 目前只有 `VisibleOnly`；`NeedsNetwork` 与文案收口留给 #10。
+>
+> 新测试：`app/src/test/java/com/example/pulsar/offline/OfflinePolicyTest.kt`（16 项）。
+> 旧 `offlineVisibleLibrary` / `discoverSections` 保留为内部委托，未删。
 
 1. 新增 `app/src/main/java/com/example/pulsar/offline/OfflinePolicy.kt`、`OfflineModels.kt`。
 2. `MusicLibraryScreen` 里把 `offlineFilter` + `visible` 的 if/else 换成 `offlineView(...)`。
@@ -146,6 +162,10 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 > `PlaybackGate` 这个 port 调 `viewModel::isPlayable` / `viewModel::unplayableReason`。
 > 所以本步只改 ViewModel 的两个方法体，**播放侧一行都不用动**——session 拿到的就是新判定。
 > 界面上的 `onPlayTrack` / `onAddToQueue` 现在只是 `dispatch(PlayIntent)` 的薄包装。
+>
+> **已完成 2026-11-11（#8）**：两个方法体改为委托 `offlineIsPlayable` / `offlineUnplayableReason`；
+> `PlaybackGate` / `PlaybackSession` 一行未动。离线 + 已下载集合未知仍按「不可播」处理
+> （与改前一致；与「未知 = 不筛」不同，理由见函数注释）。
 
 1. `JellyfinViewModel.isPlayable` / `unplayableReason` 改成调用 `offlineIsPlayable` / `offlineUnplayableReason`。
 2. 播放守门（`PlaybackGate` → `PlaybackSession`）不动，它本来就只认这两个方法。

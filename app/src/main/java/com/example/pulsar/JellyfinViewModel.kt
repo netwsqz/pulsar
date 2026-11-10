@@ -19,6 +19,8 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.offline.offlineIsPlayable
+import com.example.pulsar.offline.offlineUnplayableReason
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -363,10 +365,13 @@ class JellyfinViewModel(
      * 这首歌**现在**能不能放。离线时只有**已下载**的才能放（半截的也算不能，用户故事 9）；
      * 在线一律能放。给 [playTracks] 那类入口用的守门判断。
      *
+     * 判据收在离线策略里（`offlineIsPlayable`）：ViewModel 只交当前状态，不自己判。
      * 「已下载」= 字节完整 且 在当前账号的下载名单里，见 [computeDownloadedTrackIds]。
      */
-    fun isPlayable(track: Track): Boolean =
-        !_state.value.isOffline || _state.value.cachedTrackIds?.contains(track.id) == true
+    fun isPlayable(track: Track): Boolean {
+        val current = _state.value
+        return offlineIsPlayable(track, current.cachedTrackIds, current.isOffline)
+    }
 
     /**
      * 离线时点没下载的歌：返回不能放的原因（给界面弹提示用），可放返回 null。
@@ -374,8 +379,10 @@ class JellyfinViewModel(
      *
      * 文案保持原样：UI 侧另一处兜底话术与它成对（工单 06 统一改词，别只改一边）。
      */
-    fun unplayableReason(track: Track): String? =
-        if (isPlayable(track)) null else "这首歌没有下载，联网后才能播放"
+    fun unplayableReason(track: Track): String? {
+        val current = _state.value
+        return offlineUnplayableReason(track, current.cachedTrackIds, current.isOffline)
+    }
 
     fun albumCover(album: Album): JellyfinRequest? = coverRequest(album.id, album.imageTag)
     fun playlistCover(playlist: Playlist): JellyfinRequest? = coverRequest(playlist.id, playlist.imageTag)

@@ -79,6 +79,28 @@ internal fun discoverSections(
     isOffline: Boolean,
     tracksLoaded: Boolean,
     isLoading: Boolean
+): DiscoverSections = discoverSections(
+    // 这一页只关心「每日推荐有没有曲目」；文案与选曲在上层。
+    dailyPicksAvailable = dailyPicks.isNotEmpty(),
+    recentlyPlayed = recentlyPlayed,
+    mostPlayed = mostPlayed,
+    recentlyAdded = recentlyAdded,
+    discoverAlbums = discoverAlbums,
+    isOffline = isOffline,
+    tracksLoaded = tracksLoaded,
+    isLoading = isLoading
+)
+
+/** [discoverSections] 的布尔入口：离线策略（OfflinePolicy）只拿得到「推荐有没有曲目」。 */
+internal fun discoverSections(
+    dailyPicksAvailable: Boolean,
+    recentlyPlayed: List<Track>?,
+    mostPlayed: List<Track>?,
+    recentlyAdded: List<Album>?,
+    discoverAlbums: List<Album>?,
+    isOffline: Boolean,
+    tracksLoaded: Boolean,
+    isLoading: Boolean
 ): DiscoverSections {
     // 离线：三节服务器历史不是「过滤后展示」，是「不展示」（spec §7）。数据留在 state 里。
     val history = !isOffline
@@ -86,7 +108,7 @@ internal fun discoverSections(
         showRecentlyPlayed = history && recentlyPlayed.orEmpty().isNotEmpty(),
         showMostPlayed = history && mostPlayed.orEmpty().isNotEmpty(),
         showRecentlyAdded = history && recentlyAdded.orEmpty().isNotEmpty(),
-        showDailyPicks = dailyPicks.isNotEmpty(),
+        showDailyPicks = dailyPicksAvailable,
         showAlbums = discoverAlbums.orEmpty().isNotEmpty(),
         showPageEmpty = false
     )

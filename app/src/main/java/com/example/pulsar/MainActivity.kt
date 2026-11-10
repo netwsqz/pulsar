@@ -33,6 +33,9 @@ import com.example.pulsar.ui.theme.ThemePresets
 import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.deepened
 import com.example.pulsar.ui.theme.rememberCoverGradient
+import com.example.pulsar.offline.OfflineInput
+import com.example.pulsar.offline.OfflineNotice
+import com.example.pulsar.offline.offlineView
 import android.content.ComponentName
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -562,7 +565,7 @@ private fun LibraryGroupDetailContent(
     // 不该出现的东西——下载名单还没算出来时 albums 还是全量，不能当成「已下载」。
     val isOfflineView = offlineNotice != null
     // 摘要里的「共 M 张」用服务端口径：过滤前那一份（原始 state.albums）里同名的组。
-    // 离线时 `albums` 已被 offlineVisibleLibrary 滤过，拿它当总数会写成「已下载 3 张 · 共 3 张」。
+    // 离线时 `albums` 已被离线策略滤过，拿它当总数会写成「已下载 3 张 · 共 3 张」。
     val serverTotal = remember(state.albums, groupName) {
         libraryGroups(state.albums.orEmpty())
             .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
@@ -882,29 +885,26 @@ private fun MusicLibraryScreen(
         }
     }
     // 离线可见性（ADR-0008）：离线时各屏只显示已下载的东西，不再「全量 + 标灰」。
-    // 原始 state 一律不动，这里派生一份渲染用的列表——回在线自动恢复全量，不用重拉。
-    // cachedTrackIds 为 null（还没算出来）时不筛，免得把能播的歌藏掉。
-    val offlineFilter = state.isOffline && state.cachedTrackIds != null
-    val visible = if (offlineFilter) {
-        offlineVisibleLibrary(
+    // 判据全部收在 OfflinePolicy 里——这里只把原始 state 喂进去、读回渲染用的视图，
+    // 不再自己组合 isOffline + cachedTrackIds。原始 state 一律不动，回在线自动恢复全量。
+    val offline = offlineView(
+        OfflineInput(
+            isOffline = state.isOffline,
+            downloadedTrackIds = state.cachedTrackIds,
             tracks = state.tracks,
             albums = state.albums,
             discoverAlbums = state.discoverAlbums,
             albumTracks = state.albumTracks,
             playlistTracks = state.playlistTracks,
             searchResults = state.searchResults,
-            visibleTrackIds = state.cachedTrackIds.orEmpty()
+            recentlyPlayed = state.recentlyPlayed,
+            mostPlayed = state.mostPlayed,
+            recentlyAdded = state.recentlyAdded,
+            tracksLoaded = state.tracks != null,
+            isLoading = state.isLoading
         )
-    } else {
-        VisibleLibrary(
-            tracks = state.tracks,
-            albums = state.albums,
-            discoverAlbums = state.discoverAlbums,
-            albumTracks = state.albumTracks,
-            playlistTracks = state.playlistTracks,
-            searchResults = state.searchResults
-        )
-    }
+    )
+    val visible = offline.visibleLibrary
     val tracks = visible.tracks.orEmpty()
     // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
@@ -958,7 +958,11 @@ private fun MusicLibraryScreen(
         playbackSession.dispatch(PlaybackIntent.Play(trackList, trackId))
     }
     // 离线过滤生效时给各内容页的统一小字（ADR-0008）：歌变少了得有一句解释。
-    val offlineNotice = if (offlineFilter) "离线 · 只显示已下载" else null
+    // 提示要不要出、出哪一句由策略给类型，界面只负责映射成文案（文案收口见 #10）。
+    val offlineNotice = when (offline.notice) {
+        null -> null
+        OfflineNotice.VisibleOnly -> "离线 · 只显示已下载"
+    }
     val onAddToQueue: (Track) -> Unit = { track ->
         playbackSession.dispatch(PlaybackIntent.AddToQueue(track))
     }
@@ -1132,7 +1136,10 @@ private fun MusicLibraryScreen(
                         state = state,
                         tracks = tracks,
                         discoverAlbums = visible.discoverAlbums,
-                        isOfflineFiltered = offlineFilter,
+                        sections = offline.discover,
+                        emptyKind = offline.emptyKind,
+                        isFiltering = offline.isFiltering,
+                        offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
                         coverFor = viewModel::albumCover,
                         trackCoverFor = viewModel::trackCover,
@@ -1189,7 +1196,7 @@ private fun MusicLibraryScreen(
                     LibrarySection.Search -> SearchContent(
                         state = state,
                         results = visible.searchResults,
-                        isOfflineFiltered = offlineFilter,
+                        isOfflineFiltered = offline.isFiltering,
                         qqState = qqState,
                         // 一次输入同时问两边：两个 ViewModel 各跑各的 300ms 防抖，同时到期 = 一次防抖。
                         onSearchQueryChange = { query ->
@@ -2424,7 +2431,10 @@ private fun DiscoverContent(
     state: JellyfinUiState,
     tracks: List<Track>,
     discoverAlbums: List<Album>?,
-    isOfflineFiltered: Boolean,
+    sections: DiscoverSections,
+    emptyKind: DiscoverEmpty,
+    isFiltering: Boolean,
+    offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
     coverFor: (Album) -> JellyfinRequest?,
     trackCoverFor: (Track) -> JellyfinRequest?,
@@ -2464,27 +2474,14 @@ private fun DiscoverContent(
     val dailyPicks = remember(tracks, picksVariant) {
         discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
     }
-    // 这一页到底有哪些节（工单 12 / spec §7）：三节服务器历史离线时整个不显示，
-    // 整页空态也是从这里来——不能像以前那样直接读原始 state 字段（报告 #22）。
+    // 这一页「哪几节显示 / 整页空态 / 空态说哪句」由离线策略算好（OfflineView），
+    // 这里只负责画——不再自己组合 isOffline 与加载态（报告 #22）。
     //
-    // 这里传的是 `state.isOffline` 而不是 `isOfflineFiltered`，两个不是一回事，别换：
-    // · `isOfflineFiltered` = 离线**且**已算出已下载 id 集合，表示"列表真的被筛过了"。
-    //   下面「离线 · 只显示已下载」的提示和专辑空态用它——只在真筛过时才敢这么说。
-    // · `state.isOffline` = 就是断网了。三节历史的隐藏规则是「离线就不显示」，
-    //   与 id 集合算没算出来无关（spec §7：这是组合条件，不走 `VisibleLibrary` 过滤）。
-    val sections = discoverSections(
-        dailyPicks = dailyPicks,
-        recentlyPlayed = state.recentlyPlayed,
-        mostPlayed = state.mostPlayed,
-        recentlyAdded = state.recentlyAdded,
-        discoverAlbums = discoverAlbums,
-        isOffline = state.isOffline,
-        tracksLoaded = state.tracks != null,
-        isLoading = state.isLoading
-    )
+    // 三节历史骨架的显隐仍看 `state.isOffline`：隐藏规则是「离线就不显示」，
+    // 与已下载集合算没算出来无关（spec §7：这是组合条件，不走 VisibleLibrary 过滤）。
     // 「换一批」= 原下拉刷新的替代：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段
     // 放行幂等守卫），每日推荐是本地计算，递增变体编号立刻换一批。
-    // 离线时不发网络请求（必然失败）：只换一批每日推荐（ADR-0008）。
+    // 离线筛过列表时不发网络请求（必然失败）：只换一批每日推荐（ADR-0008）。
     LazyColumn(
         modifier = modifier.fillMaxSize()
             .windowInsetsPadding(WindowInsets.statusBars),
@@ -2507,7 +2504,7 @@ private fun DiscoverContent(
                     TextButton(
                         onClick = {
                             picksVariant++
-                            if (!isOfflineFiltered) onRefresh()
+                            if (!isFiltering) onRefresh()
                         },
                         enabled = !state.isDiscoverRefreshing
                     ) {
@@ -2524,8 +2521,8 @@ private fun DiscoverContent(
                 }
             )
         }
-        if (isOfflineFiltered) {
-            item(key = "offlineNotice") { OfflineNoticeText("离线 · 只显示已下载") }
+        offlineNotice?.let { notice ->
+            item(key = "offlineNotice") { OfflineNoticeText(notice) }
         }
         if (state.tracks == null) {
             // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
@@ -2542,7 +2539,7 @@ private fun DiscoverContent(
             // 否则同一个页面上会出现上下两段一模一样的提示。
             item(key = "dailyEmpty") {
                 Text(
-                    discoverEmptyNotice(isOffline = state.isOffline).message(),
+                    emptyKind.message(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = Dimens.SpaceMidMedium)
@@ -2582,7 +2579,7 @@ private fun DiscoverContent(
             }
             albums.orEmpty().isEmpty() -> {
                 item(key = "albumEmpty") {
-                    EmptyState(if (isOfflineFiltered) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
+                    EmptyState(if (isFiltering) "离线 · 手机里还没有下载的专辑" else "暂无专辑")
                 }
             }
             else -> {
@@ -2662,14 +2659,14 @@ private fun DiscoverContent(
             }
         }
         // 整页都没有可看的内容（登录了、服务端也确实没歌 / 离线且一首都没下载）：
-        // 给一句明确空态，而不是一片空白。判定走 discoverSections（报告 #22）——
+        // 给一句明确空态，而不是一片空白。判定来自离线策略的输出（OfflineView，报告 #22）——
         // 离线时三节历史的残留缓存**不算**「有内容」，否则整页空态永远不出现。
         //
         // **空态全页只此一处**（报告 #25）：上面的 `dailyEmpty` 分支在整页空时会自动让位。
         // 文案里的入口必须真实存在（报告 #26）：搜索页是真的，「设置里刷新曲库」压根没有。
         if (sections.showPageEmpty) {
             item(key = "discoverEmpty") {
-                EmptyState(discoverEmptyNotice(isOffline = state.isOffline).message())
+                EmptyState(emptyKind.message())
             }
         }
     }

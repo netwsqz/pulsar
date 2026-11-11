@@ -7,6 +7,7 @@ import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.FileOpsState
+import com.example.pulsar.state.LibrarySectionKey
 import com.example.pulsar.state.LibraryState
 import com.example.pulsar.state.SearchState
 import com.example.pulsar.state.SessionState
@@ -64,7 +65,7 @@ class JellyfinUiStateShapeTest {
         assertNull(state.recentlyPlayed)
         assertNull(state.mostPlayed)
         assertNull(state.recentlyAdded)
-        assertEquals(emptySet<String>(), state.discoverFailedSections)
+        assertEquals(emptySet<LibrarySectionKey>(), state.discoverFailedSections)
         assertEquals(0, state.historyEpoch)
         assertEquals(false, state.isDiscoverRefreshing)
         assertNull(state.albums)
@@ -131,7 +132,7 @@ class JellyfinUiStateShapeTest {
             recentlyPlayed = listOf(track),
             mostPlayed = listOf(track),
             recentlyAdded = listOf(album),
-            discoverFailedSections = setOf("mostPlayed"),
+            discoverFailedSections = setOf(LibrarySectionKey.MostPlayed),
             historyEpoch = 3,
             isDiscoverRefreshing = true,
             albums = listOf(album),
@@ -149,7 +150,7 @@ class JellyfinUiStateShapeTest {
         assertEquals(listOf(track), state.library.recentlyPlayed)
         assertEquals(listOf(track), state.library.mostPlayed)
         assertEquals(listOf(album), state.library.recentlyAdded)
-        assertEquals(setOf("mostPlayed"), state.library.discoverFailedSections)
+        assertEquals(setOf(LibrarySectionKey.MostPlayed), state.library.discoverFailedSections)
         assertEquals(3, state.library.historyEpoch)
         assertEquals(true, state.library.isDiscoverRefreshing)
         assertEquals(listOf(album), state.library.albums)
@@ -167,7 +168,7 @@ class JellyfinUiStateShapeTest {
         assertEquals(listOf(track), state.recentlyPlayed)
         assertEquals(listOf(track), state.mostPlayed)
         assertEquals(listOf(album), state.recentlyAdded)
-        assertEquals(setOf("mostPlayed"), state.discoverFailedSections)
+        assertEquals(setOf(LibrarySectionKey.MostPlayed), state.discoverFailedSections)
         assertEquals(3, state.historyEpoch)
         assertEquals(true, state.isDiscoverRefreshing)
         assertEquals(listOf(album), state.albums)

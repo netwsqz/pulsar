@@ -207,6 +207,36 @@ class LibraryCache(
 
 ### Step 2 — 抽 `LibraryCache`（加载 + 每节 job + 三态）
 
+> **已完成 2026-11-12（#12）**：新增 `com.example.pulsar.library.LibraryCache`（`internal`），
+> 每节一个槽（专辑 / 发现随机 / 三节历史 / 专辑曲目 / 播放列表 / 播放列表曲目 / 搜索），
+> 每槽一份 job + 代次；生产代码 `grep albumsJob` **为 0**（共享句柄已删）。
+> 与原文的差异：
+> - **三态语义**落在 module 的两条加载路径里（`loadLibrary` 会落快照、`loadHistory` 不落且失败只记节）：
+>   成功写服务端给的值（含空列表），失败保持 `null` 并**绝不**写空列表；401 / 断网交给宿主统一处理。
+> - **界面只报「进了哪一节」**：`MainActivity` 的加载 `LaunchedEffect` 只剩 `section` 一个 key，
+>   调 `viewModel.onSectionEntered(section)`；`sessionReady` / `isOffline` / `historyEpoch` 三个 key 全删。
+> - **补跑**：会话就绪（登录 / 恢复成功）与离线翻转（`markOnline` / `goOffline` 返回 true）由
+>   `reloadCurrentSection()` 按 VM 记住的 `currentSection` 重放「进了这节」。**断网启动（快照兜底）
+>   那条路径不补跑**：会话虽然就绪，但离线时重发只会白白失败（改前界面 key 变化会发一轮注定失败的请求）。
+> - **离线本地清单路径**（播放列表 / 播放列表曲目）仍实现在 VM，但由 module 按节调起（Host 回调），
+>   因此也享受「同节取消旧请求」。**搜索**的防抖 / job / 代次也收进 module；`updateSearchQuery` 只写查询词。
+> - `discoverFailedSections` 从 `Set<String>` 换成 `Set<LibrarySectionKey>` 枚举（界面 3 处 + 测试同步）。
+> - `isLoading` / `errorMessage` **仍是登录与曲库共用的单一通道**（与 #11 口径一致）。
+>   `isLoading` 改成**按在途节计数**：多节同时在途时，后台那一节先落地不会把圈收掉
+>   （否则当前屏会从骨架闪一下空态）。`errorMessage` 的跨节串扰仍留给 #13 的类型化错误。
+> - `JellyfinViewModel` 的 `loadX` 保留为「失败重试」入口（委托 module）；`refreshDiscoverAlbums` 删掉
+>   （无调用方，换一批走 `refreshDiscover()`）。
+> - **会话边界**：记住的「当前分区」属于本会话，登录 / 登出 / 过期时清空——登录页与主页面是
+>   二选一组合，主页面重建时界面会重新上报；留着旧值会把上个会话的详情页重放进新会话。
+> - **并发收口**：`refreshDiscover` 的刷新圈以「槽里当前那份 job」为准（切歌 / 离线翻转 / 二次刷新
+>   会替换 job，抓旧引用会提前收圈）；`goOffline` 的「是否翻转」在写之前一刻判定（并发失败只算一次）；
+>   `persistSnapshot` 加锁串行（多节同时成功时防止旧快照最后写盘）。
+> - **回退**：删除 `app/src/main/java/com/example/pulsar/library/LibraryCache.kt` 与对应测试，
+>   `git revert` 本 commit 即可回到共享 `albumsJob`（无数据迁移、无落盘格式变化）。
+>
+> 验证：全量单测 70 个类 / 870 项全绿（基线 838，新增 `LibraryCacheTest` 29 项 + VM 集成 3 项）；
+> `assembleDebug` 通过。真机项见 issue #12 的「待真机确认」评论。
+
 1. 把 `loadLibrary` / `loadSection` / 各 `loadX` 的 job + generation 搬进 `LibraryCache`。
 2. `JellyfinViewModel` 的 `loadX` 改成 `cache.onSectionEntered(...)` 或 `cache.refresh(...)`。
 3. 每节独立 job；删除共享 `albumsJob`（或保留为 `albumListJob` 只服务专辑列表）。

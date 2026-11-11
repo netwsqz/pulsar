@@ -50,7 +50,7 @@ data class JellyfinUiState(
     val recentlyPlayed: List<Track>? = library.recentlyPlayed
     val mostPlayed: List<Track>? = library.mostPlayed
     val recentlyAdded: List<Album>? = library.recentlyAdded
-    val discoverFailedSections: Set<String> = library.discoverFailedSections
+    val discoverFailedSections: Set<com.example.pulsar.state.LibrarySectionKey> = library.discoverFailedSections
     val historyEpoch: Int = library.historyEpoch
     val isDiscoverRefreshing: Boolean = library.isDiscoverRefreshing
     val albums: List<Album>? = library.albums
@@ -110,7 +110,7 @@ data class JellyfinUiState(
         recentlyPlayed: List<Track>? = this.recentlyPlayed,
         mostPlayed: List<Track>? = this.mostPlayed,
         recentlyAdded: List<Album>? = this.recentlyAdded,
-        discoverFailedSections: Set<String> = this.discoverFailedSections,
+        discoverFailedSections: Set<com.example.pulsar.state.LibrarySectionKey> = this.discoverFailedSections,
         historyEpoch: Int = this.historyEpoch,
         isDiscoverRefreshing: Boolean = this.isDiscoverRefreshing,
         albums: List<Album>? = this.albums,

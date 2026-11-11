@@ -21,6 +21,7 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.state.LibrarySectionKey
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
@@ -1999,7 +2000,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 失败只影响最近播放：界面只对那一节不再显示骨架，最常播放照常显示
-        assertEquals(setOf("recentlyPlayed"), viewModel.state.value.discoverFailedSections)
+        assertEquals(setOf(LibrarySectionKey.RecentlyPlayed), viewModel.state.value.discoverFailedSections)
         assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
     }
 
@@ -2014,12 +2015,12 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
-        assertTrue("recentlyPlayed" in viewModel.state.value.discoverFailedSections)
+        assertTrue(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.discoverFailedSections)
 
         // 失败字段保持 null，所以幂等守卫放行；再次加载先清标记再请求
         api.recentlyPlayedResult = Result.success(listOf(track))
         viewModel.loadRecentlyPlayed()
-        assertFalse("recentlyPlayed" in viewModel.state.value.discoverFailedSections)
+        assertFalse(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.discoverFailedSections)
         advanceUntilIdle()
 
         assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
@@ -2182,6 +2183,86 @@ class JellyfinViewModelTest {
         assertNull(viewModel.state.value.recentlyPlayed)
         assertNull(viewModel.state.value.mostPlayed)
         assertNull(viewModel.state.value.recentlyAdded)
+    }
+
+    // ===== 曲库加载 module 接线（#12）：界面只报「进了哪一节」 =====
+
+    @Test
+    fun `恢复会话就绪前进入分区静默跳过，就绪后自动补跑`() = runTest {
+        val albums = listOf(Album("album-1", "专辑", "歌手", 1, null))
+        val gate = CompletableDeferred<Unit>()
+        val sessions = FakeSessionRepository(
+            SavedSession("https://server.test", "user-1", "user", "secret")
+        ).apply { loadGate = gate }
+        val api = FakeJellyfinApi(albums = albums)
+        val viewModel = createViewModel(sessions, api)
+
+        // 恢复还没完成（本地会话还没读出来）：主页面已经组合并报过「进了专辑页」，静默无操作
+        viewModel.onSectionEntered(LibrarySection.Albums)
+        assertEquals(0, api.albumsCalls)
+        assertNull(viewModel.state.value.albums)
+        assertFalse(viewModel.state.value.isLoading)
+
+        // 恢复完成 → 会话就绪 → 按记住的分区补跑，不用等用户再切一次页签
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(albums, viewModel.state.value.albums)
+        assertEquals(1, api.albumsCalls)
+    }
+
+    @Test
+    fun `退出登录后不再用上一个会话的分区补跑`() = runTest {
+        val album = Album("album-1", "专辑", "歌手", 1, null)
+        val api = FakeJellyfinApi(albums = listOf(album))
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+        viewModel.onSectionEntered(LibrarySection.AlbumDetail(album))
+        advanceUntilIdle()
+        assertEquals(album, viewModel.state.value.selectedAlbum)
+
+        viewModel.signOut()
+        advanceUntilIdle()
+
+        // 重新登录：登录页与主页面是二选一组合，主页面重建时界面会重新上报分区。
+        // 上一个会话的详情页**不能**被重放（旧专辑 id 的请求 + 旧数据写进新会话）。
+        api.loginResult = Result.success(
+            com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2")
+        )
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user-2")
+        viewModel.updatePassword("pass-2")
+        viewModel.login()
+        advanceUntilIdle()
+
+        assertNull(viewModel.state.value.selectedAlbum)
+        assertNull(viewModel.state.value.albumTracks)
+    }
+
+    @Test
+    fun `专辑在途时进播放列表，专辑请求不会被取消`() = runTest {
+        val album = Album("album-1", "专辑", "歌手", 1, null)
+        val gate = CompletableDeferred<Unit>()
+        val api = FakeJellyfinApi(albums = listOf(album)).apply { albumsGate = gate }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+        )
+        advanceUntilIdle()
+
+        viewModel.onSectionEntered(LibrarySection.Albums)
+        advanceUntilIdle()
+        viewModel.onSectionEntered(LibrarySection.Playlists)
+        advanceUntilIdle()
+
+        // 改前两者共用一个 albumsJob：进播放列表会把专辑请求取消，专辑页永远停在骨架
+        assertEquals(emptyList<Playlist>(), viewModel.state.value.playlists)
+        assertNull(viewModel.state.value.albums)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(listOf(album), viewModel.state.value.albums)
     }
 
     private fun TestScope.createViewModelWithFileOps(
@@ -2408,8 +2489,14 @@ class JellyfinViewModelTest {
             musicItemsCalls++
             return musicItemsError?.let { Result.failure(it) } ?: Result.success(tracks)
         }
-        override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
-            albumsError?.let { Result.failure(it) } ?: Result.success(albums)
+        var albumsCalls = 0
+        /** 非空时 getAlbums 会挂起到测试放行：复现「专辑请求在途时用户切了页」。 */
+        var albumsGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+        override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> {
+            albumsCalls++
+            albumsGate?.await()
+            return albumsError?.let { Result.failure(it) } ?: Result.success(albums)
+        }
         var randomAlbumsCalls = 0
         override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
             randomAlbumsCalls++

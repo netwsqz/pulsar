@@ -19,23 +19,23 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
 import com.example.pulsar.state.SessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import java.io.IOException
-
-private const val SEARCH_DEBOUNCE_MS = 300L
 
 private const val TAG = "JellyfinViewModel"
 
@@ -75,24 +75,65 @@ class JellyfinViewModel(
     private var dataSource: JellyfinApi? = null
     private var loginJob: Job? = null
     private var loginGeneration = 0
-    private var albumsJob: Job? = null
-    private var albumsGeneration = 0
-    // 播放历史三节各自独立（工单 02）：一节失败/取消不能拖垮另外两节。
-    private var recentlyPlayedJob: Job? = null
-    private var mostPlayedJob: Job? = null
-    private var recentlyAddedJob: Job? = null
-    /** 每节已拉到的 [JellyfinUiState.historyEpoch]：相等且数据非空就不重复请求。 */
-    private var recentlyPlayedEpoch = -1
-    private var mostPlayedEpoch = -1
-    private var recentlyAddedEpoch = -1
-    /** 会话代次：只随会话切换/过期递增，同会话内多次加载互不作废。 */
-    private var historyGeneration = 0
-    private var searchJob: Job? = null
-    private var searchGeneration = 0
     private var offlineRetryJob: Job? = null
+
+    /**
+     * 曲库加载（#12）：每节一份 job + 代次，三态语义只在那里实现。
+     * 加载方法名、幂等守卫、会话就绪判断都在 module 内部，界面只报「进了哪一节」。
+     */
+    private val libraryCache = LibraryCache(
+        scope = viewModelScope,
+        dispatcher = dispatcher,
+        describeError = { friendlyError(it) },
+        host = object : LibraryCache.Host {
+            override fun state(): JellyfinUiState = _state.value
+
+            override fun update(transform: (JellyfinUiState) -> JellyfinUiState) {
+                _state.value = transform(_state.value)
+            }
+
+            override fun connection(): LibraryCache.Connection? {
+                val api = dataSource ?: return null
+                val current = session ?: return null
+                return LibraryCache.Connection(api, current)
+            }
+
+            override fun expireSession() { this@JellyfinViewModel.expireSession() }
+
+            override suspend fun markOnline(): Boolean = this@JellyfinViewModel.markOnline()
+
+            override suspend fun goOffline(needsNetwork: Boolean): Boolean =
+                this@JellyfinViewModel.goOffline(needsNetwork)
+
+            override suspend fun persistSnapshot() { this@JellyfinViewModel.persistSnapshot() }
+
+            override fun rememberPlaylistTracks(playlist: Playlist, tracks: List<Track>) =
+                rememberDownloadedPlaylist(playlist, tracks)
+
+            override suspend fun loadOfflinePlaylists() { showOfflinePlaylists() }
+
+            override suspend fun loadOfflinePlaylistTracks(playlist: Playlist) {
+                showOfflinePlaylistTracks(playlist)
+            }
+
+            override fun searchSnapshot(query: String): SearchResults? = snapshot?.search(query)
+
+            override fun reloadCurrentSection() { this@JellyfinViewModel.reloadCurrentSection() }
+        }
+    )
+
+    /** 当前所在导航分区（界面用 [onSectionEntered] 上报）：会话就绪 / 离线翻转后据此补跑。 */
+    private var currentSection: LibrarySection? = null
 
     /** 曲库快照的内存副本：离线兜底与覆写共用，避免每次都读盘。 */
     private var snapshot: LibrarySnapshot? = null
+
+    /**
+     * 快照落盘的串行锁（#12）。各节现在可以同时在途，两个成功几乎同时落地时，
+     * 各自「读 state → 组装 → 写盘」的交错会让**旧的**那次最后写盘；而内存副本已是新的，
+     * 之后 `persistSnapshot` 因内容相等直接 return，盘上就永远落后。锁内重新读 state 即可。
+     */
+    private val snapshotSaveLock = Mutex()
 
     /** 整张专辑的下载正在删：防连点。只在发起线程读写（见 [deleteAlbumCopies]）。
      * 与界面上的 [JellyfinUiState.isDeletingDownload] 是两回事：这个是守卫，那个是给界面看的进度。 */
@@ -205,6 +246,9 @@ class JellyfinViewModel(
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(signedIn.accessToken)
                     _state.value = _state.value.copy(isLoading = false, tracks = tracks)
+                    // 会话就绪：界面可能已经停在某一节上（恢复期间主页面就组合了），
+                    // 之前那次「进了这节」因为没会话被静默跳过，这里补跑。
+                    reloadCurrentSection()
                     sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
                     serverUrlHistory?.record(current.serverUrl)
                     // 同 init 里那条：先取值再碰 _state，别让挂起点前的旧快照盖掉新状态。
@@ -256,6 +300,8 @@ class JellyfinViewModel(
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(saved.accessToken)
                     _state.value = _state.value.copy(isLoading = false, isRestoring = false, tracks = tracks)
+                    // 恢复期间主页面已经组合、界面早就报过「进了哪一节」；会话就绪后补跑一次。
+                    reloadCurrentSection()
                     persistSnapshot()
                 }
             } catch (error: CancellationException) {
@@ -305,29 +351,20 @@ class JellyfinViewModel(
         _state.value = _state.value.copy(isLoading = false, isRestoring = false)
         applySnapshot(loaded)
         // 已下载集合先算完再进离线态，别让界面在未知集合上筛掉能播的歌。
-        _state.value = _state.value.copy(
-            isOffline = true,
-            cachedTrackIds = computeDownloadedTrackIds(),
-            errorMessage = null
-        )
-        startOfflineRetry()
+        goOffline(needsNetwork = false)
         return true
     }
 
+    /**
+     * 会话切换 / 过期：作废所有在途的曲库请求（每节的代次由 module 自己推进）。
+     * 晚到的响应回来后对不上代次，不会写进新会话的状态。
+     */
     private fun invalidateSessionRequests() {
-        albumsJob?.cancel()
-        albumsJob = null
-        albumsGeneration++
-        recentlyPlayedJob?.cancel()
-        recentlyPlayedJob = null
-        mostPlayedJob?.cancel()
-        mostPlayedJob = null
-        recentlyAddedJob?.cancel()
-        recentlyAddedJob = null
-        historyGeneration++
-        searchJob?.cancel()
-        searchJob = null
-        searchGeneration++
+        libraryCache.invalidate()
+        // 记住的分区属于**这个**会话：登录页与主页面是二选一组合，主页面重建时界面会重新
+        // 上报「进了哪一节」；留着旧值会让下一次登录重放上一个会话的详情页（旧专辑 id 的
+        // 请求 + 旧数据写进新会话）。
+        currentSection = null
         stopOfflineRetry()
     }
 
@@ -414,18 +451,17 @@ class JellyfinViewModel(
         }
         // 播过的歌服务端 UserData 会变（工单 09）：本地那两份历史缓存作废，回到发现页时
         // 重新拉。**只递增版本号，不清数据**——清成 null 会让发现页两节先闪成骨架再弹回。
-        // 代次一并递增：界面在后台时不收集状态、LaunchedEffect 不会重跑，在途的旧响应
-        // 回来仍会写回清空前的结果（loadSection 的代次检查会把它丢掉）。
+        // module 会一并作废三节历史的在途响应（界面在后台时也能挡住旧结果），并补跑当前分区。
         if (_state.value.recentlyPlayed != null || _state.value.mostPlayed != null) {
-            historyGeneration++
             _state.value = _state.value.copy(historyEpoch = _state.value.historyEpoch + 1)
+            libraryCache.onHistoryEpochChanged()
         }
     }
 
     /**
      * 拉取当前曲目的歌词。曲库没歌词是常态：404 已在数据层归一化为 Lyrics.NONE，
      * 其余失败静默回 NONE（歌词页显示空态，不为辅助功能弹错误打断播放体验）。
-     * 代次防护与 albumsJob 同模式：切歌/登出/会话过期后旧协程的响应作废。
+     * 代次防护与曲库各节同模式：切歌/登出/会话过期后旧协程的响应作废。
      */
     fun loadLyricsForCurrentTrack() {
         val track = _currentTrack.value ?: return
@@ -458,200 +494,59 @@ class JellyfinViewModel(
         imageTag = localConfiguration?.tag as? String
     )
 
-    fun loadAlbums() {
-        if (_state.value.albums != null) return
-        loadLibrary(
-            request = { src, currentSession -> src.getAlbums(currentSession.userId, currentSession.accessToken) },
-            success = { albums -> _state.value.copy(isLoading = false, albums = albums) }
-        )
-    }
-
-    fun loadDiscoverAlbums() {
-        if (_state.value.discoverAlbums != null) return
-        loadLibrary(
-            request = { src, currentSession -> src.getRandomAlbums(currentSession.userId, currentSession.accessToken) },
-            success = { albums -> _state.value.copy(isLoading = false, discoverAlbums = albums) }
-        )
-    }
-
-    // ── 发现页个人化聚合（工单 02） ────────────────────────────────────
-    // 三节各自独立加载：发现页一屏里任一节失败只是那一节不显示（降级），
-    // 不影响其余 section，也不把整页变成错误态。
-
-    // 三节都走「数据在 + 版本号对得上」的幂等守卫：切歌/刷新只递增 [JellyfinUiState.historyEpoch]，
-    // 不清数据，界面据此静默重拉、原地替换（不闪骨架）。
-
-    fun loadRecentlyPlayed() {
-        val epoch = _state.value.historyEpoch
-        if (_state.value.recentlyPlayed != null && recentlyPlayedEpoch == epoch) return
-        recentlyPlayedJob?.cancel()
-        markSectionLoading("recentlyPlayed")
-        loadSection(
-            request = { src, s -> src.getRecentlyPlayed(s.userId, s.accessToken) },
-            success = { tracks ->
-                recentlyPlayedEpoch = epoch
-                _state.value.copy(recentlyPlayed = tracks)
-            },
-            section = "recentlyPlayed"
-        ) { recentlyPlayedJob = it }
-    }
-
-    fun loadMostPlayed() {
-        val epoch = _state.value.historyEpoch
-        if (_state.value.mostPlayed != null && mostPlayedEpoch == epoch) return
-        mostPlayedJob?.cancel()
-        markSectionLoading("mostPlayed")
-        loadSection(
-            request = { src, s -> src.getMostPlayed(s.userId, s.accessToken) },
-            success = { tracks ->
-                mostPlayedEpoch = epoch
-                _state.value.copy(mostPlayed = tracks)
-            },
-            section = "mostPlayed"
-        ) { mostPlayedJob = it }
-    }
-
-    fun loadRecentlyAdded() {
-        val epoch = _state.value.historyEpoch
-        if (_state.value.recentlyAdded != null && recentlyAddedEpoch == epoch) return
-        recentlyAddedJob?.cancel()
-        markSectionLoading("recentlyAdded")
-        loadSection(
-            request = { src, s -> src.getRecentlyAdded(s.userId, s.accessToken) },
-            success = { albums ->
-                recentlyAddedEpoch = epoch
-                _state.value.copy(recentlyAdded = albums)
-            },
-            section = "recentlyAdded"
-        ) { recentlyAddedJob = it }
-    }
-
-    /** 这一节重新发起请求：清掉它的失败标记，界面重新显示骨架（重试可见）。 */
-    private fun markSectionLoading(section: String) {
-        if (section in _state.value.discoverFailedSections) {
-            _state.value = _state.value.copy(discoverFailedSections = _state.value.discoverFailedSections - section)
-        }
-    }
-
     /**
-     * 发现页刷新（顶部「换一批」按钮）：随机专辑 + 三节历史全部重拉。
-     * 三节历史**不清数据、只递增版本号**：旧列表留在屏幕上，新结果回来原地替换，
-     * 界面不会先掉进骨架屏再弹回来（刷新进度由 [JellyfinUiState.isDiscoverRefreshing] 给反馈）。
-     * 每日推荐是纯本地计算，界面自己换一批，不经过这里。
+     * 界面进入某个导航分区时调用（#12）：**只报「进了哪一节」**，不再在这里分支调用
+     * 各 `loadX` 方法，也不再把「会话就绪 / 离线态 / 播放历史版本号」当加载 key。
+     *
+     * 加载方法名、幂等守卫、三态语义、会话就绪判断都在 `LibraryCache` 里；
+     * 会话就绪 / 离线翻转 / 切歌后 module 会按这里记住的分区自己补跑。
      */
-    fun refreshDiscover() {
-        // 随机专辑也不清——它本来就保留旧封面墙，按批次交叉淡入。
-        _state.value = _state.value.copy(
-            historyEpoch = _state.value.historyEpoch + 1,
-            discoverFailedSections = emptySet(),
-            isDiscoverRefreshing = true
-        )
-        refreshDiscoverAlbums()
-        loadRecentlyPlayed()
-        loadMostPlayed()
-        loadRecentlyAdded()
-        // 四路都落地（成功或失败）再收刷新圈。
-        viewModelScope.launch(dispatcher) {
-            listOfNotNull(albumsJob, recentlyPlayedJob, mostPlayedJob, recentlyAddedJob).joinAll()
-            _state.value = _state.value.copy(isDiscoverRefreshing = false)
-        }
+    internal fun onSectionEntered(section: LibrarySection) {
+        currentSection = section
+        enterSection(section)
     }
 
-    /**
-     * 发现页单节加载。失败只是这一节没内容（其余 section 照常），**不**升级成整页错误。
-     * 失败时字段保持 null：幂等守卫据此允许下次进发现页重试——写成空列表会把
-     * 「一次网络抖动」永久固化成「已加载且没有数据」。
-     * 只有 Unauthorized 例外，它意味着会话失效，走统一的过期流程。
-     * 同节重复调用会取消上一次请求（同 [loadLibrary] 的幂等模式）。
-     */
-    private fun <T> loadSection(
-        request: suspend (JellyfinApi, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<List<T>>,
-        success: (List<T>) -> JellyfinUiState,
-        section: String,
-        assignJob: (Job) -> Unit
-    ) {
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        val generation = historyGeneration
-        assignJob(
-            viewModelScope.launch(dispatcher) {
-                val result = try {
-                    request(src, currentSession)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    Result.failure(error)
-                }
-                if (!coroutineContext.isActive || generation != historyGeneration) return@launch
-                result.fold(
-                    onSuccess = { items ->
-                        markOnline()
-                        _state.value = success(items)
-                    },
-                    onFailure = { error ->
-                        when (error) {
-                            is JellyfinError.Unauthorized -> expireSession()
-                            // 断网照旧进离线态（探活/离线可见性全 App 共用），不是这一节自己的事
-                            is JellyfinError.Network -> goOffline(needsNetwork = false)
-                            // 其余失败：这一节缺席，界面不再为它显示骨架（否则永远转圈）
-                            else -> _state.value = _state.value.copy(
-                                discoverFailedSections = _state.value.discoverFailedSections + section
-                            )
-                        }
-                    }
-                )
-            }
-        )
-    }
-
-    fun refreshDiscoverAlbums() {
-        loadLibrary(
-            request = { src, currentSession -> src.getRandomAlbums(currentSession.userId, currentSession.accessToken) },
-            success = { albums -> _state.value.copy(isLoading = false, discoverAlbums = albums) }
-        )
-    }
-
-    fun loadAlbumTracks(album: Album) {
-        if (_state.value.selectedAlbum?.id == album.id && _state.value.albumTracks != null) return
-        loadLibrary(
-            before = { _state.value.copy(isLoading = true, errorMessage = null, selectedAlbum = album, albumTracks = null) },
-            request = { src, currentSession -> src.getAlbumTracks(currentSession.userId, currentSession.accessToken, album.id) },
-            success = { tracks -> _state.value.copy(isLoading = false, albumTracks = tracks) }
-        )
-    }
-
-    fun loadPlaylists() {
-        // 离线：只显示「下载过的」播放列表（工单 08 / CONTEXT「已下载列表清单」）。
-        // 放在幂等守卫之前——在线拉过的全量列表不能挡着离线筛选。
-        if (_state.value.isOffline) {
-            viewModelScope.launch(dispatcher) { showOfflinePlaylists() }
+    private fun enterSection(section: LibrarySection) {
+        // 已下载页要「曲库 tracks + 专辑对象」才能分组，不属于曲库加载 module 的职责。
+        if (section == LibrarySection.CachedCopies) {
+            loadCachedAlbums()
             return
         }
-        if (_state.value.playlists != null) return
-        loadLibrary(
-            needsNetwork = true,
-            request = { src, currentSession -> src.getPlaylists(currentSession.userId, currentSession.accessToken) },
-            success = { playlists -> _state.value.copy(isLoading = false, playlists = playlists) }
-        )
+        libraryCache.onSectionEntered(section)
     }
 
-    fun loadPlaylistTracks(playlist: Playlist) {
-        if (_state.value.selectedPlaylist?.id == playlist.id && _state.value.playlistTracks != null) return
-        // 离线：已下载过的从本地清单里读，没下载过的照旧「需要联网」
-        if (_state.value.isOffline) {
-            viewModelScope.launch(dispatcher) { showOfflinePlaylistTracks(playlist) }
-            return
-        }
-        loadLibrary(
-            needsNetwork = true,
-            before = { _state.value.copy(isLoading = true, errorMessage = null, selectedPlaylist = playlist, playlistTracks = null) },
-            request = { src, currentSession -> src.getPlaylistTracks(currentSession.userId, currentSession.accessToken, playlist.id) },
-            success = { tracks ->
-                // 在线拿到曲目表 = 顺手把「已下载列表清单」刷新一份（列表名 + 曲目表）
-                rememberDownloadedPlaylist(playlist, tracks)
-                _state.value.copy(isLoading = false, playlistTracks = tracks)
-            }
-        )
+    private fun reloadCurrentSection() {
+        currentSection?.let(::enterSection)
+    }
+
+    // ── 曲库加载：全部委托 LibraryCache（#12）；下面这些方法只给「失败重试」按钮用 ──
+
+    fun loadAlbums() = libraryCache.loadAlbums()
+
+    fun loadDiscoverAlbums() = libraryCache.loadDiscoverAlbums()
+
+    fun loadRecentlyPlayed() = libraryCache.loadRecentlyPlayed()
+
+    fun loadMostPlayed() = libraryCache.loadMostPlayed()
+
+    fun loadRecentlyAdded() = libraryCache.loadRecentlyAdded()
+
+    /** 发现页「换一批」：随机专辑 + 三节历史全部重拉，四路都落地才收刷新圈。 */
+    fun refreshDiscover() = libraryCache.refreshDiscover()
+
+    fun loadAlbumTracks(album: Album) = libraryCache.loadAlbumTracks(album)
+
+    fun loadPlaylists() = libraryCache.loadPlaylists()
+
+    fun loadPlaylistTracks(playlist: Playlist) = libraryCache.loadPlaylistTracks(playlist)
+
+    fun clearAlbumDetail() = libraryCache.clearAlbumDetail()
+
+    fun clearPlaylistDetail() = libraryCache.clearPlaylistDetail()
+
+    fun updateSearchQuery(value: String) {
+        _state.value = _state.value.copy(searchQuery = value, errorMessage = null)
+        libraryCache.search(value)
     }
 
     /**
@@ -752,112 +647,6 @@ class JellyfinViewModel(
         if (next == previous) return
         snapshot = next
         snapshotRepository?.save(next)
-    }
-
-    /**
-     * 库请求的统一入口。
-     *
-     * [needsNetwork] 标注这一屏**快照撑不起来**（播放列表）：网络不通时明说需要联网，
-     * 而不是拿快照硬凑一个半成品。
-     */
-    private fun <T> loadLibrary(
-        needsNetwork: Boolean = false,
-        before: () -> JellyfinUiState = { _state.value.copy(isLoading = true, errorMessage = null) },
-        request: suspend (JellyfinApi, com.example.pulsar.data.jellyfin.JellyfinSession) -> Result<T>,
-        success: (T) -> JellyfinUiState
-    ) {
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        albumsJob?.cancel()
-        val generation = ++albumsGeneration
-        _state.value = before()
-        albumsJob = viewModelScope.launch(dispatcher) {
-            try {
-                val result = request(src, currentSession).getOrThrow()
-                if (coroutineContext.isActive && generation == albumsGeneration) {
-                    // 先退离线态再赋成功值：markOnline 会清掉快照来源的几屏等界面重拉，
-                    // 顺序反了会把刚拉到的新数据当快照数据清掉。
-                    markOnline()
-                    _state.value = success(result)
-                    persistSnapshot()
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == albumsGeneration) {
-                    when (error) {
-                        is JellyfinError.Unauthorized -> expireSession()
-                        // 网络不通 ≠ 请求出错：退回快照顶上的离线态，不当成错误显示
-                        is JellyfinError.Network -> goOffline(needsNetwork)
-                        else -> _state.value =
-                            _state.value.copy(isLoading = false, errorMessage = friendlyError(error))
-                    }
-                }
-            }
-        }
-    }
-
-    fun updateSearchQuery(value: String) {
-        _state.value = _state.value.copy(searchQuery = value, errorMessage = null)
-        searchJob?.cancel()
-        val query = value.trim()
-        val src = dataSource ?: return
-        val currentSession = session ?: return
-        if (query.isEmpty()) {
-            searchGeneration++
-            _state.value = _state.value.copy(searchResults = null, isSearching = false, isOfflineSearch = false)
-            return
-        }
-        val generation = ++searchGeneration
-        _state.value = _state.value.copy(isSearching = true)
-        searchJob = viewModelScope.launch(dispatcher) {
-            // 防抖对本地过滤也照旧：搜索框每敲一个字都重算一遍快照没有意义。
-            delay(SEARCH_DEBOUNCE_MS)
-            if (!coroutineContext.isActive || generation != searchGeneration) return@launch
-            // 断网时改成在曲库快照里过滤（用户故事 10）。范围比服务端搜索小，
-            // 界面据此标明「离线搜索」。
-            if (_state.value.isOffline) {
-                val results = snapshot?.search(query) ?: SearchResults()
-                if (coroutineContext.isActive && generation == searchGeneration) {
-                    _state.value = _state.value.copy(
-                        isSearching = false,
-                        searchResults = results,
-                        isOfflineSearch = true
-                    )
-                }
-                return@launch
-            }
-            try {
-                val results = src.search(currentSession.userId, currentSession.accessToken, query).getOrThrow()
-                if (coroutineContext.isActive && generation == searchGeneration) {
-                    _state.value = _state.value.copy(
-                        isSearching = false,
-                        searchResults = results,
-                        isOfflineSearch = false
-                    )
-                    markOnline()
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == searchGeneration) {
-                    when (error) {
-                        is JellyfinError.Unauthorized -> expireSession()
-                        // 网断了：拿快照里的结果顶上，并标明这是离线搜索
-                        is JellyfinError.Network -> {
-                            goOffline(needsNetwork = false)
-                            _state.value = _state.value.copy(
-                                isSearching = false,
-                                searchResults = snapshot?.search(query) ?: SearchResults(),
-                                isOfflineSearch = true
-                            )
-                        }
-                        else -> _state.value =
-                            _state.value.copy(isSearching = false, errorMessage = friendlyError(error))
-                    }
-                }
-            }
-        }
     }
 
     // ── 曲库文件操作（PC 伴生服务，ADR-0001：删的是真文件、改的是内嵌标签） ──
@@ -1200,18 +989,21 @@ class JellyfinViewModel(
      */
     private suspend fun persistSnapshot() {
         val repo = snapshotRepository ?: return
-        val current = _state.value
-        val previous = loadSnapshot()
-        val next = LibrarySnapshot(
-            tracks = current.tracks ?: previous?.tracks.orEmpty(),
-            albums = current.albums ?: previous?.albums.orEmpty(),
-            discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty(),
-            // 已下载列表清单不来自服务器：这是本地攒的，重建快照时原样带过去
-            downloadedPlaylists = previous?.downloadedPlaylists.orEmpty()
-        )
-        if (next == previous) return
-        snapshot = next
-        repo.save(next)
+        // 锁内读 state 与内存副本：后拿到锁的那次一定看到更新的内容，最后写盘的也是它。
+        snapshotSaveLock.withLock {
+            val current = _state.value
+            val previous = loadSnapshot()
+            val next = LibrarySnapshot(
+                tracks = current.tracks ?: previous?.tracks.orEmpty(),
+                albums = current.albums ?: previous?.albums.orEmpty(),
+                discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty(),
+                // 已下载列表清单不来自服务器：这是本地攒的，重建快照时原样带过去
+                downloadedPlaylists = previous?.downloadedPlaylists.orEmpty()
+            )
+            if (next == previous) return@withLock
+            snapshot = next
+            repo.save(next)
+        }
     }
 
     /** 登录成功时的整份替换快照：旧账号的数据一个字段都不留（换账号不串数据）。 */
@@ -1279,7 +1071,7 @@ class JellyfinViewModel(
      * 网络不通：切到离线态。快照能撑起来的屏照常显示，撑不起来的（播放列表）明说需要
      * 联网——不是转圈、不是「网络错误」。
      */
-    private suspend fun goOffline(needsNetwork: Boolean) {
+    private suspend fun goOffline(needsNetwork: Boolean): Boolean {
         val loaded = loadSnapshot()
         if (loaded != null) applySnapshot(loaded)
         // 快照连「全部音乐」都撑不起来（没有快照 / 刚被 login 清掉）：没有可显示的库，
@@ -1289,10 +1081,13 @@ class JellyfinViewModel(
                 isLoading = false,
                 errorMessage = friendlyError(JellyfinError.Network(IOException("offline, no snapshot")))
             )
-            return
+            return false
         }
         // 已下载集合先算完再进离线态（见 [computeDownloadedTrackIds]）。
         val cached = computeDownloadedTrackIds()
+        // 翻转判定读**写之前一刻**的离线态：上面两个挂起点之间可能有另一节也失败了，
+        // 用入口处的旧值会让两个调用都返回 true、各补跑一次当前分区。
+        val flipped = !_state.value.isOffline
         _state.value = _state.value.copy(
             isLoading = false,
             isOffline = true,
@@ -1300,6 +1095,8 @@ class JellyfinViewModel(
             errorMessage = if (needsNetwork) "播放列表需要联网才能查看" else null
         )
         startOfflineRetry()
+        // 只有真的从在线翻到离线才值得让调用方补跑当前分区（本来就是离线态时不用）。
+        return flipped
     }
 
     /**
@@ -1325,33 +1122,34 @@ class JellyfinViewModel(
         persistSnapshot()
         // 当前这次搜索是在快照里搜的：联网后用同样的词重新搜一遍（用户不用重打）。
         if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
+        // 快照来源的几屏刚被清掉：按当前所在分区补跑（原先靠界面把 isOffline 当 LaunchedEffect key）。
+        reloadCurrentSection()
     }
 
     /**
      * 任意一次请求成功 = 网络通了。退出离线态并停掉探活。
      *
      * 快照来源的那几屏一并清掉：它们不该被幂等守卫当成「最新服务器数据」挡住不刷新
-     * （铁律 4）。清掉后界面的 LaunchedEffect（key 含 isOffline）会重新触发对应分区的
-     * 加载。调用方要把本次成功结果赋回 state——顺序必须是 markOnline 在前、赋值在后，
-     * 不然刚拉到的新数据会被清掉。
+     * （铁律 4）。返回 true = 本次真的从离线翻回在线——调用方（`LibraryCache`）据此
+     * 补跑当前分区；**必须**在写本次结果之前调用，不然刚拉到的新数据会被清掉。
      */
-    private fun markOnline() {
+    private fun markOnline(): Boolean {
         stopOfflineRetry()
-        if (_state.value.isOffline) {
-            _state.value = _state.value.copy(
-                isOffline = false,
-                cachedTrackIds = null,
-                isOfflineSearch = false,
-                albums = null,
-                discoverAlbums = null,
-                recentlyPlayed = null,
-                mostPlayed = null,
-                recentlyAdded = null,
-                discoverFailedSections = emptySet(),
-            isDiscoverRefreshing = false,
-                albumTracks = null
-            )
-        }
+        if (!_state.value.isOffline) return false
+        _state.value = _state.value.copy(
+            isOffline = false,
+            cachedTrackIds = null,
+            isOfflineSearch = false,
+            albums = null,
+            discoverAlbums = null,
+            recentlyPlayed = null,
+            mostPlayed = null,
+            recentlyAdded = null,
+            discoverFailedSections = emptySet(),
+            // 刷新圈不在这里收：它由 refreshDiscover 等到四路都落地才收（#12）。
+            albumTracks = null
+        )
+        return true
     }
 
     /**
@@ -1436,7 +1234,7 @@ class JellyfinViewModel(
             // 在线就现拉一次（幂等），落地后再分组；离线只能用快照里有的。
             if (_state.value.albums == null && !_state.value.isOffline) {
                 loadAlbums()
-                albumsJob?.join()
+                libraryCache.awaitAlbums()
             }
             refreshCachedAlbums(tracks)
         }
@@ -1591,25 +1389,11 @@ class JellyfinViewModel(
         viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }
 
-    fun clearAlbumDetail() {
-        albumsJob?.cancel()
-        albumsGeneration++
-        _state.value = _state.value.copy(selectedAlbum = null, errorMessage = null)
-    }
-
-    fun clearPlaylistDetail() {
-        albumsJob?.cancel()
-        albumsGeneration++
-        _state.value = _state.value.copy(selectedPlaylist = null, errorMessage = null)
-    }
-
     override fun onCleared() {
         loginJob?.cancel()
-        albumsJob?.cancel()
-        recentlyPlayedJob?.cancel()
-        mostPlayedJob?.cancel()
-        recentlyAddedJob?.cancel()
-        searchJob?.cancel()
+        // 曲库各节的 job 都在 module 里，跟着 viewModelScope 一起取消；这里再作废一次代次，
+        // 保证已经在跑的响应回来也不会写进已销毁的 ViewModel。
+        libraryCache.invalidate()
         lyricsJob?.cancel()
         stopOfflineRetry()
         super.onCleared()

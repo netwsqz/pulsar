@@ -42,15 +42,13 @@ data class LibraryState(
     val mostPlayed: List<Track>? = null,
     val recentlyAdded: List<Album>? = null,
     /**
-     * 三节历史里**已经失败过**的那些节（按 section 名记，如 `"recentlyPlayed"`）。
+     * 三节历史里**已经失败过**的那些节（枚举，不再用字符串）。
      *
      * 失败的那节字段保持 null，界面据此**不再为它显示骨架**（否则永远转圈），只让这一节缺席；
      * 其余 section 照常显示。单节失败不打扰用户，三节全失败才给一次错误 + 重试。
      * 下一次真正发起请求时把对应项移出（重试能看到骨架）。
-     *
-     * 过渡形态：spec 草图里是 `Set<LibrarySectionKey>` 枚举，#12 拆每节加载时再换。
      */
-    val discoverFailedSections: Set<String> = emptySet(),
+    val discoverFailedSections: Set<LibrarySectionKey> = emptySet(),
     /**
      * 播放历史「版本号」：切歌（服务端 UserData 变了）或点「换一批」刷新时递增。
      *
@@ -76,6 +74,16 @@ data class LibraryState(
      */
     val isOffline: Boolean = false,
 )
+
+/**
+ * 发现页三节服务器历史的标识（`docs/library-state-refactor.md` Step 2 / #12）：
+ * 失败标记、版本号比对都按它记，不再用字符串字面量。
+ */
+enum class LibrarySectionKey {
+    RecentlyPlayed,
+    MostPlayed,
+    RecentlyAdded,
+}
 
 /** 搜索的一整组状态（原 `searchQuery` / `searchResults` / `isSearching` / `isOfflineSearch`）。 */
 data class SearchState(

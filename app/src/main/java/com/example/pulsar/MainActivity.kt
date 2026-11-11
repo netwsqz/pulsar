@@ -38,6 +38,7 @@ import com.example.pulsar.offline.OfflineInput
 import com.example.pulsar.offline.OfflineSearchNotice
 import com.example.pulsar.offline.message
 import com.example.pulsar.offline.offlineView
+import com.example.pulsar.state.LibrarySectionKey
 import android.content.ComponentName
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -853,38 +854,14 @@ private fun MusicLibraryScreen(
         detailOrigin = section
         section = LibrarySection.PlaylistDetail(playlist)
     }
-    // 进入对应分区时懒加载数据；load 方法幂等，重复进入不会重复请求。
-    // `sessionReady` 也作为 key：主页面现在在恢复会话期间就已经组合了，首次触发时
-    // 还没有 dataSource，loadLibrary 会直接 return（静默无操作）。必须等会话到位再补
-    // 跑一次，否则发现页/专辑页会永远停在骨架屏上。
-    // `isOffline` 也作为 key：探活回在线时 ViewModel 会清掉快照来源的那几屏
-    // （albums/discoverAlbums/albumTracks），靠 key 变化重新触发加载，拉服务器的新值。
-    // `historyEpoch` 作 key：切歌后 ViewModel 只递增版本号、不清数据（工单 09），
-    // 这里据此静默重拉；旧列表留在屏幕上，不闪骨架。
-    val sessionReady = state.tracks != null
-    LaunchedEffect(section, sessionReady, state.isOffline, state.historyEpoch) {
-        when (val s = section) {
-            LibrarySection.Discover -> if (sessionReady) {
-                viewModel.loadDiscoverAlbums()
-                viewModel.loadRecentlyPlayed()
-                viewModel.loadMostPlayed()
-                viewModel.loadRecentlyAdded()
-            }
-            LibrarySection.Tracks -> Unit
-            LibrarySection.Albums -> if (sessionReady) viewModel.loadAlbums()
-            // 艺术家页由已加载的专辑客户端分组而来（工单 06），零新 API：
-            // 只确保专辑列表到位，其余全在 UI 侧现算。
-            LibrarySection.Artists -> if (sessionReady) viewModel.loadAlbums()
-            is LibrarySection.GroupDetail -> if (sessionReady) viewModel.loadAlbums()
-            LibrarySection.Playlists -> if (sessionReady) viewModel.loadPlaylists()
-            LibrarySection.Search -> Unit
-            // 下载服务页（设置 → 下载）：进来时刷新一次任务列表，和原来挂在顶层 QQ 页时一致。
-            LibrarySection.DownloadService -> qqViewModel.refreshJobs()
-            LibrarySection.Settings -> Unit
-            LibrarySection.CachedCopies -> viewModel.loadCachedAlbums()
-            is LibrarySection.AlbumDetail -> if (sessionReady) viewModel.loadAlbumTracks(s.album)
-            is LibrarySection.PlaylistDetail -> if (sessionReady) viewModel.loadPlaylistTracks(s.playlist)
-        }
+    // 进入分区时加载数据：界面**只报「进了哪一节」**（#12）。
+    // 加载方法名、幂等守卫、会话是否就绪、三态语义（null / 空列表 / 失败）都在
+    // `LibraryCache` 里；会话就绪、离线翻转、切歌后的补跑由 module 自己触发，
+    // 所以这里不再把 sessionReady / isOffline / historyEpoch 当 key。
+    LaunchedEffect(section) {
+        viewModel.onSectionEntered(section)
+        // 下载服务页（设置 → 下载）：进来时刷新一次任务列表，和原来挂在顶层 QQ 页时一致。
+        if (section == LibrarySection.DownloadService) qqViewModel.refreshJobs()
     }
     // 离线可见性（ADR-0008）：离线时各屏只显示已下载的东西，不再「全量 + 标灰」。
     // 判据全部收在 OfflinePolicy 里——这里只把原始 state 喂进去、读回渲染用的视图，
@@ -2606,14 +2583,14 @@ private fun DiscoverContent(
         //
         // **离线时这三节整节不组合**（连骨架和空态都不给，spec §7）：数据留在 state 里，回在线自动回来。
         // 「要不要画」= 有内容（[DiscoverSections] 判的，报告 #22）或 该给骨架——两者都不成立才整节缺席。
-        fun historyLoading(section: String) =
+        fun historyLoading(section: LibrarySectionKey) =
             !state.isOffline && section !in state.discoverFailedSections
-        if (sections.showRecentlyPlayed || historyLoading("recentlyPlayed")) {
+        if (sections.showRecentlyPlayed || historyLoading(LibrarySectionKey.RecentlyPlayed)) {
             item(key = "recentlyPlayed") {
                 DiscoverTrackStrip(
                     title = "最近播放",
                     tracks = state.recentlyPlayed,
-                    showSkeleton = historyLoading("recentlyPlayed"),
+                    showSkeleton = historyLoading(LibrarySectionKey.RecentlyPlayed),
                     trackCoverFor = trackCoverFor,
                     onPlayTrack = onPlayTrack,
                     onAddToQueue = onAddToQueue,
@@ -2622,12 +2599,12 @@ private fun DiscoverContent(
                 )
             }
         }
-        if (sections.showMostPlayed || historyLoading("mostPlayed")) {
+        if (sections.showMostPlayed || historyLoading(LibrarySectionKey.MostPlayed)) {
             item(key = "mostPlayed") {
                 DiscoverTrackStrip(
                     title = "最常播放",
                     tracks = state.mostPlayed,
-                    showSkeleton = historyLoading("mostPlayed"),
+                    showSkeleton = historyLoading(LibrarySectionKey.MostPlayed),
                     trackCoverFor = trackCoverFor,
                     onPlayTrack = onPlayTrack,
                     onAddToQueue = onAddToQueue,
@@ -2636,12 +2613,12 @@ private fun DiscoverContent(
                 )
             }
         }
-        if (sections.showRecentlyAdded || historyLoading("recentlyAdded")) {
+        if (sections.showRecentlyAdded || historyLoading(LibrarySectionKey.RecentlyAdded)) {
             item(key = "recentlyAdded") {
                 DiscoverAlbumStrip(
                     title = "最近添加",
                     albums = state.recentlyAdded,
-                    showSkeleton = historyLoading("recentlyAdded"),
+                    showSkeleton = historyLoading(LibrarySectionKey.RecentlyAdded),
                     onOpenAlbum = onOpenAlbum,
                     coverFor = coverFor
                 )

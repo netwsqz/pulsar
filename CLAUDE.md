@@ -138,7 +138,8 @@ Android Studio 能直接打开此项目（同步 Gradle 后运行 `app` debug �
 搜索、设置、已缓存、详情页（专辑 / 播放列表 / 艺术家组）**不在顶层**，从别处进入。`navIndex()` 决定左右切换方向，`isDetail()` 判断是否详情层。改导航顺序时**只改 `TopLevelSections`**，chip 和占位页标题都从它取。流派页已删除（ADR-0009），不要再加回来。
 
 - **`JellyfinViewModel`**（AndroidViewModel）：单一 `StateFlow<JellyfinUiState>`，通过 `JellyfinViewModelFactory` 注入 `SessionRepository`、`JellyfinApiFactory`、`AuthorizationSink`。向 UI 暴露纯函数式的请求构造器：`streamUrl(track)`、`albumCover(album)`、`trackCover(track)`（未登录/无封面返回 null，UI 据此显示占位）。错误文案集中在 `friendlyError()`。
-- **幂等加载模式**：`albumsJob` + `albumsGeneration` 防止重复请求、过期响应失效。`loadAlbums()` 已加载则不重发；库函数通过"字段非空"判断是否已加载，**因此切换账号时必须清空所有缓存字段**。
+- **曲库加载 `library/LibraryCache.kt`（#12）**：每节（专辑 / 发现随机 / 三节历史 / 专辑曲目 / 播放列表 / 播放列表曲目 / 搜索）各一份 job + 代次，**互不取消**（改前共用一个 `albumsJob`，进播放列表会取消专辑列表——已修）。同一节重复进入取消旧请求；幂等守卫是"字段非空"（历史节还要版本号对得上），**因此切换账号时必须清空所有缓存字段**。三态语义只在这个 module 里实现：`null` = 没拉到/失败（界面错误或骨架，会重试）、空列表 = 拉到了但服务端没数据、**失败绝不写空列表**。界面只调 `viewModel.onSectionEntered(section)`；会话就绪 / 离线翻转 / 切歌后的补跑由 module 触发（`reloadCurrentSection`），**不要再往 UI 的 LaunchedEffect 加 sessionReady / isOffline / historyEpoch 当 key**。
+- **`isLoading` / `errorMessage` 仍是登录与曲库共用的通道**（#11 的口径）：`isLoading` 按**在途节计数**（多节并发时全部落地才收圈），`errorMessage` 的跨节串扰留给 #13 的类型化错误；别以为 #12 之后它们已经是分节的。
 - **发现页个人化聚合**：`recentlyPlayed` / `mostPlayed` / `recentlyAdded` 来自 Jellyfin 服务端（`SortBy=DatePlayed/PlayCount/DateCreated` + `Filters=IsPlayed`），**不来自本地存储**。三节独立降级：某节失败时字段保持 `null` 并记入 `discoverFailedSections`（界面不再为它显示骨架），其余节照常；三节全失败才给错误+重试。`null` 与空列表语义不同——**`null` = 没拉到（会重试），空列表 = 拉到了但服务端没数据**。
 - **搜索防抖**：`updateSearchQuery()` 内置 300ms debounce，空字符串立即清除结果不发请求。
 - **`AlbumCover`**：Coil `AsyncImage`，`ImageRequest.Builder` 手动 `addHeader("Authorization", ...)`（从 `JellyfinRequest.headers` 取），`ColorPainter` 做 placeholder/error。

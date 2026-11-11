@@ -154,6 +154,12 @@ class LibraryCache(
 
 ### Step 0 — 基线 + 迁移清单
 
+> **已完成 2026-11-11（#11）**：基线全量单测通过（68 个测试类 / 829 项、0 失败）。
+> 36 个字段（原文写 38，实际逐个数是 36）的读写位置清单、以及「收整个 state 的 Composable
+> 按读字段数排序」都落在 issue #11 的评论里：生产 UI 读点全部在 `MainActivity.kt`（`state.xxx`），
+> 写点全部在 `JellyfinViewModel.kt`（`copy(xxx = ...)`）；`selectedAlbum` / `selectedPlaylist`
+> 生产 UI 读点为 0（与本节判断一致）。本步未碰生产代码。
+
 1. 跑全量单测。
 2. 列出 38 个字段各自的读/写位置（可用 `grep`），标出：
    - 生产 UI 读；
@@ -164,6 +170,33 @@ class LibraryCache(
 **验收**：知道每个字段的归属；知道先迁哪 3 个屏。
 
 ### Step 1 — 嵌套 state + delegating properties（不改行为）
+
+> **已完成 2026-11-11（#11）**：新增 `com.example.pulsar.state` 包——
+> `SessionState`、`LibraryState`（内含 `SearchState` / `FileOpsState`）、`DownloadsState`；
+> `JellyfinUiState` 改成组合根（`session` / `library` / `downloads`），旧 36 个字段的读法保留为
+> **只读属性**，写法保留为兼容 `copy(...)`（旧参数名 → 落到对应 slice）。
+> 与原文的差异：
+> - **旧读法不是 `get()` 自定义 getter，而是构造时求值的 `val`**：自定义 getter 会让
+>   `state.errorMessage != null` 之后的智能转换失效（`MainActivity` 有 8 处 `when` 分支），
+>   而「现有代码不改」是这一步的验收线。slice 不可变 ⇒ 派生值不会过期。
+> - **slice 名用 `DownloadsState` 而不是 `DownloadState`**：后者已被调度器的
+>   `com.example.pulsar.DownloadState`（单任务进度）占用。
+> - `cachedTrackIds` / `cachedAlbums` 暂放 `DownloadsState`（`visibleTrackIds` / `cachedAlbums`），
+>   按 2026-11-09 改口径它们最终来自 `DownloadSnapshot`——本步只搬位置、不换来源。
+> - `isOffline` 归 `LibraryState`（说的是「曲库数据来自快照还是服务器」，不是会话凭据）；
+>   `isOfflineSearch` 归 `SearchState`；回收站三个字段并入 `FileOpsState`（同一个 PC 伴生服务）。
+> - `isLoading` / `errorMessage` 暂放 `SessionState`（与草图一致），它们仍是登录与曲库共用的
+>   通道，D4 / D5 拆分留给 #12 / #13。`discoverFailedSections` 仍是 `Set<String>`，
+>   枚举化留给 #12。
+> - 生产代码只有 `JellyfinViewModel.signOut()` 一行构造方式变了（组合根构造参数不再是旧字段）；
+>   `MainActivity.kt` 等 UI 文件**零改动**。
+> - **D6 的口径修正**：代码里「下载不清」只指**字节与名单**（ADR-0007）。`DownloadsState` 的
+>   **界面字段**现在会随登出 / 过期重置（`signOut` 重建整份 state、`expireSession` 显式清空
+>   `cachedTrackIds` / `cachedAlbums` / `isDeletingDownload` / `downloadDeleteMessage`），
+>   与改前一致；slice 注释按这个口径写，#13 收口时别把两者混在一起。
+>
+> 新测试：`JellyfinUiStateShapeTest`（9 项，36 个字段双向钉死）。
+> 全量单测 838 项全绿，`assembleDebug` 通过。
 
 1. 新增 `SessionState` / `LibraryState` / `DownloadState` / `SearchState` / `FileOpsState`。
 2. `JellyfinUiState` 改成组合根，保留旧字段的 delegating getter（只读）。

@@ -21,6 +21,7 @@ import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
+import com.example.pulsar.state.SessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -346,7 +347,7 @@ class JellyfinViewModel(
         clearLyrics()
         // 退回登录表单：只清「这次会话」的东西。地址历史是本地数据、跟账号无关，留着——
         // 否则 _state.value = JellyfinUiState() 会把它一起清空，登录页的地址下拉就没了。
-        _state.value = JellyfinUiState(serverUrlHistory = _state.value.serverUrlHistory)
+        _state.value = JellyfinUiState(session = SessionState(serverUrlHistory = _state.value.serverUrlHistory))
         // 主动退出只清快照（换账号不串曲库清单）。**下载不清**——那是用户主动存的
         // （ADR-0007 / 用户故事 16）；按账号隔离可见性归工单 08。清快照失败也不挡退出登录。
         viewModelScope.launch(dispatcher) {

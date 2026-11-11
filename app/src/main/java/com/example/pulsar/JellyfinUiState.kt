@@ -4,101 +4,185 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.state.DownloadsState
+import com.example.pulsar.state.LibraryState
+import com.example.pulsar.state.SessionState
 
+/**
+ * 界面状态的**组合根**（`docs/library-state-refactor.md` Step 1 / #11）。
+ *
+ * 内部按**所有权**拆成三个 slice，组合后仍然只对外发一条 `StateFlow<JellyfinUiState>`：
+ *
+ * | slice | 装什么 | 登出 / 过期 |
+ * |---|---|---|
+ * | [session] | 登录表单、恢复会话、错误通道 | 清大部分（`serverUrl` / `username` / 地址历史按现状保留） |
+ * | [library] | 曲库、发现、详情、搜索、多选、文件操作、离线可见性 | 清大部分（`historyEpoch` 与回收站字段目前不清，与改前一致） |
+ * | [downloads] | 下载派生的界面状态 | **会重置**（与改前一致）——ADR-0007 的「不清」说的是**字节与名单**，不是这里的 UI 字段 |
+ *
+ * **迁移期兼容层**：原来 36 个顶层字段的**读法**全部保留为只读属性（下面这一节），
+ * 写法则走本类底部的兼容 `copy(...)`（同名参数，落到对应 slice）。这样屏幕代码一行都不用改，
+ * 后续工单（#12–#16）按屏幕逐个迁到 `state.library.xxx` / `state.session.xxx`，
+ * 最后 #16 删掉兼容层。**新代码请直接读写 slice，不要再加旧字段。**
+ */
 data class JellyfinUiState(
-    val serverUrl: String = "",
-    /** 最近登录成功的服务器地址（最新在前）；登录页输入框获焦时下拉可选。 */
-    val serverUrlHistory: List<String> = emptyList(),
-    val username: String = "",
-    val password: String = "",
-    /** 登录/手动加载中（按钮转圈）。 */
-    val isLoading: Boolean = false,
+    val session: SessionState = SessionState(),
+    val library: LibraryState = LibraryState(),
+    val downloads: DownloadsState = DownloadsState(),
+) {
+    // ── 兼容层 · 旧字段读法（#11 加，#16 删）────────────────────────────
+    // 一律只读、不存第二份「真相」：这些 val 在构造时从 slice 求值，而三个 slice 本身是
+    // 不可变的 val，所以永远不会过期（每次 copy 都会重建它们）。字段含义见对应 slice 的 KDoc。
+    // 不用 `get() =` 自定义 getter 的原因：自定义 getter 会让 `state.errorMessage != null`
+    // 之后的智能转换失效，界面里 8 处 `when` 分支就编译不过了——「现有代码不改」是这一步的验收线。
+
+    // 会话
+    val serverUrl: String = session.serverUrl
+    val serverUrlHistory: List<String> = session.serverUrlHistory
+    val username: String = session.username
+    val password: String = session.password
+    val isLoading: Boolean = session.isLoading
+    val isRestoring: Boolean = session.isRestoring
+    val errorMessage: String? = session.errorMessage
+
+    // 曲库
+    val tracks: List<Track>? = library.tracks
+    val discoverAlbums: List<Album>? = library.discoverAlbums
+    val recentlyPlayed: List<Track>? = library.recentlyPlayed
+    val mostPlayed: List<Track>? = library.mostPlayed
+    val recentlyAdded: List<Album>? = library.recentlyAdded
+    val discoverFailedSections: Set<String> = library.discoverFailedSections
+    val historyEpoch: Int = library.historyEpoch
+    val isDiscoverRefreshing: Boolean = library.isDiscoverRefreshing
+    val albums: List<Album>? = library.albums
+    val albumTracks: List<Track>? = library.albumTracks
+    val selectedAlbum: Album? = library.selectedAlbum
+    val playlists: List<Playlist>? = library.playlists
+    val playlistTracks: List<Track>? = library.playlistTracks
+    val selectedPlaylist: Playlist? = library.selectedPlaylist
+    val multiSelectIds: Set<String> = library.multiSelectIds
+    val isOffline: Boolean = library.isOffline
+
+    // 搜索
+    val searchQuery: String = library.search.query
+    val searchResults: SearchResults? = library.search.results
+    val isSearching: Boolean = library.search.isSearching
+    val isOfflineSearch: Boolean = library.search.isOfflineSearch
+
+    // 文件操作（含回收站）
+    val isFileOpsBusy: Boolean = library.fileOps.isBusy
+    val fileOpsMessage: String? = library.fileOps.message
+    val recycleFiles: List<com.example.pulsar.data.libraryfiles.LibraryRecycleFile> =
+        library.fileOps.recycleFiles
+    val isRecycleLoading: Boolean = library.fileOps.isRecycleLoading
+    val recycleMessage: String? = library.fileOps.recycleMessage
+
+    // 下载
+    val cachedTrackIds: Set<String>? = downloads.visibleTrackIds
+    val cachedAlbums: List<CachedAlbum>? = downloads.cachedAlbums
+    val isDeletingDownload: Boolean = downloads.isDeleting
+    val downloadDeleteMessage: String? = downloads.deleteMessage
+
+    // ── 兼容层 · 旧字段写法（#11 加，#16 删）────────────────────────────
+    // 与 data class 自动生成的 copy(session, library, downloads) 并存：参数名不重叠，
+    // 旧的 `state.copy(tracks = ...)` 全部落到对应 slice 上。
+
     /**
-     * 启动时正在恢复已保存的会话（读本地 token → 拉曲库）。
+     * 迁移期兼容写入口：参数名与旧顶层字段一一对应，值落到对应 slice。
      *
-     * 与 [isLoading] 分开：恢复是应用自己发起的、用户无需交互。为 true 时 UI **不**回到
-     * 登录表单，而是直接进主页面、用灰色波浪骨架占位等着——只有恢复结束且 [tracks] 仍为
-     * null（本地没存过、或恢复失败）才判定"需要登录"。
-     */
-    val isRestoring: Boolean = false,
-    val errorMessage: String? = null,
-    val tracks: List<Track>? = null,
-    val discoverAlbums: List<Album>? = null,
-    /**
-     * 发现页个人化聚合（工单 02）。null = 还没成功拉到（含上次失败，进页会重试）；
-     * 空列表 = 拉到了但服务端没有数据（没播过歌），界面据此隐藏该 section。
-     */
-    val recentlyPlayed: List<Track>? = null,
-    val mostPlayed: List<Track>? = null,
-    val recentlyAdded: List<Album>? = null,
-    /**
-     * 三节历史里**已经失败过**的那些节（按 section 名记，如 `"recentlyPlayed"`）。
+     * 这是**唯一**允许把旧字段名写进状态的地方。新增字段请直接加到 slice 上，
+     * 不要再往这里加参数（#16 会整个删掉）。
      *
-     * 失败的那节字段保持 null，界面据此**不再为它显示骨架**（否则永远转圈），只让这一节缺席；
-     * 其余 section 照常显示。单节失败不打扰用户，三节全失败才给一次错误 + 重试。
-     * 下一次真正发起请求时把对应项移出（重试能看到骨架）。
+     * ⚠️ 两个 `copy` 的参数都是全默认值，所以**无参 `state.copy()` 会重载歧义编译失败**；
+     * 需要空拷贝就直接复用实例。当前没有任何调用点，迁移时别新写。
      */
-    val discoverFailedSections: Set<String> = emptySet(),
-    /**
-     * 播放历史「版本号」：切歌（服务端 UserData 变了）或点「换一批」刷新时递增。
-     *
-     * **过期不等于清空**：数据仍留在 [recentlyPlayed] / [mostPlayed] / [recentlyAdded] 里
-     * 照常显示，后台静默重拉成功后原地替换。清成 null 会让发现页横滑先闪成骨架再弹回来。
-     * 界面把它当 LaunchedEffect 的 key 触发重拉；每节自己记住已拉到的版本，相等就不再请求。
-     */
-    val historyEpoch: Int = 0,
-    /** 发现页刷新进行中（顶部「换一批」按钮转圈用）。与 [isLoading] 分开：进页时的常规加载不该转这个圈。 */
-    val isDiscoverRefreshing: Boolean = false,
-    val albums: List<Album>? = null,
-    val albumTracks: List<Track>? = null,
-    val selectedAlbum: Album? = null,
-    val playlists: List<Playlist>? = null,
-    val playlistTracks: List<Track>? = null,
-    val selectedPlaylist: Playlist? = null,
-    val searchQuery: String = "",
-    val searchResults: SearchResults? = null,
-    val isSearching: Boolean = false,
-    /** 文件操作（删除/改名）提交中：对话框据此禁按钮防误关。 */
-    val isFileOpsBusy: Boolean = false,
-    /** 最近一次文件操作的失败原因；发起新操作或成功时清空。null = 没有失败提示。 */
-    val fileOpsMessage: String? = null,
-    /** 回收站内容（设置页用），按删除时间倒序。空列表 = 回收站是空的。 */
-    val recycleFiles: List<com.example.pulsar.data.libraryfiles.LibraryRecycleFile> = emptyList(),
-    val isRecycleLoading: Boolean = false,
-    /** 回收站操作的反馈（加载失败 / 恢复成功 / 清空成功共用一格）。 */
-    val recycleMessage: String? = null,
-    /**
-     * 多选模式的已选曲目 id 集合（工单 05）。**空 = 非多选模式**；
-     * 非空时 TrackRow 点击 = 勾选、顶部出现批量操作条。
-     */
-    val multiSelectIds: Set<String> = emptySet(),
-    /**
-     * 离线态：连不上 Jellyfin，列表来自曲库快照。在线一律 false。
-     *
-     * 恢复联网后不用用户做任何操作，[JellyfinViewModel] 自己的探活会把它翻回 false
-     * （用户故事 13）。
-     */
-    val isOffline: Boolean = false,
-    /**
-     * 离线时**能显示也能播**的曲目 id（已下载，ADR-0008）。
-     * null = 还不知道（在线时不需要知道，界面不筛）。
-     *
-     * 口径是**交集**：字节完整（`MediaDownloads.completeKeys`）**且**在当前账号的下载
-     * 名单里（换账号看不见别人的下载）。半截的不算，听到一半切走的不算。
-     */
-    val cachedTrackIds: Set<String>? = null,
-    /** 当前搜索结果来自本地快照而不是 Jellyfin——界面要标明「离线搜索」，范围变小了。 */
-    val isOfflineSearch: Boolean = false,
-    /** 已下载列表（设置页进）：按专辑分组的完整副本进度。null = 还没进过这页。 */
-    val cachedAlbums: List<CachedAlbum>? = null,
-    /**
-     * 整张专辑的下载正在删（工单 13）。已下载列表的确认框据此显示进度、禁用按钮，
-     * 删完落回 false 才关框——删除跑在 [JellyfinViewModel] 里，页面切走也不中断。
-     */
-    val isDeletingDownload: Boolean = false,
-    /**
-     * 下载删除完成后的提示（「已删除 N 首」，用户故事 62）。界面弹完调
-     * [JellyfinViewModel.dismissDownloadDeleteMessage] 清掉，避免转屏/返回后再弹一次。
-     */
-    val downloadDeleteMessage: String? = null
-)
+    fun copy(
+        // 会话
+        serverUrl: String = this.serverUrl,
+        serverUrlHistory: List<String> = this.serverUrlHistory,
+        username: String = this.username,
+        password: String = this.password,
+        isLoading: Boolean = this.isLoading,
+        isRestoring: Boolean = this.isRestoring,
+        errorMessage: String? = this.errorMessage,
+        // 曲库
+        tracks: List<Track>? = this.tracks,
+        discoverAlbums: List<Album>? = this.discoverAlbums,
+        recentlyPlayed: List<Track>? = this.recentlyPlayed,
+        mostPlayed: List<Track>? = this.mostPlayed,
+        recentlyAdded: List<Album>? = this.recentlyAdded,
+        discoverFailedSections: Set<String> = this.discoverFailedSections,
+        historyEpoch: Int = this.historyEpoch,
+        isDiscoverRefreshing: Boolean = this.isDiscoverRefreshing,
+        albums: List<Album>? = this.albums,
+        albumTracks: List<Track>? = this.albumTracks,
+        selectedAlbum: Album? = this.selectedAlbum,
+        playlists: List<Playlist>? = this.playlists,
+        playlistTracks: List<Track>? = this.playlistTracks,
+        selectedPlaylist: Playlist? = this.selectedPlaylist,
+        multiSelectIds: Set<String> = this.multiSelectIds,
+        isOffline: Boolean = this.isOffline,
+        // 搜索
+        searchQuery: String = this.searchQuery,
+        searchResults: SearchResults? = this.searchResults,
+        isSearching: Boolean = this.isSearching,
+        isOfflineSearch: Boolean = this.isOfflineSearch,
+        // 文件操作（含回收站）
+        isFileOpsBusy: Boolean = this.isFileOpsBusy,
+        fileOpsMessage: String? = this.fileOpsMessage,
+        recycleFiles: List<com.example.pulsar.data.libraryfiles.LibraryRecycleFile> = this.recycleFiles,
+        isRecycleLoading: Boolean = this.isRecycleLoading,
+        recycleMessage: String? = this.recycleMessage,
+        // 下载
+        cachedTrackIds: Set<String>? = this.cachedTrackIds,
+        cachedAlbums: List<CachedAlbum>? = this.cachedAlbums,
+        isDeletingDownload: Boolean = this.isDeletingDownload,
+        downloadDeleteMessage: String? = this.downloadDeleteMessage,
+    ): JellyfinUiState = JellyfinUiState(
+        session = session.copy(
+            serverUrl = serverUrl,
+            serverUrlHistory = serverUrlHistory,
+            username = username,
+            password = password,
+            isLoading = isLoading,
+            isRestoring = isRestoring,
+            errorMessage = errorMessage,
+        ),
+        library = library.copy(
+            tracks = tracks,
+            discoverAlbums = discoverAlbums,
+            recentlyPlayed = recentlyPlayed,
+            mostPlayed = mostPlayed,
+            recentlyAdded = recentlyAdded,
+            discoverFailedSections = discoverFailedSections,
+            historyEpoch = historyEpoch,
+            isDiscoverRefreshing = isDiscoverRefreshing,
+            albums = albums,
+            albumTracks = albumTracks,
+            selectedAlbum = selectedAlbum,
+            playlists = playlists,
+            playlistTracks = playlistTracks,
+            selectedPlaylist = selectedPlaylist,
+            multiSelectIds = multiSelectIds,
+            isOffline = isOffline,
+            search = library.search.copy(
+                query = searchQuery,
+                results = searchResults,
+                isSearching = isSearching,
+                isOfflineSearch = isOfflineSearch,
+            ),
+            fileOps = library.fileOps.copy(
+                isBusy = isFileOpsBusy,
+                message = fileOpsMessage,
+                recycleFiles = recycleFiles,
+                isRecycleLoading = isRecycleLoading,
+                recycleMessage = recycleMessage,
+            ),
+        ),
+        downloads = downloads.copy(
+            visibleTrackIds = cachedTrackIds,
+            cachedAlbums = cachedAlbums,
+            isDeleting = isDeletingDownload,
+            deleteMessage = downloadDeleteMessage,
+        ),
+    )
+}

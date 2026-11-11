@@ -175,7 +175,7 @@ JUnit4 + `kotlinx-coroutines-test`（`runTest`、`advanceUntilIdle`、`advanceTi
 - **改动范围尽量小**，不做与任务无关的重构。
 - **安全**：token/密码不写日志、不写 URL、不写 UI；不硬编码密钥。
 - **不删除用户数据**（DataStore 存储、配置、历史）。
-- **不擅自执行** git push、部署、发布、破坏性迁移。
+- **git push 已获长期授权**：提交完成后直接推到 `origin master`，不用再问（2026-11-11 用户明确要求）。**部署、发布、破坏性迁移仍然要先问**。
 - 命令失败先看报错信息，不硬猜；工具反复报错时停止并询问用户。
 - 根目录的 `qq-music-api-v2/`、`node_modules/`、`qrcode*.png`、`qrresp*.json` 是历史实验产物，已 gitignore，**不是项目代码**，不要动它们。`server/_smoke.log`、根目录 `_smoke.log` 是服务运行日志，同理。根目录的 `{var`（0 字节）、`Poppins,Righteous` 目录也是误产物。
 - **`docs/archive/` 是归档区**——里面全是写于项目早期、**内容已过时**的阶段性文档（`DESIGN_SYSTEM.md`、`UI_OPTIMIZATION_SUMMARY.md`、`MVP_PLAN.md`、`FONT_DOWNLOAD_GUIDE.md`、`ui-improvement-suggestions.md`），仍提到「UI 全在 MainActivity」这类旧结论。**只作历史参考，不要当成当前事实**，以代码和本文件为准。新的阶段性总结也直接放进这里，不要在根目录另起一份。

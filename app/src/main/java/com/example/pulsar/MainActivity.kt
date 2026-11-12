@@ -38,8 +38,11 @@ import com.example.pulsar.offline.OfflineInput
 import com.example.pulsar.offline.OfflineSearchNotice
 import com.example.pulsar.offline.message
 import com.example.pulsar.offline.offlineView
+import com.example.pulsar.state.DownloadsState
+import com.example.pulsar.state.FileOpsState
 import com.example.pulsar.state.LibrarySectionKey
 import com.example.pulsar.state.LibraryState
+import com.example.pulsar.state.SearchState
 import com.example.pulsar.state.SessionState
 import android.content.ComponentName
 import android.os.Bundle
@@ -554,7 +557,8 @@ private fun LibraryGroupsContent(
  */
 @Composable
 private fun LibraryGroupDetailContent(
-    state: JellyfinUiState,
+    library: LibraryState,
+    session: SessionState,
     albums: List<Album>?,
     groupName: String,
     offlineNotice: String?,
@@ -572,10 +576,10 @@ private fun LibraryGroupDetailContent(
     // 离线视图（ADR-0008）：只在真正过滤了列表时（offlineNotice 非空）才改摘要口径、隐藏网格里
     // 不该出现的东西——下载名单还没算出来时 albums 还是全量，不能当成「已下载」。
     val isOfflineView = offlineNotice != null
-    // 摘要里的「共 M 张」用服务端口径：过滤前那一份（原始 state.albums）里同名的组。
+    // 摘要里的「共 M 张」用服务端口径：过滤前那一份（原始 library.albums）里同名的组。
     // 离线时 `albums` 已被离线策略滤过，拿它当总数会写成「已下载 3 张 · 共 3 张」。
-    val serverTotal = remember(state.albums, groupName) {
-        libraryGroups(state.albums.orEmpty())
+    val serverTotal = remember(library.albums, groupName) {
+        libraryGroups(library.albums.orEmpty())
             .firstOrNull { it.name.equals(groupName, ignoreCase = true) }
             ?.albums?.size
     }
@@ -603,11 +607,11 @@ private fun LibraryGroupDetailContent(
         gridBody = {
             when {
                 // 骨架只画卡片、从顶部开始；换真实内容时卡片从同一位置开始，不跳（spec §5）。
-                albums == null && state.isLoading -> fullRow("skeleton") {
+                albums == null && session.isLoading -> fullRow("skeleton") {
                     AlbumGridSkeleton()
                 }
-                albums == null && state.errorMessage != null -> fullRow("error") {
-                    ErrorState(state.errorMessage, onRetry = onRetry)
+                albums == null && session.errorMessage != null -> fullRow("error") {
+                    ErrorState(session.errorMessage, onRetry = onRetry)
                 }
                 groupAlbums.isEmpty() -> fullRow("empty") {
                     EmptyState(
@@ -1177,7 +1181,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
-                        state = state,
+                        search = state.library.search,
+                        session = state.session,
                         results = visible.searchResults,
                         searchNotice = offline.searchNotice,
                         qqState = qqState,
@@ -1189,7 +1194,7 @@ private fun MusicLibraryScreen(
                         trackCoverFor = viewModel::trackCover,
                         albumCoverFor = viewModel::albumCover,
                         playlistCoverFor = viewModel::playlistCover,
-                        onRetry = { viewModel.updateSearchQuery(state.searchQuery) },
+                        onRetry = { viewModel.updateSearchQuery(state.library.search.query) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         onOpenAlbum = openAlbum,
@@ -1223,7 +1228,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
-                        state = state,
+                        session = state.session,
                         album = s.album,
                         albumTracks = visible.albumTracks,
                         offlineNotice = offlineNotice,
@@ -1239,10 +1244,10 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
-                        state = state,
+                        library = state.library,
+                        session = state.session,
                         playlist = s.playlist,
                         playlistTracks = visible.playlistTracks,
-                        isOffline = state.isOffline,
                         offlineNotice = offlineNotice,
                         coverFor = viewModel::trackCover,
                         onPlayTrack = onPlayTrack,
@@ -1256,7 +1261,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
-                        state = state,
+                        library = state.library,
+                        session = state.session,
                         albums = visible.albums,
                         groupName = s.name,
                         offlineNotice = offlineNotice,
@@ -1266,13 +1272,13 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.CachedCopies -> CachedCopiesContent(
-                        state = state,
+                        downloads = state.downloads,
                         viewModel = viewModel,
                         albumCoverFor = viewModel::albumCover,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
-                        state = state,
+                        fileOps = state.library.fileOps,
                         viewModel = viewModel,
                         playback = playback,
                         onPlaybackIntent = playbackSession::dispatch,
@@ -3273,7 +3279,7 @@ private fun MediaDetailHeader(
 
 @Composable
 private fun AlbumDetailContent(
-    state: JellyfinUiState,
+    session: SessionState,
     album: Album,
     albumTracks: List<Track>?,
     offlineNotice: String?,
@@ -3322,7 +3328,7 @@ private fun AlbumDetailContent(
                     id = album.id,
                     name = album.name,
                     tracks = trackList,
-                    serverUrl = state.serverUrl,
+                    serverUrl = session.serverUrl,
                     streamUrl = streamUrl,
                     currentTrackId = currentTrackId,
                     onMessage = onDownloadMessage
@@ -3350,7 +3356,7 @@ private fun AlbumDetailContent(
         modifier = modifier
     ) {
         when {
-            albumTracks == null && state.isLoading -> item(key = "skeleton") {
+            albumTracks == null && session.isLoading -> item(key = "skeleton") {
                 TrackListSkeleton(
                     count = 6,
                     leading = SkeletonLeading.Number,
@@ -3358,8 +3364,8 @@ private fun AlbumDetailContent(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            albumTracks == null && state.errorMessage != null -> item(key = "error") {
-                ErrorState(state.errorMessage, onRetry = onRetry)
+            albumTracks == null && session.errorMessage != null -> item(key = "error") {
+                ErrorState(session.errorMessage, onRetry = onRetry)
             }
             trackList.isEmpty() -> item(key = "empty") {
                 EmptyState(if (isOfflineView) "离线 · 这张专辑没有下载的歌曲" else "该专辑暂无歌曲")
@@ -3449,7 +3455,8 @@ private fun PlaylistsContent(
  */
 @Composable
 private fun SearchContent(
-    state: JellyfinUiState,
+    search: SearchState,
+    session: SessionState,
     results: SearchResults?,
     searchNotice: OfflineSearchNotice?,
     qqState: QQDownloadUiState,
@@ -3490,13 +3497,13 @@ private fun SearchContent(
     ) {
         // 搜索框固定顶部：输入时两个 ViewModel 各自防抖后请求；非空时显示清除按钮。
         OutlinedTextField(
-            value = state.searchQuery,
+            value = search.query,
             onValueChange = onSearchQueryChange,
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
             shape = RoundedCornerShape(Dimens.CornerLarge),
             placeholder = { Text("搜索歌曲、专辑、播放列表，也能搜 QQ 音乐") },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
-            trailingIcon = if (state.searchQuery.isNotEmpty()) {
+            trailingIcon = if (search.query.isNotEmpty()) {
                 {
                     IconButton(
                         onClick = { onSearchQueryChange("") },
@@ -3531,22 +3538,22 @@ private fun SearchContent(
             val bothEmpty = libraryEmpty && !qqHasResults
             val qqStatus = qqState.searchStatus
             when {
-                state.searchQuery.isBlank() -> Text(
+                search.query.isBlank() -> Text(
                     "输入关键词搜索音乐库",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                state.isSearching -> CircularProgressIndicator()
+                search.isSearching -> CircularProgressIndicator()
                 libraryEmpty && qqState.isSearching -> CircularProgressIndicator()
                 // 曲库侧的失败优先说：QQ 的错误不能让「曲库没搜成」看起来像「曲库没有」。
-                bothEmpty && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                bothEmpty && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
                 bothEmpty && qqStatus != null -> Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
                 ) {
                     Text(
-                        if (librarySearchedEmpty) "曲库中没找到「${state.searchQuery}」"
+                        if (librarySearchedEmpty) "曲库中没找到「${search.query}」"
                         else "曲库搜索未完成",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -3561,8 +3568,8 @@ private fun SearchContent(
                 }
                 bothEmpty && searchNotice != null ->
                     EmptyState(
-                        if (searchNotice == OfflineSearchNotice.DownloadedOnly) "已下载的歌曲里没找到「${state.searchQuery}」\n联网后能搜全曲库"
-                        else "快照里没找到「${state.searchQuery}」\n联网后能搜全曲库"
+                        if (searchNotice == OfflineSearchNotice.DownloadedOnly) "已下载的歌曲里没找到「${search.query}」\n联网后能搜全曲库"
+                        else "快照里没找到「${search.query}」\n联网后能搜全曲库"
                     )
                 bothEmpty && !qqState.isSearching -> EmptyState("未找到相关内容")
                 else -> {
@@ -3679,10 +3686,10 @@ private fun SearchResultRow(
 
 @Composable
 private fun PlaylistDetailContent(
-    state: JellyfinUiState,
+    library: LibraryState,
+    session: SessionState,
     playlist: Playlist,
     playlistTracks: List<Track>?,
-    isOffline: Boolean,
     offlineNotice: String?,
     coverFor: (Track) -> JellyfinRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
@@ -3702,6 +3709,7 @@ private fun PlaylistDetailContent(
     // 「已下载」口径只在真正过滤了列表时用（offlineNotice 非空），免得下载名单还没算出来时
     // 把全量当成已下载。
     val offlineView = offlineNotice != null
+    val isOffline = library.isOffline
     MediaDetailScaffold(
         cover = playlistCoverFor(playlist),
         coverDescription = playlist.name,
@@ -3727,7 +3735,7 @@ private fun PlaylistDetailContent(
                     id = playlist.id,
                     name = playlist.name,
                     tracks = trackList,
-                    serverUrl = state.serverUrl,
+                    serverUrl = session.serverUrl,
                     streamUrl = streamUrl,
                     currentTrackId = currentTrackId,
                     onMessage = onDownloadMessage
@@ -3741,7 +3749,7 @@ private fun PlaylistDetailContent(
     ) {
         when {
             // 离线读取本地下载清单期间给骨架；别先闪一句「没有下载」再变成曲目。
-            playlistTracks == null && (state.isLoading || (isOffline && state.errorMessage == null)) ->
+            playlistTracks == null && (session.isLoading || (isOffline && session.errorMessage == null)) ->
                 item(key = "skeleton") {
                     // 只补曲目行骨架，头部已在上面；行首是封面槽、尾部留「更多」占位，
                     // 与真实 TrackRow 同构，加载完成不跳。
@@ -3757,8 +3765,8 @@ private fun PlaylistDetailContent(
             playlistTracks == null && isOffline -> item(key = "offline-empty") {
                 EmptyState("离线 · 这个播放列表没有下载，需要联网才能查看")
             }
-            playlistTracks == null && state.errorMessage != null -> item(key = "error") {
-                ErrorState(state.errorMessage, onRetry = onRetry)
+            playlistTracks == null && session.errorMessage != null -> item(key = "error") {
+                ErrorState(session.errorMessage, onRetry = onRetry)
             }
             trackList.isEmpty() -> item(key = "empty") {
                 EmptyState(
@@ -3781,10 +3789,11 @@ private fun PlaylistDetailContent(
     }
 }
 
-/** 设置页：USB 独占输出、静音跳曲、定时关闭。状态读 [PlaybackUiState]，写操作只发 [PlaybackIntent]。 */
+/** 设置页：USB 独占输出、静音跳曲、定时关闭。播放状态读 [PlaybackUiState]、写操作只发 [PlaybackIntent]；
+ * 回收站读 [FileOpsState]（#15），下载区直接读 `DownloadLibrary` 快照（#7）。 */
 @Composable
 private fun SettingsContent(
-    state: JellyfinUiState,
+    fileOps: FileOpsState,
     viewModel: JellyfinViewModel,
     playback: PlaybackUiState,
     onPlaybackIntent: (PlaybackIntent) -> Boolean,
@@ -3991,7 +4000,7 @@ private fun SettingsContent(
         }
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
         SettingsSectionHeader("存储")
-        SurfaceCard { RecycleBinSection(state = state, viewModel = viewModel) }
+        SurfaceCard { RecycleBinSection(fileOps = fileOps, viewModel = viewModel) }
         // 下载（ADR-0007）：占用 + 首数 + 「已下载」入口。没有清空按钮——没有一键清空。
         SurfaceCard {
             DownloadsSection(viewModel = viewModel, onOpenCachedCopies = onOpenCachedCopies)
@@ -4095,9 +4104,10 @@ private fun SettingsSectionHeader(title: String) {
     )
 }
 
-/** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。 */
+/** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。
+ * 只读 [FileOpsState]（#15）：回收站与单曲删除/改名同属 PC 伴生服务的界面状态。 */
 @Composable
-private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewModel) {
+private fun RecycleBinSection(fileOps: FileOpsState, viewModel: JellyfinViewModel) {
     // 每次进设置页重拉一次：删除/恢复随时会改变回收站内容，不留旧值。
     LaunchedEffect(Unit) { viewModel.loadRecycle() }
     var showPurgeConfirm by remember { mutableStateOf(false) }
@@ -4109,38 +4119,38 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
             Column(Modifier.weight(1f)) {
                 Text("回收站", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (state.recycleFiles.isEmpty()) "删除的歌曲在这里，可恢复"
-                    else "${state.recycleFiles.size} 个文件 · ${formatBytes(state.recycleFiles.sumOf { it.size })}",
+                    if (fileOps.recycleFiles.isEmpty()) "删除的歌曲在这里，可恢复"
+                    else "${fileOps.recycleFiles.size} 个文件 · ${formatBytes(fileOps.recycleFiles.sumOf { it.size })}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             TextButton(
                 onClick = { showPurgeConfirm = true },
-                enabled = state.recycleFiles.isNotEmpty() && !state.isFileOpsBusy
+                enabled = fileOps.recycleFiles.isNotEmpty() && !fileOps.isBusy
             ) { Text("清空", color = MaterialTheme.colorScheme.error) }
         }
         when {
-            state.isRecycleLoading -> Text(
+            fileOps.isRecycleLoading -> Text(
                 "加载中…",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             // 加载失败/清空/恢复的反馈都在这格；列表为空且没消息才是真空态
-            state.recycleFiles.isEmpty() && state.recycleMessage == null -> Text(
+            fileOps.recycleFiles.isEmpty() && fileOps.recycleMessage == null -> Text(
                 "回收站是空的",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             else -> {
-                state.recycleMessage?.let { message ->
+                fileOps.recycleMessage?.let { message ->
                     Text(
                         message,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                state.recycleFiles.forEach { file ->
+                fileOps.recycleFiles.forEach { file ->
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -4157,7 +4167,7 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
                         }
                         TextButton(
                             onClick = { viewModel.restoreRecycle(file.relPath) },
-                            enabled = !state.isFileOpsBusy
+                            enabled = !fileOps.isBusy
                         ) { Text("恢复") }
                     }
                 }
@@ -4166,16 +4176,16 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
     }
     if (showPurgeConfirm) {
         AlertDialog(
-            onDismissRequest = { if (!state.isFileOpsBusy) showPurgeConfirm = false },
+            onDismissRequest = { if (!fileOps.isBusy) showPurgeConfirm = false },
             title = { Text("清空回收站？") },
             text = {
                 Text(
-                    "将永久删除回收站里的 ${state.recycleFiles.size} 个文件，此操作不可恢复。"
+                    "将永久删除回收站里的 ${fileOps.recycleFiles.size} 个文件，此操作不可恢复。"
                 )
             },
             confirmButton = {
                 TextButton(
-                    enabled = !state.isFileOpsBusy,
+                    enabled = !fileOps.isBusy,
                     onClick = {
                         showPurgeConfirm = false
                         viewModel.purgeRecycle()
@@ -4183,7 +4193,7 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
                 ) { Text("清空（不可恢复）", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(enabled = !state.isFileOpsBusy, onClick = { showPurgeConfirm = false }) { Text("取消") }
+                TextButton(enabled = !fileOps.isBusy, onClick = { showPurgeConfirm = false }) { Text("取消") }
             }
         )
     }
@@ -4194,7 +4204,7 @@ private fun RecycleBinSection(state: JellyfinUiState, viewModel: JellyfinViewMod
  * 整张删按下载名单删（用户故事 10）：服务器后来新增的歌不在名单里，不会跟着没。 */
 @Composable
 private fun CachedCopiesContent(
-    state: JellyfinUiState,
+    downloads: DownloadsState,
     viewModel: JellyfinViewModel,
     albumCoverFor: (Album) -> JellyfinRequest?,
     modifier: Modifier = Modifier
@@ -4210,7 +4220,7 @@ private fun CachedCopiesContent(
             style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.SpaceMidMedium)
         )
-        val cachedAlbums = state.cachedAlbums
+        val cachedAlbums = downloads.cachedAlbums
         when {
             cachedAlbums == null -> Box(
                 Modifier.weight(1f).fillMaxWidth(),
@@ -4242,7 +4252,7 @@ private fun CachedCopiesContent(
                 deleteTarget?.let { target ->
                     // 删除跑在 ViewModel 里（导航切走也不中断，破坏性操作不能删一半）：忙碌位落回
                     // false 才算删完，这时才关框。关完由 MainActivity 统一弹「已删除 N 首」（工单 13）。
-                    val deleting = state.isDeletingDownload
+                    val deleting = downloads.isDeleting
                     var deleteStarted by remember { mutableStateOf(false) }
                     // 两个 key 都要：只看 deleting 的话，删除在一帧内跑完（或 ViewModel 直接
                     // 提前返回、忙碌位从未变过）时本 effect 不会重跑，对话框就永远关不上了。

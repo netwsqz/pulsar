@@ -299,6 +299,24 @@ class LibraryCache(
 >
 > 后半（详情页 / 设置页）留给 #15。
 
+> **后半已完成 2026-11-12（#15）**：详情 / 搜索 / 设置 / 已下载列表 / 回收站各页只收自己的 slice，
+> 不再收整个 `JellyfinUiState`。
+> - `AlbumDetailContent` → `SessionState`（`serverUrl` / 加载 / 错误）。
+> - `PlaylistDetailContent` → `LibraryState` + `SessionState`；`isOffline` 不再由调用方传参，页内读
+>   `library.isOffline`（调用点少一处旧读法）。
+> - `LibraryGroupDetailContent` → `LibraryState`（摘要里的服务端口径 `albums`）+ `SessionState`。
+> - `SearchContent` → `SearchState`（`query` / `isSearching`）+ `SessionState`（错误通道）；
+>   `results` 仍由调用方按离线策略滤好后传入。重试回调改读 `state.library.search.query`。
+> - `SettingsContent` / `RecycleBinSection` → `FileOpsState`；`SettingsContent` 从此不再收 `state`。
+> - `CachedCopiesContent` → `DownloadsState`（`cachedAlbums` / `isDeleting`）。
+> - `DownloadsSection` 本就从 `DownloadLibrary.state` 读（#7），无旧读法，未改动。
+> - 三态条件与改前逐字一致，零行为变化；`MainActivity` 旧兼容读点 **118 → 75**（-43）。
+> - 剩余 75 处全归 #16：`MusicLibraryScreen` 父层 29、`DiscoverContent` 17、`TrackFileOpsDialogs` 13、
+>   `LoginScreen` 9、`PulsarApp` 7。`TrackFileOpsDialogs`（删除 / 改名对话框）仍读旧字段，
+>   与父层一起留给 #16——这次只迁 issue 列出的八块。
+> - 未新增单测：项目没有 Compose 测试设施，纯类型层迁移、无逻辑变化（`CLAUDE.md` 口径）。
+> - 全量单测 71 个类 / 878 项全绿，`assembleDebug` 通过。真机项见 issue #15 的「待真机确认」评论。
+
 按 Step 0 的排序，一次迁 2–3 个：
 1. `AlbumsContent` / `PlaylistsContent` / `LibraryGroupsContent`（只读 `isLoading` / `error` / 列表）。
 2. `TracksContent` / `DiscoverContent`（读 loading / error / 离线相关）。

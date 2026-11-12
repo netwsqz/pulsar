@@ -22,7 +22,6 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
-import com.example.pulsar.state.SessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -204,34 +203,10 @@ class JellyfinViewModel(
         clearLyrics()
         val generation = ++loginGeneration
         _state.value = current.copy(
-            isLoading = true,
-            errorMessage = null,
-            password = "",
-            tracks = null,
-            discoverAlbums = null,
-            recentlyPlayed = null,
-            mostPlayed = null,
-            recentlyAdded = null,
-            discoverFailedSections = emptySet(),
-            isDiscoverRefreshing = false,
-            albums = null,
-            albumTracks = null,
-            selectedAlbum = null,
-            playlists = null,
-            playlistTracks = null,
-            selectedPlaylist = null,
-            searchQuery = "",
-            searchResults = null,
-            isSearching = false,
-            isFileOpsBusy = false,
-            fileOpsMessage = null,
-            isDeletingDownload = false,
-            downloadDeleteMessage = null,
-            isOffline = false,
-            cachedTrackIds = null,
-            cachedAlbums = null,
-            isOfflineSearch = false,
-            multiSelectIds = emptySet()
+            session = current.session.copy(isLoading = true, errorMessage = null, password = ""),
+            // 旧账号的界面数据由 slice 自己清（#13）：改前这里手抄了 25 个字段，新增字段就漏。
+            library = current.library.cleared(),
+            downloads = current.downloads.cleared(),
         )
         loginJob = viewModelScope.launch(dispatcher) {
             try {
@@ -369,28 +344,39 @@ class JellyfinViewModel(
     }
 
     fun signOut() {
-        loginGeneration++
-        loginJob?.cancel()
-        loginJob = null
-        stopOfflineRetry()
-        invalidateSessionRequests()
-        session = null
-        // 退出登录只清「可见性」，字节与统计不动（ADR-0007）。
-        downloadLibrary?.setAccount(null)
-        dataSource = null
-        authorizationSink.activeAuthorization = null
-        _playbackTracks.value = emptyMap()
-        _currentTrack.value = null
-        clearLyrics()
-        // 退回登录表单：只清「这次会话」的东西。地址历史是本地数据、跟账号无关，留着——
-        // 否则 _state.value = JellyfinUiState() 会把它一起清空，登录页的地址下拉就没了。
-        _state.value = JellyfinUiState(session = SessionState(serverUrlHistory = _state.value.serverUrlHistory))
+        resetSession(keepLoginForm = false, errorMessage = null)
         // 主动退出只清快照（换账号不串曲库清单）。**下载不清**——那是用户主动存的
         // （ADR-0007 / 用户故事 16）；按账号隔离可见性归工单 08。清快照失败也不挡退出登录。
         viewModelScope.launch(dispatcher) {
             sessionStore.clear()
             clearLocalCopyAndSnapshot()
         }
+    }
+
+    /**
+     * 登出 / 会话过期共用的拆除（#13）：作废在途请求、断开会话与鉴权、清播放镜像与歌词，
+     * 再把状态交给组合根的 [JellyfinUiState.cleared]（三个 slice 各自清）。
+     *
+     * 两条路径的差别只剩 [keepLoginForm] / [errorMessage]（登录表单要不要预填），
+     * 以及调用方各自决定要不要清快照——「过期比登出少清几个字段」那类不一致从结构上没了。
+     */
+    private fun resetSession(keepLoginForm: Boolean, errorMessage: String?) {
+        loginGeneration++
+        loginJob?.cancel()
+        loginJob = null
+        // 内含 stopOfflineRetry()：探活属于这个会话，不能再跑。
+        invalidateSessionRequests()
+        session = null
+        // 退出/过期 = 暂时没人登录：可见性清空，字节与统计不动（ADR-0007）。
+        downloadLibrary?.setAccount(null)
+        dataSource = null
+        authorizationSink.activeAuthorization = null
+        _playbackTracks.value = emptyMap()
+        _currentTrack.value = null
+        clearLyrics()
+        // 退回登录表单：清什么由 slice 的 cleared() 决定，地址历史永远保留（本地数据，
+        // 跟账号无关）——否则登录页的地址下拉就没了。
+        _state.value = _state.value.cleared(keepLoginForm = keepLoginForm, errorMessage = errorMessage)
     }
 
     fun streamUrl(track: Track): String? {
@@ -1104,21 +1090,19 @@ class JellyfinViewModel(
      * 清掉——界面进对应分区时会照常重新拉一遍。
      */
     private suspend fun goOnline(tracks: List<Track>) {
-        _state.value = _state.value.copy(
-            isOffline = false,
-            cachedTrackIds = null,
-            isOfflineSearch = false,
-            errorMessage = null,
-            tracks = tracks,
-            albums = null,
-            discoverAlbums = null,
-            recentlyPlayed = null,
-            mostPlayed = null,
-            recentlyAdded = null,
-            discoverFailedSections = emptySet(),
-            isDiscoverRefreshing = false,
-            albumTracks = null
-        )
+        _state.value = _state.value.let { state ->
+            state.copy(
+                session = state.session.copy(errorMessage = null),
+                // 快照兜底的几屏清掉（#13），曲目用服务器的返回值替换（铁律 4）。
+                // 回在线是整页重来，刷新圈顺手收掉；markOnline 那条路不清它（#12：由 refreshDiscover 自己收）。
+                library = state.library.clearSnapshotBackedScreens().copy(
+                    tracks = tracks,
+                    isDiscoverRefreshing = false,
+                ),
+                // 离线可见性只对离线有意义：回在线后「能不能放」一律为是。
+                downloads = state.downloads.copy(visibleTrackIds = null),
+            )
+        }
         persistSnapshot()
         // 当前这次搜索是在快照里搜的：联网后用同样的词重新搜一遍（用户不用重打）。
         if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
@@ -1135,19 +1119,14 @@ class JellyfinViewModel(
      */
     private fun markOnline(): Boolean {
         stopOfflineRetry()
-        if (!_state.value.isOffline) return false
-        _state.value = _state.value.copy(
-            isOffline = false,
-            cachedTrackIds = null,
-            isOfflineSearch = false,
-            albums = null,
-            discoverAlbums = null,
-            recentlyPlayed = null,
-            mostPlayed = null,
-            recentlyAdded = null,
-            discoverFailedSections = emptySet(),
-            // 刷新圈不在这里收：它由 refreshDiscover 等到四路都落地才收（#12）。
-            albumTracks = null
+        val current = _state.value
+        if (!current.isOffline) return false
+        _state.value = current.copy(
+            // 快照来源的几屏清掉（幂等守卫据此重拉），离线标记一并落下。
+            // 刷新圈不在这里收：由 refreshDiscover 等到四路都落地才收（#12）。
+            library = current.library.clearSnapshotBackedScreens(),
+            // 离线可见性只对离线有意义：回在线后「能不能放」一律为是。
+            downloads = current.downloads.copy(visibleTrackIds = null),
         )
         return true
     }
@@ -1341,51 +1320,7 @@ class JellyfinViewModel(
      * 重登回来还在（ADR-0007）。
      */
     private fun expireSession() {
-        loginGeneration++
-        loginJob?.cancel()
-        loginJob = null
-        stopOfflineRetry()
-        invalidateSessionRequests()
-        session = null
-        // 会话过期 = 暂时没人登录：可见性清空，字节与统计不动（ADR-0007）。
-        downloadLibrary?.setAccount(null)
-        dataSource = null
-        authorizationSink.activeAuthorization = null
-        _playbackTracks.value = emptyMap()
-        _currentTrack.value = null
-        clearLyrics()
-        _state.value = _state.value.copy(
-            serverUrl = _state.value.serverUrl,
-            username = _state.value.username,
-            password = "",
-            isLoading = false,
-            errorMessage = "登录已失效，请重新登录",
-            tracks = null,
-            discoverAlbums = null,
-            recentlyPlayed = null,
-            mostPlayed = null,
-            recentlyAdded = null,
-            discoverFailedSections = emptySet(),
-            isDiscoverRefreshing = false,
-            albums = null,
-            albumTracks = null,
-            selectedAlbum = null,
-            playlists = null,
-            playlistTracks = null,
-            selectedPlaylist = null,
-            searchQuery = "",
-            searchResults = null,
-            isSearching = false,
-            isFileOpsBusy = false,
-            fileOpsMessage = null,
-            isDeletingDownload = false,
-            downloadDeleteMessage = null,
-            isOffline = false,
-            cachedTrackIds = null,
-            cachedAlbums = null,
-            isOfflineSearch = false,
-            multiSelectIds = emptySet()
-        )
+        resetSession(keepLoginForm = true, errorMessage = "登录已失效，请重新登录")
         viewModelScope.launch(dispatcher) { sessionStore.clear() }
     }
 

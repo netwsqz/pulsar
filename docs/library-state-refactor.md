@@ -252,6 +252,32 @@ class LibraryCache(
 
 ### Step 3 — reset 语义收进 state module
 
+> **已完成 2026-11-12（#13）**：三个 slice 各自拥有清理方法，`JellyfinUiState` 加组合入口
+> `cleared(keepLoginForm, errorMessage)`；`signOut` / `expireSession` 共用一条 `resetSession()`
+> 拆除路径，状态侧只剩一行调用。与原文的差异：
+> - **命名**：用 `cleared()` 而不是 `clear()` / `clearCaches()`——返回一份清好的新实例
+>   （slice 不可变），不是原地修改；`LibraryState.clearCaches()` 的「caches」也不准确
+>   （多选、文件操作提示不是缓存），所以用 `cleared()` + `clearSnapshotBackedScreens()`。
+> - **实现口径**：每个 `cleared()` 直接返回默认实例（`SessionState.cleared()` 保留
+>   `serverUrlHistory`，`keepLoginForm` 时另留 `serverUrl` / `username`）。约定
+>   **「字段默认值 = 已清」**，新增字段自动跟上，不需要改动清理代码。
+> - **`DownloadsState` 的界面字段照旧随登出 / 过期清**（与改前一致）。ADR-0007 的
+>   「下载不清」指**字节与名单**，它们归 `DownloadLibrary` / `MediaDownloads` / `DownloadLedger`，
+>   不在 `JellyfinUiState` 里，清理方法碰不到。这一条把 #11 留下的口径问号收掉了。
+> - **`expireSession` 现在与 `signOut` 完全同口径**：多清了 `historyEpoch` 与回收站字段
+>   （改前例外保留）。两者都是「这个会话看到的东西」，且回收站列表进设置页会重拉、
+>   `LibraryCache.invalidate()` 本就把历史版本号记为 -1，无副作用。
+> - **`login()` 也收进同一套**（原文没提）：发起新登录时旧账号的界面数据一律作废，
+>   改前手抄 25 个字段；现在 `library.cleared()` + `downloads.cleared()`。
+> - **恢复在线**：`goOnline` / `markOnline` 改为 `library.clearSnapshotBackedScreens()`
+>   （清六屏 + `discoverFailedSections` + `isOffline` + `isOfflineSearch`），
+>   `downloads.visibleTrackIds` 归零。`isDiscoverRefreshing` **不清**（#12：由 `refreshDiscover`
+>   自己收）；`goOnline` 保留原先「整页重来顺手收刷新圈」的行为。
+>
+> 新测试：`StateClearedTest`（6 项）——夹具覆盖每个 slice 的每个字段（反射递归），
+> 新增字段没进夹具会红；`JellyfinViewModelTest` 补 2 条集成测试（登出 / 过期分别清回默认）。
+> 全量单测 71 个类 / 878 项全绿（基线 870，新增 8 项）；`assembleDebug` 通过。
+
 1. `SessionState.clear()`：只清会话/表单/错误。
 2. `LibraryState.clearCaches()`：清曲库/发现/详情/搜索/多选/文件操作。
 3. `signOut()` / `expireSession()` 改为调这两个方法 + 保留 `serverUrlHistory`；不再手抄字段。

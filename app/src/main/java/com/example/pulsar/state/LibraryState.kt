@@ -15,9 +15,8 @@ import com.example.pulsar.domain.model.Track
  * - PC 伴生服务的界面状态（含回收站）→ [FileOpsState]；
  * - 下载派生（已下载集合、已下载专辑）→ [DownloadsState]，不在这里再存一份。
  *
- * 登出 / 会话过期会清掉这一块的大部分（#13 会把清理语义收进来）。**注意现状**：
- * `signOut` 重建整份 state（全清），而 `expireSession` 不清 [historyEpoch] 与 [FileOpsState]
- * 的回收站字段——与改前一致，#13 收口时再统一。**离线字段也在这里**：
+ * 登出 / 会话过期清掉整块（[cleared]，#13 起两条路径是同一份语义）；恢复在线只清
+ * 快照兜底的那几屏（[clearSnapshotBackedScreens]）。**离线字段也在这里**：
  * [isOffline] 说的是「曲库这份数据来自快照还是服务器」，不是会话凭据状态。
  */
 data class LibraryState(
@@ -73,7 +72,40 @@ data class LibraryState(
      * （用户故事 13）。全局共用：任意网络请求的 `Network` 错误都会触发它（ADR-0008）。
      */
     val isOffline: Boolean = false,
-)
+) {
+    /**
+     * 登出 / 会话过期：整块清空（曲库、发现、详情、搜索、多选、文件操作与回收站）。
+     *
+     * 整块都属于「这个会话看到的东西」，换会话不串数据。直接返回默认实例：
+     * 约定「字段默认值 = 已清」，新增字段自动跟上（`StateClearedTest` 用反射钉死）。
+     * 别改回逐字段 `copy(...)`——漏一个就会被上个账号的数据污染（#13）。
+     */
+    fun cleared(): LibraryState = LibraryState()
+
+    /**
+     * 恢复在线：清掉**快照兜底**的那几屏（#13）。它们来自本地曲库快照，不是最新的
+     * 服务器数据，留着会被幂等守卫当成「已加载」挡住重拉（铁律 4）。
+     *
+     * [tracks] 不在这里清：调用方用服务器返回值替换它（`goOnline`）；`markOnline`
+     * 场景下请求刚成功，曲目就是服务器的。
+     *
+     * 离线标记一并落下（[isOffline] / [SearchState.isOfflineSearch]）——回在线了它们不再成立。
+     *
+     * **[isDiscoverRefreshing] 不动**：刷新圈由 `refreshDiscover` 等四路都落地后自己收（#12），
+     * 在这里收会让它在数据还没回来时就消失。
+     */
+    fun clearSnapshotBackedScreens(): LibraryState = copy(
+        albums = null,
+        discoverAlbums = null,
+        recentlyPlayed = null,
+        mostPlayed = null,
+        recentlyAdded = null,
+        discoverFailedSections = emptySet(),
+        albumTracks = null,
+        isOffline = false,
+        search = search.copy(isOfflineSearch = false),
+    )
+}
 
 /**
  * 发现页三节服务器历史的标识（`docs/library-state-refactor.md` Step 2 / #12）：

@@ -7,9 +7,9 @@ package com.example.pulsar.state
  * 这一块的大部分（[com.example.pulsar.JellyfinUiState] 的旧字段读法仍可用，见兼容层）；
  * [serverUrl] / [username] / [serverUrlHistory] 按现状保留——过期时预填登录表单，退出时保留地址历史。
  *
- * 注意 [isLoading] / [errorMessage] 目前**仍然共用**：登录与曲库加载都写同一个 `isLoading`，
- * 登录错误与曲库错误都写同一个 `errorMessage`。按 D5 拆成类型化错误、按 D4 给每节独立加载态
- * 是 #12 / #13 的事，这一步只搬位置，不改语义。
+ * 注意 [isLoading] / [errorMessage] 目前**仍然共用**：登录与曲库加载都写同一个 `isLoading`
+ * （#12 改成按在途节计数，但仍是单一通道），登录错误与曲库错误都写同一个 `errorMessage`。
+ * 按 D5 拆成类型化错误仍未做（#12 / #13 都没碰它）。
  */
 data class SessionState(
     val serverUrl: String = "",
@@ -29,4 +29,21 @@ data class SessionState(
     val isRestoring: Boolean = false,
     /** 错误通道（登录失败 / 曲库加载失败 / 离线提示共用）。D5 会把它拆成各 slice 的类型化错误。 */
     val errorMessage: String? = null,
-)
+) {
+    /**
+     * 登出 / 会话过期：清登录表单、忙碌位与错误（#13）。
+     *
+     * - **[serverUrlHistory] 永远保留**：那是本地数据、跟账号无关，清掉登录页的地址下拉就没了。
+     * - [keepLoginForm] = true（会话过期）时保留 [serverUrl] / [username]：用户面对的
+     *   不是一张空白表单，只需补密码即可重试；登出则一并清空。
+     *
+     * **实现口径：直接构造默认实例，只挑要保留的字段。** 约定「字段默认值 = 已清」，
+     * 所以给本 slice 新增字段会自动跟上，不会漏清（`StateClearedTest` 用反射钉死）。
+     * 别改回逐字段 `copy(...)`——那是这次要消灭的东西。
+     */
+    fun cleared(keepLoginForm: Boolean = false): SessionState = SessionState(
+        serverUrl = if (keepLoginForm) serverUrl else "",
+        serverUrlHistory = serverUrlHistory,
+        username = if (keepLoginForm) username else "",
+    )
+}

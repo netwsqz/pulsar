@@ -15,9 +15,9 @@ import com.example.pulsar.state.SessionState
  *
  * | slice | 装什么 | 登出 / 过期 |
  * |---|---|---|
- * | [session] | 登录表单、恢复会话、错误通道 | 清大部分（`serverUrl` / `username` / 地址历史按现状保留） |
- * | [library] | 曲库、发现、详情、搜索、多选、文件操作、离线可见性 | 清大部分（`historyEpoch` 与回收站字段目前不清，与改前一致） |
- * | [downloads] | 下载派生的界面状态 | **会重置**（与改前一致）——ADR-0007 的「不清」说的是**字节与名单**，不是这里的 UI 字段 |
+ * | [session] | 登录表单、恢复会话、错误通道 | [SessionState.cleared]：登出全清；过期保留 `serverUrl` / `username`。地址历史永远保留 |
+ * | [library] | 曲库、发现、详情、搜索、多选、文件操作、离线可见性 | [LibraryState.cleared]：整块清空 |
+ * | [downloads] | 下载派生的界面状态 | [DownloadsState.cleared]：只清界面字段——ADR-0007 的「不清」说的是**字节与名单**，不是这里的 UI 字段 |
  *
  * **迁移期兼容层**：原来 36 个顶层字段的**读法**全部保留为只读属性（下面这一节），
  * 写法则走本类底部的兼容 `copy(...)`（同名参数，落到对应 slice）。这样屏幕代码一行都不用改，
@@ -81,6 +81,22 @@ data class JellyfinUiState(
     val cachedAlbums: List<CachedAlbum>? = downloads.cachedAlbums
     val isDeletingDownload: Boolean = downloads.isDeleting
     val downloadDeleteMessage: String? = downloads.deleteMessage
+
+    // ── reset 语义（#13）────────────────────────────────────────────────
+
+    /**
+     * 登出 / 会话过期：三个 slice 一起收进各自 slice 的 `cleared()`，不再手抄字段清单。
+     *
+     * 两条路径共用本方法（只是 [keepLoginForm] 与 [errorMessage] 不同），所以「过期比登出少清
+     * 几个字段」那类不一致不会再出现。给 slice 新增字段会自动跟上——约定是「字段默认值 = 已清」。
+     *
+     * [errorMessage] 落在 [SessionState]：它是登录与曲库共用的错误通道（#11 / #12 口径未变）。
+     */
+    fun cleared(keepLoginForm: Boolean = false, errorMessage: String? = null): JellyfinUiState = JellyfinUiState(
+        session = session.cleared(keepLoginForm).copy(errorMessage = errorMessage),
+        library = library.cleared(),
+        downloads = downloads.cleared(),
+    )
 
     // ── 兼容层 · 旧字段写法（#11 加，#16 删）────────────────────────────
     // 与 data class 自动生成的 copy(session, library, downloads) 并存：参数名不重叠，

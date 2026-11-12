@@ -13,9 +13,8 @@ import com.example.pulsar.CachedAlbum
  * （`DownloadSnapshot.visibleTrackIds`），一个真相只允许有一处算法。这一步只搬位置、不换来源，
  * 所以先原样留在这里；接线那张票会把它们换成内嵌 `DownloadSnapshot` 后删除。
  *
- * ⚠️ 登出 / 会话过期**会重置本 slice 的界面字段**（与改前一致：`signOut` 重建整份 state，
- * `expireSession` 显式清掉这几个字段）。ADR-0007 的「下载不清」说的是**字节与名单**，
- * 不是这里的界面状态——别把两条混了。#13 收口清理语义时再统一口径。
+ * ⚠️ 登出 / 会话过期**会重置本 slice 的界面字段**（[cleared]）。ADR-0007 的「下载不清」
+ * 说的是**字节与名单**，不是这里的界面状态——别把两条混了。
  */
 data class DownloadsState(
     /**
@@ -37,4 +36,15 @@ data class DownloadsState(
      * `JellyfinViewModel.dismissDownloadDeleteMessage` 清掉，避免转屏/返回后再弹一次。
      */
     val deleteMessage: String? = null,
-)
+) {
+    /**
+     * 登出 / 会话过期：清掉本 slice 的**界面字段**（#13）。
+     *
+     * 都是账号作用域（可见性、已下载列表）或瞬时状态（删除进度、提示），会话结束就不该留。
+     * **下载字节与名单不在这里**：它们由 `DownloadLibrary` / `MediaDownloads` / `DownloadLedger`
+     * 管着，本方法碰不到，也绝不能碰（ADR-0007）。
+     *
+     * 直接返回默认实例：约定「字段默认值 = 已清」，新增字段自动跟上（`StateClearedTest` 钉死）。
+     */
+    fun cleared(): DownloadsState = DownloadsState()
+}

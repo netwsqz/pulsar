@@ -21,7 +21,9 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.LibrarySectionKey
+import com.example.pulsar.state.LibraryState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
@@ -2263,6 +2265,77 @@ class JellyfinViewModelTest {
         gate.complete(Unit)
         advanceUntilIdle()
         assertEquals(listOf(album), viewModel.state.value.albums)
+    }
+
+    // ── 工单 13：登出 / 过期 / 回在线的清理语义收在 slice 上 ────────────────
+
+    @Test
+    fun `退出登录把三个 slice 清回默认，地址历史保留`() = runTest {
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(track))
+        }
+        val history = FakeServerUrlHistory()
+        val viewModel = createViewModel(FakeSessionRepository(null), api, serverUrlHistory = history)
+        advanceUntilIdle()
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.enterMultiSelect(track.id)
+        advanceUntilIdle()
+        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+        assertEquals(setOf(track.id), viewModel.state.value.multiSelectIds)
+
+        viewModel.signOut()
+        advanceUntilIdle()
+
+        // 曲库与下载界面字段一起清（新增字段由 slice 的 cleared() 自动跟上）
+        assertEquals(LibraryState(), viewModel.state.value.library)
+        assertEquals(DownloadsState(), viewModel.state.value.downloads)
+        // 登出只清会话与表单；地址历史是本地数据，留着
+        assertEquals("", viewModel.state.value.serverUrl)
+        assertEquals("", viewModel.state.value.username)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+    }
+
+    @Test
+    fun `会话过期与登出清同一份状态，连版本号与回收站一起清`() = runTest {
+        val recycleFile = LibraryRecycleFile(relPath = "a.flac", size = 1)
+        val fileOps = FakeLibraryFilesApi(
+            recycleResult = Result.success(LibraryRecycleResponse(files = listOf(recycleFile)))
+        )
+        val api = FakeJellyfinApi(tracks = listOf(track)).apply {
+            recentlyPlayedResult = Result.success(listOf(track))
+            albumsError = JellyfinError.Unauthorized()
+        }
+        val viewModel = createViewModel(
+            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            api,
+            libraryFilesFactory = { fileOps }
+        )
+        advanceUntilIdle()
+        viewModel.loadRecentlyPlayed()
+        viewModel.loadRecycle()
+        advanceUntilIdle()
+        viewModel.onMediaItemTransition(MediaItem.Builder().setMediaId(track.id).build())
+        // 改前过期不清这两个：版本号留着、回收站列表留着——同一个「会话结束」却清法不同
+        assertEquals(1, viewModel.state.value.historyEpoch)
+        assertEquals(listOf(recycleFile), viewModel.state.value.recycleFiles)
+
+        // 401 → 会话过期
+        viewModel.loadAlbums()
+        advanceUntilIdle()
+
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        assertEquals(LibraryState(), viewModel.state.value.library)
+        assertEquals(DownloadsState(), viewModel.state.value.downloads)
+        // 过期保留表单（用户只需重填密码），地址历史不动
+        assertEquals("https://server.test", viewModel.state.value.serverUrl)
+        assertEquals("user", viewModel.state.value.username)
+        assertEquals("", viewModel.state.value.password)
     }
 
     private fun TestScope.createViewModelWithFileOps(

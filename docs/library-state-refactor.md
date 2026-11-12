@@ -288,6 +288,17 @@ class LibraryCache(
 
 ### Step 4 — 屏幕逐个迁到 slice
 
+> **前半已完成 2026-11-12（#14）**：四个列表页只收自己需要的 slice，不再收整个 `JellyfinUiState`。
+> - `AlbumsContent` / `LibraryGroupsContent` → `SessionState`（加载 / 错误通道）；列表仍由调用方按离线策略滤好后传入。
+> - `PlaylistsContent` → `LibraryState`（`playlists` / `isOffline`）+ `SessionState`。
+> - `TracksContent` → `LibraryState`（`tracks` 判断骨架 vs 空态）；可见列表仍由调用方传入。
+> - 三态条件与改前逐字一致，零行为变化；`MainActivity` 旧兼容读点 **130 → 118**（-12）。
+> - **`TracksContent` 仍没有错误分支**（原文 §3 的已知缺口），留给页面骨架工单 #25 补，这次只换 slice。
+> - 未新增单测：项目没有 Compose 测试设施，UI 迁移靠编译 + 真机（`CLAUDE.md` 口径）。
+> - 剩余读点归 #15（详情 / 设置 / 搜索 / 已缓存 / 回收站）与 #16（父层与登录页，以及删兼容层）。
+>
+> 后半（详情页 / 设置页）留给 #15。
+
 按 Step 0 的排序，一次迁 2–3 个：
 1. `AlbumsContent` / `PlaylistsContent` / `LibraryGroupsContent`（只读 `isLoading` / `error` / 列表）。
 2. `TracksContent` / `DiscoverContent`（读 loading / error / 离线相关）。

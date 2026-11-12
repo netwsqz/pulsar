@@ -39,6 +39,8 @@ import com.example.pulsar.offline.OfflineSearchNotice
 import com.example.pulsar.offline.message
 import com.example.pulsar.offline.offlineView
 import com.example.pulsar.state.LibrarySectionKey
+import com.example.pulsar.state.LibraryState
+import com.example.pulsar.state.SessionState
 import android.content.ComponentName
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -482,10 +484,13 @@ private fun OfflineNoticeText(text: String, modifier: Modifier = Modifier) {
  * 艺术家列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
  * 行语言沿用 Auxio 列表项：封面 + 组名 + 「N 张专辑」副信息。
  * 封面取组内第一张专辑的封面——服务端没给艺术家单独的图。
+ *
+ * 只收自己需要的 slice（#14）：列表由调用方按离线策略滤好后传入，本页只读
+ * [SessionState] 的加载 / 错误通道，不再收整个 `JellyfinUiState`。
  */
 @Composable
 private fun LibraryGroupsContent(
-    state: JellyfinUiState,
+    session: SessionState,
     albums: List<Album>?,
     title: String,
     offlineNotice: String?,
@@ -510,8 +515,8 @@ private fun LibraryGroupsContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
-                albums == null && state.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                albums == null && session.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
+                albums == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
                 groups.isEmpty() -> EmptyState(
                     if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无艺术家"
                 )
@@ -1129,7 +1134,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Tracks -> TracksContent(
-                        state = state,
+                        library = state.library,
                         tracks = tracks,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
@@ -1142,7 +1147,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Albums -> AlbumsContent(
-                        state = state,
+                        session = state.session,
                         albums = visible.albums,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
@@ -1151,14 +1156,15 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Playlists -> PlaylistsContent(
-                        state = state,
+                        library = state.library,
+                        session = state.session,
                         onOpenPlaylist = openPlaylist,
                         coverFor = viewModel::playlistCover,
                         onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Artists -> LibraryGroupsContent(
-                        state = state,
+                        session = state.session,
                         albums = visible.albums,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
@@ -1724,9 +1730,19 @@ private fun glassChipBorder() = BorderStroke(
     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
 )
 
+/**
+ * 歌曲列表页：标题 + 「选择手机里的音频」入口 + 三态（骨架 / 空 / 内容）。
+ *
+ * 只收自己需要的 slice（#14）：[library] 只用来判断「曲库拉到了没有」（骨架 vs 空态），
+ * [tracks] 是调用方按离线策略滤好后的可见列表——两者缺一不可：离线且一首都没下载时
+ * `library.tracks` 非 null 但 `tracks` 为空，要给空态而不是骨架。
+ *
+ * 本页**没有错误分支**是已知缺口（`TracksContent` 漏了 error，spec §3），由页面骨架收口
+ * 的工单（#25）补；这次只换 slice，不改行为。
+ */
 @Composable
 private fun TracksContent(
-    state: JellyfinUiState,
+    library: LibraryState,
     tracks: List<Track>,
     title: String,
     offlineNotice: String?,
@@ -1765,7 +1781,7 @@ private fun TracksContent(
         }
         // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
         // 离线且一首都没下载：专用空态（「曲库空了」和「离线只能看下载」是两回事）。
-        if (state.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) {
+        if (library.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) {
             item {
                 EmptyState(
                     if (offlineNotice != null) OfflineEmpty.Tracks.message() else "暂无音乐"
@@ -3014,9 +3030,14 @@ private fun AlbumGridSkeleton(modifier: Modifier = Modifier, cards: Int = 6) {
     }
 }
 
+/** 专辑列表页：两列网格 + 三态（骨架 / 错误 / 空）。
+ *
+ * 只收自己需要的 slice（#14）：列表由调用方按离线策略滤好后传入，本页只读
+ * [SessionState] 的加载 / 错误通道，不再收整个 `JellyfinUiState`。
+ */
 @Composable
 private fun AlbumsContent(
-    state: JellyfinUiState,
+    session: SessionState,
     albums: List<Album>?,
     offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
@@ -3041,7 +3062,7 @@ private fun AlbumsContent(
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                albums == null && state.isLoading -> {
+                albums == null && session.isLoading -> {
                     // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
                     // 骨架在 Box 里从**顶部**开始排（默认 TopStart），不加居中——居中会让它加载完瞬移。
                     // 底部留白与真实网格一致，最后一行不会钻到迷你播放条下面。
@@ -3049,7 +3070,7 @@ private fun AlbumsContent(
                         modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.BottomContentInset)
                     )
                 }
-                albums == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                albums == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
                 albums.orEmpty().isEmpty() -> EmptyState(
                     if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无专辑"
                 )
@@ -3361,16 +3382,21 @@ private fun AlbumDetailContent(
 }
 
 /** 播放列表页（工单 05）：按 Auxio 的列表语言呈现，与歌曲页 / 搜索页同构——
- * 封面位 + 名称 + 「N 首」+ 分隔线，不再用卡片网格（封面网格只留给专辑）。 */
+ * 封面位 + 名称 + 「N 首」+ 分隔线，不再用卡片网格（封面网格只留给专辑）。
+ *
+ * 只收自己需要的 slice（#14）：列表与离线标记来自 [LibraryState]，加载 / 错误通道来自
+ * [SessionState]，不再收整个 `JellyfinUiState`。
+ */
 @Composable
 private fun PlaylistsContent(
-    state: JellyfinUiState,
+    library: LibraryState,
+    session: SessionState,
     onOpenPlaylist: (Playlist) -> Unit,
     coverFor: (Playlist) -> JellyfinRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val playlists = state.playlists
+    val playlists = library.playlists
     val playlistList = playlists.orEmpty()
     Column(
         modifier.fillMaxSize()
@@ -3386,11 +3412,11 @@ private fun PlaylistsContent(
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
             when {
                 // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
-                playlists == null && state.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
+                playlists == null && session.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
                 // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
                 // 已加载的照常显示——断网不该把现成的列表藏掉。
-                playlists == null && state.isOffline -> EmptyState("播放列表需要联网才能查看")
-                playlists == null && state.errorMessage != null -> ErrorState(state.errorMessage, onRetry = onRetry)
+                playlists == null && library.isOffline -> EmptyState("播放列表需要联网才能查看")
+                playlists == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
                 playlistList.isEmpty() -> EmptyState("暂无播放列表")
                 else -> {
                     LazyColumn(

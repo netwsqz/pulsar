@@ -1,6 +1,6 @@
 # Triage 标签
 
-各 skill 用五个规范 triage 角色说话。本文件把这些角色映射到本仓库实际使用的标签字符串。
+各 skill 用五个规范 triage 角色说话。本文件把这些角色映射到本仓库实际使用的标签字符串（均已创建）。
 
 | mattpocock/skills 里的标签 | 本仓库 tracker 里的标签 | 含义 |
 | --- | --- | --- |
@@ -10,8 +10,4 @@
 | `ready-for-human` | `ready-for-human` | 需要人来实现 |
 | `wontfix`         | `wontfix`         | 不会处理 |
 
-当某个 skill 提到某个角色（例如「打上 AFK-ready 的 triage 标签」）时，使用本表对应行的标签字符串。
-
-注意：本仓库用 GitHub Issues（见 `issue-tracker.md`），这些字符串就是仓库里的 label 名。首次建单前用 `gh label create <name>` 建好这五个标签（GitHub 不会自动创建，`--add-label` 遇到不存在的标签会报错）。
-
-想换命名就改右列。
+当某个 skill 提到某个角色（例如「打上 AFK-ready 的 triage 标签」）时，使用本表对应行的标签字符串。想换命名就改右列。

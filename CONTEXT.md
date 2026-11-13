@@ -10,11 +10,9 @@
 
 ### 曲库（Library）
 
-`E:\file\Te_Music`。PC 上的音乐目录，**Jellyfin 的音乐库指向它**，实时监控开着，落盘即入库。
+`E:\file\Te_Music`。PC 上的音乐目录，**Jellyfin 的音乐库指向它**，实时监控开着，落盘即入库。结构是三层：`歌手\专辑\曲目`。
 
-结构是三层：`歌手\专辑\曲目`。823 个文件里 597 个是音频（577 FLAC / 19 OGG / 1 MP3，共 20.76 GB），其余 226 个是 Jellyfin 自己生成的 `.nfo`。
-
-**库里没有 `.lrc`、没有任何本地封面图。** 歌词和封面只能靠在线刮削或音频内嵌标签。
+**库里没有 `.lrc`、没有任何本地封面图。** 歌词和封面只能靠在线刮削或音频内嵌标签。文件数以 `server/library_index.py` 的实时结果为准，别引用旧快照。
 
 ### 回收站（Recycle bin）
 
@@ -40,13 +38,9 @@
 
 ### 曲库索引（Library index）
 
-`server/library_index.py`。PC 服务在内存里维护的「库里有哪些歌」，用来回答「这首歌是不是已经有了」（去重功能）。
+`server/library_index.py`。PC 服务在内存里维护的「库里有哪些歌」，只用来回答「这首歌是不是已经有了」（去重）。**只读**——绝不写入、移动、删除曲库文件；文件管理在另一个模块（`library_files.py`）。判定钥匙是 `(歌名, 歌手)`，优先读内嵌标签，缺失才回退文件名。
 
-**只读**——绝不写入、移动、删除曲库里的任何文件。文件管理是另一个模块（`library_files.py`）。
-
-判定钥匙是 `(歌名, 歌手)`，优先读内嵌标签，标签缺失才回退解析文件名。
-
-**它的设计假设原本是「曲库只增不改」**——文件管理打破了这个假设，所以删/改之后必须立刻让它重扫，否则你删完一首歌、想重下同一首，会被自己的去重挡下来。
+**它的设计假设原本是「曲库只增不改」**——文件管理打破了这个假设，所以删/改之后必须立刻让它重扫，否则删完一首歌、想重下同一首，会被自己的去重挡下来。
 
 ### 文件操作密钥（File-ops key）
 
@@ -79,16 +73,15 @@ _Avoid_: 本地音乐（口语可以说，写文档/工单/代码时一律用「
 
 ### 下载（Download）
 
-**用户主动**把曲库里的歌存到手机上的一份副本。存在的唯一理由是**离线能听**——电脑关机、Jellyfin 连不上、出门没网时，下载过的歌照样能放。
+**用户主动**把曲库里的歌存到手机上的一份副本，唯一目的是**离线能听**——电脑关机、Jellyfin 连不上、出门没网时照样能放。
 
-- **只能手动触发**：专辑详情页 / 播放列表详情页的「下载」按钮。**App 绝不自动存音频**——听一首歌不会在手机上留下任何东西
-- **存了就不会自己消失**：没有自动淘汰、没有总量上限、没有「一键清空」。要腾空间只能一张专辑一张专辑地删
-- **存的是原文件**：不转码、不压缩——副本跟曲库里的那份一模一样
-- **只有完整的一份才算数**：下到一半的、被系统杀掉的，一律当作「没下载」（字节留着，再点一次下载会跳过已有部分补齐）
-- **退出登录不清**，切换账号也不清——但**别的账号看不见**（按服务器地址 + 用户 ID 隔离）。音频字节是共享的：两个账号下过同一首歌，谁删都算删
-- **不管走的什么网**：Wi-Fi 下直接下，蜂窝流量下点下载会弹一次确认
+- **只能手动触发**：专辑 / 播放列表详情页的「下载」按钮。**App 绝不自动存音频**——听一首歌不会在手机上留下任何东西
+- **存了就不会自己消失**：没有自动淘汰、总量上限或「一键清空」。要腾空间只能一张专辑一张专辑地删
+- **存的是原文件**：不转码、不压缩；**只有完整的一份才算数**（下到一半、被系统杀掉的都算「没下载」，字节留着，再点下载会补齐）
+- **退出登录不清**，切换账号也不清——但**别的账号看不见**（按服务器地址 + 用户 ID 隔离）。音频字节共享，谁删都算删
+- **不管走的什么网**：Wi-Fi 直接下，蜂窝流量下点下载会弹一次确认
 
-**和「QQ 音乐导入」不是一回事**：那个是从 QQ 音乐抓歌进**电脑**的曲库，这个是把**电脑**曲库里的歌存到**手机**。设置里两个入口名字必须分得开。
+**和「QQ 音乐导入」不是一回事**：那个是把 QQ 音乐的歌抓进**电脑**曲库，这个是把**电脑**曲库的歌存到**手机**。设置里两个入口名字必须分得开。
 
 _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 ADR-0007）
 
@@ -102,14 +95,10 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 ### 下载库（Download library）
 
-`download/DownloadLibrary.kt`。**「已下载」的唯一真相**：`已下载 = 字节完整 ∩ 当前账号名单`，
-交集只在 module 里算一次——界面和 ViewModel 都**不要再自己查字节或算交集**。
+`download/DownloadLibrary.kt`。**「已下载」的唯一真相**：`已下载 = 字节完整 ∩ 当前账号名单`，交集只在 module 里算一次——界面和 ViewModel 都**不要再自己查字节或算交集**。
 
-- 界面只认它：五态走 `stateFor(target)`，删除走 `delete(...)`，入队 / 取消走
-  `enqueue` / `cancel`，统计走 `refreshStats()`；不要再直接拿 `DownloadScheduler` 或 `MediaDownloads`
-- `DownloadSnapshot` 是它输出的快照：`completeKeys`（账号无关的共享字节）、
-  `visibleTrackIds`（当前账号可见的曲目 id）、`stats`（占用统计）、
-  `running`（调度器本次运行状态）
+- 界面只认它：五态走 `stateFor(target)`，删除走 `delete(...)`，入队 / 取消走 `enqueue` / `cancel`，统计走 `refreshStats()`；不要直接拿 `DownloadScheduler` 或 `MediaDownloads`
+- `DownloadSnapshot` 是它输出的快照：`completeKeys`（账号无关的共享字节）、`visibleTrackIds`（当前账号可见的曲目 id）、`stats`（占用统计）、`running`（调度器本次运行状态）
 
 ### 已下载列表（Downloaded view）
 
@@ -137,7 +126,7 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 - **输入 `OfflineInput`，输出 `OfflineView`**，不持有状态、不做 IO；界面只渲染它，不再自己拼 `isOffline && cachedTrackIds`
 - `downloadedTrackIds == null`（还没算出来）**不筛**；空集才是「一首都没下载」
-- 离线文案也由这里给**类型**，字面量只在 `OfflineNotice` / `OfflineEmpty` / `OfflineSearchNotice` 的 `message()` 里定义一次
+- 离线文案给**类型**，字面量只在 `OfflineNotice` / `OfflineEmpty` / `OfflineSearchNotice` 的 `message()` 里定义一次
 
 ## 服务与链路
 
@@ -194,15 +183,15 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 ### 播放会话（PlaybackSession）
 
-`playback/PlaybackSession.kt`。播放 UI 与 `PlaybackService` 之间唯一的门面：界面只读 `PlaybackUiState`（连接 / 进度 / 队列 / USB / 静音 / 播放模式）、只发 `PlaybackIntent`（点歌、入队、删除、重排、seek、切模式、USB 命令）；MediaController 连接与监听、500ms 轮询、自定义命令解析全部在会话内部。
+`playback/PlaybackSession.kt`。播放 UI 与 `PlaybackService` 之间唯一的门面：界面只读 `PlaybackUiState`（连接 / 进度 / 队列 / USB / 静音 / 播放模式），只发 `PlaybackIntent`（点歌、入队、删除、重排、seek、切模式、USB 命令）；MediaController 连接与监听、500ms 轮询、自定义命令解析全在会话内部。
 
-**队列真相在会话，不在两份 UI 本地副本**——迷你条与全屏页为拖拽保留的列表只是视觉副本，松手必须发 `Reorder` 让会话回写播放器。彻底消除这两份副本是 #28，本轮**没有**承诺完成。
+**队列真相在会话，不在两份 UI 本地副本**——迷你条与全屏页为拖拽保留的列表只是视觉副本，松手必须发 `Reorder` 让会话回写播放器。
 
 _Avoid_: 播放器控制器（界面侧旧叫法）——界面不再直接拿 `MediaController`。
 
 ### 播放 remote（PlaybackRemote）
 
-`playback/PlaybackRemote.kt`。会话对播放控制器的接缝：生产实现是 `MediaControllerPlaybackRemote`（包 `MediaController`），测试实现是手写 `FakePlaybackRemote`。接口只暴露会话真正需要的动作（play / pause / 队列写操作 / seek / 播放模式 / 快照 / 自定义命令），**不把 `MediaController` 本身漏出去**；因此会话单测不依赖 Android 运行时。
+`playback/PlaybackRemote.kt`。会话对播放控制器的接缝：生产实现是 `MediaControllerPlaybackRemote`（包 `MediaController`），测试实现是手写 `FakePlaybackRemote`。接口只暴露会话真正需要的动作（play / pause / 队列写操作 / seek / 播放模式 / 快照 / 自定义命令），**不把 `MediaController` 本身漏出去**；会话单测因此不依赖 Android 运行时。
 
 _Avoid_: 把 remote 当成全局控制器或单例——它是会话专用的端口。
 
@@ -210,7 +199,7 @@ _Avoid_: 把 remote 当成全局控制器或单例——它是会话专用的端
 
 ### 界面状态（JellyfinUiState）
 
-`JellyfinUiState.kt`。曲库界面的**组合根**：只有 `session` / `library` / `downloads` 三块 slice，组合后仍只对界面发一条 `StateFlow`（ADR-0010）。屏幕直接读写 slice（`state.library.xxx`），不读平铺字段——迁移期的兼容层已在 #16 删除。
+`JellyfinUiState.kt`。曲库界面的**组合根**：只有 `session` / `library` / `downloads` 三块 slice，组合后仍只对界面发一条 `StateFlow`（ADR-0010）。屏幕直接读写 slice（`state.library.xxx`），不读平铺字段。
 
 _Avoid_: 大 state、旧字段、兼容层——它们描述的是已删除的迁移形态。
 

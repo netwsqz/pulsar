@@ -63,6 +63,7 @@ import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQSongDto
+import com.example.pulsar.search.SearchActions
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.theme.Dimens
 
@@ -282,19 +283,13 @@ internal fun LazyListScope.qqSearchSection(
 /**
  * 搜索页上的两个 QQ 弹窗：状态仍由 [QQDownloadViewModel] 持有，弹窗跟着搜索结果走。
  * 不做全局弹窗——目前只有搜索页能发起下载。
+ *
+ * 回调不再一条条转发（#18）：收在 `SearchActions` 值对象里，与 `SearchContent` 共用同一份。
  */
 @Composable
 internal fun QQSearchDialogs(
     state: QQDownloadUiState,
-    onConfirmRedownload: () -> Unit,
-    onDismissRedownload: () -> Unit,
-    onToggleAlbumTrack: (String) -> Unit,
-    onSelectAllAlbumTracks: () -> Unit,
-    onClearAlbumSelection: () -> Unit,
-    onConfirmAlbumDownload: () -> Unit,
-    onRetryAlbumTracks: () -> Unit,
-    onDismissAlbumPicker: () -> Unit,
-    onRetryCredential: () -> Unit
+    actions: SearchActions
 ) {
     // 选曲弹窗：AlertDialog 自带独立窗口，不占列表布局。
     state.albumPicker?.let { picker ->
@@ -306,13 +301,13 @@ internal fun QQSearchDialogs(
             errorMessage = picker.errorMessage?.takeIf { !state.credentialExpired },
             credentialExpired = state.credentialExpired,
             isRetryingCredential = state.isRetryingCredential,
-            onRetryCredential = onRetryCredential,
-            onToggleTrack = onToggleAlbumTrack,
-            onSelectAll = onSelectAllAlbumTracks,
-            onClearSelection = onClearAlbumSelection,
-            onConfirm = onConfirmAlbumDownload,
-            onRetryLoad = onRetryAlbumTracks,
-            onDismiss = onDismissAlbumPicker,
+            onRetryCredential = actions.onRetryCredential,
+            onToggleTrack = actions.onToggleAlbumTrack,
+            onSelectAll = actions.onSelectAllAlbumTracks,
+            onClearSelection = actions.onClearAlbumSelection,
+            onConfirm = actions.onConfirmAlbumDownload,
+            onRetryLoad = actions.onRetryAlbumTracks,
+            onDismiss = actions.onDismissAlbumPicker,
             inLibraryMids = state.inLibraryMids,
             downloadingMids = state.activeDownloadingMids
         )
@@ -320,17 +315,17 @@ internal fun QQSearchDialogs(
     // 重下确认：已在库的曲目点了下载图标 → 问一句「仍要重新下载？」，确认才带 force 重发。
     state.redownloadPrompt?.let { song ->
         AlertDialog(
-            onDismissRequest = onDismissRedownload,
+            onDismissRequest = actions.onDismissRedownload,
             shape = RoundedCornerShape(Dimens.CornerExtraLarge),
             title = { Text("重新下载？") },
             text = {
                 Text("《${song.title}》已在曲库中，仍要重新下载一份吗？")
             },
             confirmButton = {
-                TextButton(onClick = onConfirmRedownload) { Text("重新下载") }
+                TextButton(onClick = actions.onConfirmRedownload) { Text("重新下载") }
             },
             dismissButton = {
-                TextButton(onClick = onDismissRedownload) { Text("取消") }
+                TextButton(onClick = actions.onDismissRedownload) { Text("取消") }
             }
         )
     }

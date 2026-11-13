@@ -18,7 +18,7 @@ internal data class OfflineInput(
     val isOffline: Boolean,
     /** 离线时能显示也能播的曲目 id。null = 还没算出来（不筛）；空集 = 确实一首都没下载。 */
     val downloadedTrackIds: Set<String>?,
-    /** 这轮曲库搜索结果是否来自本地快照（`JellyfinUiState.isOfflineSearch`）。 */
+    /** 这轮曲库搜索结果是否来自本地快照（`SearchState.isOfflineSearch`）。 */
     val isOfflineSearch: Boolean = false,
     val tracks: List<Track>?,
     val albums: List<Album>?,

@@ -378,9 +378,9 @@ private fun PulsarApp(
     // 当前播放曲目提到主题之上取：色板要跟着它变，登录页和主页面都得在同一套主题里。
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
     // QQ 下载服务与 Jellyfin 同机、端口固定 8900：登录成功后自动填地址，用户不用管。
-    LaunchedEffect(state.tracks != null, state.serverUrl) {
-        if (state.tracks != null && state.serverUrl.isNotBlank()) {
-            qqViewModel.autoFillServiceUrl(state.serverUrl)
+    LaunchedEffect(state.library.tracks != null, state.session.serverUrl) {
+        if (state.library.tracks != null && state.session.serverUrl.isNotBlank()) {
+            qqViewModel.autoFillServiceUrl(state.session.serverUrl)
         }
     }
     val darkTheme = isSystemInDarkTheme()
@@ -400,11 +400,13 @@ private fun PulsarApp(
         // 启动直接进主页面：恢复会话期间曲库页用灰色波浪骨架占位（页面框架、玻璃岛、
         // 迷你播放条都立刻可用），不另起一屏加载页。只有"确实没有可用会话"——本地没存
         // 过、或恢复失败——才落到登录表单。
-        if (!state.isRestoring && state.tracks == null) {
-            LoginScreen(state, viewModel)
+        if (!state.session.isRestoring && state.library.tracks == null) {
+            LoginScreen(session = state.session, viewModel = viewModel)
         } else {
             MusicLibraryScreen(
-                state = state,
+                library = state.library,
+                session = state.session,
+                downloads = state.downloads,
                 viewModel = viewModel,
                 controllerFuture = controllerFuture,
                 volumeKeys = volumeKeys,
@@ -761,7 +763,7 @@ private enum class SkeletonLeading { Cover, Number }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
+private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel) {
     Column(
         // edge-to-edge 后登录页同样要躲开状态栏 / 导航栏（工单 14）。
         modifier = Modifier
@@ -775,11 +777,11 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
             // 地址历史下拉：输过的地址点一下回填。没历史时就是个普通输入框。
             var historyExpanded by remember { mutableStateOf(false) }
             ExposedDropdownMenuBox(
-                expanded = historyExpanded && state.serverUrlHistory.isNotEmpty(),
+                expanded = historyExpanded && session.serverUrlHistory.isNotEmpty(),
                 onExpandedChange = { historyExpanded = it }
             ) {
                 OutlinedTextField(
-                    state.serverUrl,
+                    session.serverUrl,
                     viewModel::updateServerUrl,
                     Modifier.fillMaxWidth().menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable),
                     label = { Text("服务器地址") },
@@ -787,10 +789,10 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
                     singleLine = true
                 )
                 ExposedDropdownMenu(
-                    expanded = historyExpanded && state.serverUrlHistory.isNotEmpty(),
+                    expanded = historyExpanded && session.serverUrlHistory.isNotEmpty(),
                     onDismissRequest = { historyExpanded = false }
                 ) {
-                    state.serverUrlHistory.forEach { url ->
+                    session.serverUrlHistory.forEach { url ->
                         DropdownMenuItem(
                             text = { Text(url, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             onClick = {
@@ -801,15 +803,15 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
                     }
                 }
             }
-            OutlinedTextField(state.username, viewModel::updateUsername, Modifier.fillMaxWidth(), label = { Text("用户名") }, singleLine = true)
-            OutlinedTextField(state.password, viewModel::updatePassword, Modifier.fillMaxWidth(), label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
-            state.errorMessage?.let { ErrorState(it) }
+            OutlinedTextField(session.username, viewModel::updateUsername, Modifier.fillMaxWidth(), label = { Text("用户名") }, singleLine = true)
+            OutlinedTextField(session.password, viewModel::updatePassword, Modifier.fillMaxWidth(), label = { Text("密码") }, visualTransformation = PasswordVisualTransformation(), singleLine = true)
+            session.errorMessage?.let { ErrorState(it) }
             Button(
                 onClick = viewModel::login,
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !state.isLoading
+                enabled = !session.isLoading
             ) {
-                if (state.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
+                if (session.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
             }
     }
 }
@@ -817,7 +819,9 @@ private fun LoginScreen(state: JellyfinUiState, viewModel: JellyfinViewModel) {
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MusicLibraryScreen(
-    state: JellyfinUiState,
+    library: LibraryState,
+    session: SessionState,
+    downloads: DownloadsState,
     viewModel: JellyfinViewModel,
     controllerFuture: ListenableFuture<MediaController>?,
     volumeKeys: ForegroundVolumeKeys,
@@ -851,9 +855,15 @@ private fun MusicLibraryScreen(
     }
     // 本地导航：Discover / Tracks / Albums / AlbumDetail，不引入导航库，直接按 state 分支切换内容。
     // 主页默认显示发现页（随机专辑），其余分区通过顶部导航切换。
-    var section by remember { mutableStateOf<LibrarySection>(LibrarySection.Discover) }
-    // 详情页来源：从列表页还是搜索页进的详情，返回时回到对应来源。
-    var detailOrigin by remember { mutableStateOf<LibrarySection>(LibrarySection.Discover) }
+    // **rememberSaveable**：转屏 / Activity 重建后当前页签与详情页不丢（#16）。
+    var section by rememberSaveable(stateSaver = LibrarySectionSaver) {
+        mutableStateOf<LibrarySection>(LibrarySection.Discover)
+    }
+    // 详情页来源：从列表页还是搜索页进的详情，返回时回到对应来源。也要跨重建保留，
+    // 否则详情页转屏后再按返回会被送回发现页。
+    var detailOrigin by rememberSaveable(stateSaver = LibrarySectionSaver) {
+        mutableStateOf<LibrarySection>(LibrarySection.Discover)
+    }
     // 统一打开详情入口：打开前记下当前分区，返回键/侧滑能回到原页面（含搜索页）。
     val openAlbum: (Album) -> Unit = { album ->
         detailOrigin = section
@@ -877,20 +887,20 @@ private fun MusicLibraryScreen(
     // 不再自己组合 isOffline + cachedTrackIds。原始 state 一律不动，回在线自动恢复全量。
     val offline = offlineView(
         OfflineInput(
-            isOffline = state.isOffline,
-            downloadedTrackIds = state.cachedTrackIds,
-            isOfflineSearch = state.isOfflineSearch,
-            tracks = state.tracks,
-            albums = state.albums,
-            discoverAlbums = state.discoverAlbums,
-            albumTracks = state.albumTracks,
-            playlistTracks = state.playlistTracks,
-            searchResults = state.searchResults,
-            recentlyPlayed = state.recentlyPlayed,
-            mostPlayed = state.mostPlayed,
-            recentlyAdded = state.recentlyAdded,
-            tracksLoaded = state.tracks != null,
-            isLoading = state.isLoading
+            isOffline = library.isOffline,
+            downloadedTrackIds = downloads.visibleTrackIds,
+            isOfflineSearch = library.search.isOfflineSearch,
+            tracks = library.tracks,
+            albums = library.albums,
+            discoverAlbums = library.discoverAlbums,
+            albumTracks = library.albumTracks,
+            playlistTracks = library.playlistTracks,
+            searchResults = library.search.results,
+            recentlyPlayed = library.recentlyPlayed,
+            mostPlayed = library.mostPlayed,
+            recentlyAdded = library.recentlyAdded,
+            tracksLoaded = library.tracks != null,
+            isLoading = session.isLoading
         )
     )
     val visible = offline.visibleLibrary
@@ -915,8 +925,8 @@ private fun MusicLibraryScreen(
     }
     // 已下载列表的整张删除跑在 ViewModel 里（导航切走也不中断），结果经 state 送回来。
     // **先消费再弹**：留在 state 里的话，转屏重建页面会把同一条提示再弹一次。
-    LaunchedEffect(state.downloadDeleteMessage) {
-        val message = state.downloadDeleteMessage ?: return@LaunchedEffect
+    LaunchedEffect(downloads.deleteMessage) {
+        val message = downloads.deleteMessage ?: return@LaunchedEffect
         viewModel.dismissDownloadDeleteMessage()
         // 用页面级的 snackbarScope 弹：本 effect 的 key 刚变成 null 会重启，
         // 放在 effect 里直接 showSnackbar 会被立刻取消掉。
@@ -971,8 +981,8 @@ private fun MusicLibraryScreen(
     }
     // 多选模式：状态在 VM（跨页面结构），UI 只做转发。active = 非空集合。
     val multiSelect = MultiSelectState(
-        active = state.multiSelectIds.isNotEmpty(),
-        selected = state.multiSelectIds,
+        active = library.multiSelectIds.isNotEmpty(),
+        selected = library.multiSelectIds,
         onToggle = viewModel::toggleMultiSelect,
         onEnter = viewModel::enterMultiSelect
     )
@@ -981,14 +991,12 @@ private fun MusicLibraryScreen(
     val trackMenu = remember { TrackMenuState() }
     // 切页时收起菜单：菜单是常驻 overlay，不跟着行一起离开组合，得显式收。
     LaunchedEffect(section) { trackMenu.dismiss() }
-    // 多选模式下的「删除」按钮目标：勾选的全部曲目，进同一个确认框。
-    var batchDeleteTargets by remember { mutableStateOf<List<Track>>(emptyList()) }
     // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
     val currentListTracks: List<Track> = when (val s = section) {
         LibrarySection.Tracks, LibrarySection.Discover -> tracks
-        is LibrarySection.AlbumDetail -> state.albumTracks.orEmpty()
-        is LibrarySection.PlaylistDetail -> state.playlistTracks.orEmpty()
-        LibrarySection.Search -> state.searchResults?.tracks.orEmpty()
+        is LibrarySection.AlbumDetail -> library.albumTracks.orEmpty()
+        is LibrarySection.PlaylistDetail -> library.playlistTracks.orEmpty()
+        LibrarySection.Search -> library.search.results?.tracks.orEmpty()
         else -> emptyList()
     }
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
@@ -1024,12 +1032,12 @@ private fun MusicLibraryScreen(
         }
     }
     // 多选模式下返回键先退出多选，而不是退出页面（后声明的 BackHandler 优先响应）。
-    if (state.multiSelectIds.isNotEmpty()) {
+    if (library.multiSelectIds.isNotEmpty()) {
         BackHandler { viewModel.clearMultiSelect() }
     }
     // 切到别的页面自动退出多选，别让它跨页面残留。
     LaunchedEffect(section) {
-        if (state.multiSelectIds.isNotEmpty()) viewModel.clearMultiSelect()
+        if (library.multiSelectIds.isNotEmpty()) viewModel.clearMultiSelect()
     }
     // 全屏播放页开关：迷你播放条点击打开，收起按钮 / 返回键关闭。
     var showNowPlaying by remember { mutableStateOf(false) }
@@ -1075,7 +1083,7 @@ private fun MusicLibraryScreen(
         LocalTrackFileOps provides trackFileOps,
         LocalMultiSelect provides multiSelect,
         LocalCoverAccent provides coverAccentAnimated,
-        LocalOfflineActive provides state.isOffline,
+        LocalOfflineActive provides library.isOffline,
         // 长按菜单状态：TrackRow 上报锚点，菜单本体由本层渲染（工单 15）。
         LocalTrackMenu provides trackMenu
     ) {
@@ -1119,7 +1127,8 @@ private fun MusicLibraryScreen(
             ) { s ->
                 when (s) {
                     LibrarySection.Discover -> DiscoverContent(
-                        state = state,
+                        library = library,
+                        session = session,
                         tracks = tracks,
                         discoverAlbums = visible.discoverAlbums,
                         sections = offline.discover,
@@ -1138,7 +1147,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Tracks -> TracksContent(
-                        library = state.library,
+                        library = library,
                         tracks = tracks,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
@@ -1151,7 +1160,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Albums -> AlbumsContent(
-                        session = state.session,
+                        session = session,
                         albums = visible.albums,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
@@ -1160,15 +1169,15 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Playlists -> PlaylistsContent(
-                        library = state.library,
-                        session = state.session,
+                        library = library,
+                        session = session,
                         onOpenPlaylist = openPlaylist,
                         coverFor = viewModel::playlistCover,
                         onRetry = viewModel::loadPlaylists,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Artists -> LibraryGroupsContent(
-                        session = state.session,
+                        session = session,
                         albums = visible.albums,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
@@ -1181,8 +1190,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
-                        search = state.library.search,
-                        session = state.session,
+                        search = library.search,
+                        session = session,
                         results = visible.searchResults,
                         searchNotice = offline.searchNotice,
                         qqState = qqState,
@@ -1194,7 +1203,7 @@ private fun MusicLibraryScreen(
                         trackCoverFor = viewModel::trackCover,
                         albumCoverFor = viewModel::albumCover,
                         playlistCoverFor = viewModel::playlistCover,
-                        onRetry = { viewModel.updateSearchQuery(state.library.search.query) },
+                        onRetry = { viewModel.updateSearchQuery(library.search.query) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         onOpenAlbum = openAlbum,
@@ -1228,7 +1237,7 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
-                        session = state.session,
+                        session = session,
                         album = s.album,
                         albumTracks = visible.albumTracks,
                         offlineNotice = offlineNotice,
@@ -1244,8 +1253,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
-                        library = state.library,
-                        session = state.session,
+                        library = library,
+                        session = session,
                         playlist = s.playlist,
                         playlistTracks = visible.playlistTracks,
                         offlineNotice = offlineNotice,
@@ -1261,8 +1270,8 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
-                        library = state.library,
-                        session = state.session,
+                        library = library,
+                        session = session,
                         albums = visible.albums,
                         groupName = s.name,
                         offlineNotice = offlineNotice,
@@ -1272,13 +1281,13 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.CachedCopies -> CachedCopiesContent(
-                        downloads = state.downloads,
+                        downloads = downloads,
                         viewModel = viewModel,
                         albumCoverFor = viewModel::albumCover,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
-                        fileOps = state.library.fileOps,
+                        fileOps = library.fileOps,
                         viewModel = viewModel,
                         playback = playback,
                         onPlaybackIntent = playbackSession::dispatch,
@@ -1404,7 +1413,7 @@ private fun MusicLibraryScreen(
         )
         // 多选操作条（工单 04）：固定在玻璃岛下方，材质 / 圆角 / 高度与玻璃岛一致。
         // 顶部槽位只放导航与选择，底部槽位只放瞬时反馈（Snackbar / 音量胶囊）——互不打架。
-        if (state.multiSelectIds.isNotEmpty()) {
+        if (library.multiSelectIds.isNotEmpty()) {
             GlassPanel(
                 backdrop = backdrop,
                 // 与玻璃岛同 alpha：条下面压着滚动曲库，太透会看不清按钮文字。
@@ -1427,7 +1436,7 @@ private fun MusicLibraryScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        "已选 ${state.multiSelectIds.size} 首",
+                        "已选 ${library.multiSelectIds.size} 首",
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.weight(1f))
@@ -1443,9 +1452,9 @@ private fun MusicLibraryScreen(
                     TextButton(
                         onClick = {
                             // 同一个确认框：目标换成勾选的全部曲目
-                            deleteTarget = currentListTracks.filter { it.id in state.multiSelectIds }
+                            deleteTarget = currentListTracks.filter { it.id in library.multiSelectIds }
                         },
-                        enabled = state.multiSelectIds.isNotEmpty() && !state.isFileOpsBusy,
+                        enabled = library.multiSelectIds.isNotEmpty() && !library.fileOps.isBusy,
                         modifier = Modifier.height(Dimens.TouchTargetSmall)
                     ) { Text("删除", color = MaterialTheme.colorScheme.error) }
                 }
@@ -1468,7 +1477,7 @@ private fun MusicLibraryScreen(
     TrackFileOpsDialogs(
         renameTarget = renameTarget,
         deleteTarget = deleteTarget,
-        state = state,
+        fileOps = library.fileOps,
         onRename = { target, title, artist, album ->
             snackbarScope.launch {
                 if (viewModel.renameTrack(target, title, artist, album)) {
@@ -1492,7 +1501,7 @@ private fun MusicLibraryScreen(
                         playbackSession.dispatch(PlaybackIntent.RemoveFromQueue(targets.map { it.id }.toSet()))
                         deleteTarget = emptyList()
                         // 部分失败时 VM 已写 fileOpsMessage，一并带进提示
-                        val extra = viewModel.state.value.fileOpsMessage?.let { "；$it" }.orEmpty()
+                        val extra = viewModel.state.value.library.fileOps.message?.let { "；$it" }.orEmpty()
                         snackbarHostState.showSnackbar("已删除 $deletedCount 首$extra")
                     }
                 }
@@ -2276,7 +2285,7 @@ private class TrackMenuRequest(
 private fun TrackFileOpsDialogs(
     renameTarget: Track?,
     deleteTarget: List<Track>,
-    state: JellyfinUiState,
+    fileOps: FileOpsState,
     onRename: (Track, String?, String?, String?) -> Unit,
     onDelete: (List<Track>) -> Unit,
     onDismissRename: () -> Unit,
@@ -2288,7 +2297,7 @@ private fun TrackFileOpsDialogs(
         var artist by remember(target.id) { mutableStateOf(target.artist) }
         var album by remember(target.id) { mutableStateOf(target.album) }
         AlertDialog(
-            onDismissRequest = { if (!state.isFileOpsBusy) onDismissRename() },
+            onDismissRequest = { if (!fileOps.isBusy) onDismissRename() },
             // 键盘处理（spec §10）：Compose 的 Dialog 在 decorFitsSystemWindows = true（默认）时
             // 不设 adjustResize，IME 会直接盖住弹窗底部。关掉它 + 给弹窗面加 imePadding，
             // 键盘弹出时整块内容上移，确认 / 取消按钮始终留在键盘上方。
@@ -2306,10 +2315,10 @@ private fun TrackFileOpsDialogs(
                         .verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
                 ) {
-                    OutlinedTextField(title, { title = it }, label = { Text("歌名") }, singleLine = true, enabled = !state.isFileOpsBusy)
-                    OutlinedTextField(artist, { artist = it }, label = { Text("歌手") }, singleLine = true, enabled = !state.isFileOpsBusy)
-                    OutlinedTextField(album, { album = it }, label = { Text("专辑") }, singleLine = true, enabled = !state.isFileOpsBusy)
-                    state.fileOpsMessage?.let { message ->
+                    OutlinedTextField(title, { title = it }, label = { Text("歌名") }, singleLine = true, enabled = !fileOps.isBusy)
+                    OutlinedTextField(artist, { artist = it }, label = { Text("歌手") }, singleLine = true, enabled = !fileOps.isBusy)
+                    OutlinedTextField(album, { album = it }, label = { Text("专辑") }, singleLine = true, enabled = !fileOps.isBusy)
+                    fileOps.message?.let { message ->
                         Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
                     Text(
@@ -2322,7 +2331,7 @@ private fun TrackFileOpsDialogs(
             confirmButton = {
                 TextButton(
                     // 至少一个字段非空才允许提交；提交中禁用
-                    enabled = !state.isFileOpsBusy &&
+                    enabled = !fileOps.isBusy &&
                         (title.isNotBlank() || artist.isNotBlank() || album.isNotBlank()),
                     onClick = {
                         // 只发改过的字段：没动的传 null，服务端不碰那个标签
@@ -2333,16 +2342,16 @@ private fun TrackFileOpsDialogs(
                             album.trim().takeIf { it != target.album }
                         )
                     }
-                ) { Text(if (state.isFileOpsBusy) "保存中…" else "保存") }
+                ) { Text(if (fileOps.isBusy) "保存中…" else "保存") }
             },
             dismissButton = {
-                TextButton(enabled = !state.isFileOpsBusy, onClick = onDismissRename) { Text("取消") }
+                TextButton(enabled = !fileOps.isBusy, onClick = onDismissRename) { Text("取消") }
             }
         )
     }
     if (deleteTarget.isNotEmpty()) {
         AlertDialog(
-            onDismissRequest = { if (!state.isFileOpsBusy) onDismissDelete() },
+            onDismissRequest = { if (!fileOps.isBusy) onDismissDelete() },
             title = { Text(if (deleteTarget.size == 1) "删除这首歌？" else "删除这 ${deleteTarget.size} 首歌？") },
             text = {
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2353,22 +2362,22 @@ private fun TrackFileOpsDialogs(
                             "选中的 ${deleteTarget.size} 首将从电脑曲库移除，挪进回收站——可在设置页恢复。"
                         }
                     )
-                    state.fileOpsMessage?.let { message ->
+                    fileOps.message?.let { message ->
                         Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                     }
                 }
             },
             confirmButton = {
-                TextButton(enabled = !state.isFileOpsBusy, onClick = { onDelete(deleteTarget) }) {
+                TextButton(enabled = !fileOps.isBusy, onClick = { onDelete(deleteTarget) }) {
                     // 删除确认用 error 色（spec §10/§11）：与长按菜单里的删除项一致。
                     Text(
-                        if (state.isFileOpsBusy) "删除中…" else "删除",
+                        if (fileOps.isBusy) "删除中…" else "删除",
                         color = MaterialTheme.colorScheme.error
                     )
                 }
             },
             dismissButton = {
-                TextButton(enabled = !state.isFileOpsBusy, onClick = onDismissDelete) { Text("取消") }
+                TextButton(enabled = !fileOps.isBusy, onClick = onDismissDelete) { Text("取消") }
             }
         )
     }
@@ -2427,7 +2436,8 @@ private fun StaggeredMenuItem(
  */
 @Composable
 private fun DiscoverContent(
-    state: JellyfinUiState,
+    library: LibraryState,
+    session: SessionState,
     tracks: List<Track>,
     discoverAlbums: List<Album>?,
     sections: DiscoverSections,
@@ -2449,7 +2459,7 @@ private fun DiscoverContent(
     // 不用 rememberInfiniteTransition——它只要被组合就一直在跑动画帧（报告 #70，空转耗电），
     // 而且以前是加载一落 false 就把 rotate 摘掉，图标从当前角度瞬间回正（报告 #30）。
     val refreshRotation = remember { Animatable(0f) }
-    val refreshInFlight = state.isDiscoverRefreshing
+    val refreshInFlight = library.isDiscoverRefreshing
     LaunchedEffect(refreshInFlight) {
         if (refreshInFlight) {
             // 一直转到被取消（refreshInFlight 翻回 false）为止：把当前角度当成新起点，连续转圈不跳。
@@ -2476,7 +2486,7 @@ private fun DiscoverContent(
     // 这一页「哪几节显示 / 整页空态 / 空态说哪句」由离线策略算好（OfflineView），
     // 这里只负责画——不再自己组合 isOffline 与加载态（报告 #22）。
     //
-    // 三节历史骨架的显隐仍看 `state.isOffline`：隐藏规则是「离线就不显示」，
+    // 三节历史骨架的显隐仍看 `library.isOffline`：隐藏规则是「离线就不显示」，
     // 与已下载集合算没算出来无关（spec §7：这是组合条件，不走 VisibleLibrary 过滤）。
     // 「换一批」= 原下拉刷新的替代：随机专辑 + 三节播放历史一起重拉（ViewModel 里统一清字段
     // 放行幂等守卫），每日推荐是本地计算，递增变体编号立刻换一批。
@@ -2505,7 +2515,7 @@ private fun DiscoverContent(
                             picksVariant++
                             if (!isFiltering) onRefresh()
                         },
-                        enabled = !state.isDiscoverRefreshing
+                        enabled = !library.isDiscoverRefreshing
                     ) {
                         Icon(
                             Icons.Filled.Refresh,
@@ -2523,7 +2533,7 @@ private fun DiscoverContent(
         offlineNotice?.let { notice ->
             item(key = "offlineNotice") { OfflineNoticeText(notice) }
         }
-        if (state.tracks == null) {
+        if (library.tracks == null) {
             // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
             // 而这里是"还在连"，两者语义完全不同。
             item(key = "dailySkeleton") {
@@ -2567,14 +2577,14 @@ private fun DiscoverContent(
         }
         val albums = discoverAlbums
         when {
-            albums == null && state.isLoading -> {
+            albums == null && session.isLoading -> {
                 // 骨架屏：与历史 section 同一份横滑骨架（同宽同造型）。
                 item(key = "albumSkeleton") {
                     DiscoverStripSkeleton()
                 }
             }
-            albums == null && state.errorMessage != null -> {
-                item(key = "albumError") { ErrorState(state.errorMessage, onRetry = onRetry) }
+            albums == null && session.errorMessage != null -> {
+                item(key = "albumError") { ErrorState(session.errorMessage, onRetry = onRetry) }
             }
             albums.orEmpty().isEmpty() -> {
                 item(key = "albumEmpty") {
@@ -2606,12 +2616,12 @@ private fun DiscoverContent(
         // **离线时这三节整节不组合**（连骨架和空态都不给，spec §7）：数据留在 state 里，回在线自动回来。
         // 「要不要画」= 有内容（[DiscoverSections] 判的，报告 #22）或 该给骨架——两者都不成立才整节缺席。
         fun historyLoading(section: LibrarySectionKey) =
-            !state.isOffline && section !in state.discoverFailedSections
+            !library.isOffline && section !in library.discoverFailedSections
         if (sections.showRecentlyPlayed || historyLoading(LibrarySectionKey.RecentlyPlayed)) {
             item(key = "recentlyPlayed") {
                 DiscoverTrackStrip(
                     title = "最近播放",
-                    tracks = state.recentlyPlayed,
+                    tracks = library.recentlyPlayed,
                     showSkeleton = historyLoading(LibrarySectionKey.RecentlyPlayed),
                     trackCoverFor = trackCoverFor,
                     onPlayTrack = onPlayTrack,
@@ -2625,7 +2635,7 @@ private fun DiscoverContent(
             item(key = "mostPlayed") {
                 DiscoverTrackStrip(
                     title = "最常播放",
-                    tracks = state.mostPlayed,
+                    tracks = library.mostPlayed,
                     showSkeleton = historyLoading(LibrarySectionKey.MostPlayed),
                     trackCoverFor = trackCoverFor,
                     onPlayTrack = onPlayTrack,
@@ -2639,7 +2649,7 @@ private fun DiscoverContent(
             item(key = "recentlyAdded") {
                 DiscoverAlbumStrip(
                     title = "最近添加",
-                    albums = state.recentlyAdded,
+                    albums = library.recentlyAdded,
                     showSkeleton = historyLoading(LibrarySectionKey.RecentlyAdded),
                     onOpenAlbum = onOpenAlbum,
                     coverFor = coverFor
@@ -2649,9 +2659,9 @@ private fun DiscoverContent(
         // 三节历史全部失败、且确实没东西可显示：单节失败是静默缺席（不打扰），全挂了才给一次错误 + 重试。
         // 有旧数据时（后台静默刷新失败）不弹错误——屏幕上还好好的，弹错误反而吓人。
         // 离线时不判：那三节本来就不显示，谈不上"加载失败"。
-        if (!state.isOffline &&
-            state.discoverFailedSections.size == 3 &&
-            state.recentlyPlayed == null && state.mostPlayed == null && state.recentlyAdded == null
+        if (!library.isOffline &&
+            library.discoverFailedSections.size == 3 &&
+            library.recentlyPlayed == null && library.mostPlayed == null && library.recentlyAdded == null
         ) {
             item(key = "historyError") {
                 ErrorState("推荐内容暂时加载失败", onRetry = onRefresh)

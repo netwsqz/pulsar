@@ -71,7 +71,7 @@ internal fun DiscoverEmpty.message(): String = when (this) {
  * 各节的列表都用**过滤后**（离线时即 [VisibleLibrary] 派生出来的）的那一份：
  * 三节历史传原始 state 字段即可，反正离线时整节不画。
  *
- * [tracksLoaded] / [isLoading] 只为整页空态服务：还在加载或会话没恢复完（`state.tracks == null`）
+ * [tracksLoaded] / [isLoading] 只为整页空态服务：还在加载或会话没恢复完（`state.library.tracks == null`）
  * 时**不给**整页空态——那是"还在连"，不是"确实没有"。
  *
  * 旧的多列表入口（`dailyPicks: List<Track>`）已删（#10）：判据只需要「有没有曲目」，

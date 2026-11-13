@@ -1,6 +1,7 @@
 # LibraryState 重构执行计划
 
-> 状态：**待研究**。本文是 candidate 3（曲库加载与状态收成 LibraryState）的执行规格，不是 ADR。
+> 状态：**已完成（2026-11-13，#11–#16）**。本文是 candidate 3（曲库加载与状态收成 LibraryState）的执行规格，不是 ADR；
+> 架构决策见 ADR-0010，`QQDownloadViewModel` 的拆分仍是独立的 #31。
 > 相关：`docs/offline-policy-refactor.md`、`docs/download-library-refactor.md`、`docs/unified-search-refactor.md`。
 > 与 CLAUDE.md 的「单一 StateFlow<JellyfinUiState>」约定有冲突：本方案保留单一 StateFlow，但把内部拆成多个 state slice。动之前先确认这条约定可以改。
 
@@ -328,6 +329,28 @@ class LibraryCache(
 
 ### Step 5 — 删除死字段与旧兼容层
 
+> **已完成 2026-11-13（#16）**：迁移期兼容层整段删除，`JellyfinUiState` 只剩 `session` / `library` /
+> `downloads` 三个字段，界面与测试全部改读 slice。死字段逐项确认后处理：
+> - **`selectedAlbum` / `selectedPlaylist` 删除**。查证结论：生产 UI 读点为 0，导航真相一直是
+>   `LibrarySection.AlbumDetail(album)` / `PlaylistDetail(playlist)`；它们只服务「同 id 不重复拉」
+>   的幂等守卫与断网时的专辑曲目快照兜底。守卫状态搬进 `LibraryCache.currentAlbum` /
+>   `currentPlaylist`（`internal`，会话切换时随 `invalidate()` 作废），**不是漏接线**。
+> - **`batchDeleteTargets` 删除**。声明后从未读写；真正的批量删除目标是 `deleteTarget`（由多选条
+>   按当前列表填）。属于早期实现的残留。
+> - **`playbackTracks` 保留**。它仍有生产读者（`knownTracks()` 要把播放队列里的歌纳入离线可见性），
+>   不是死字段；改成 `internal` 并在 KDoc 里写明「界面不读，只给 ViewModel 与单测」。
+> - **`section` / `detailOrigin` 改 `rememberSaveable`**，存进 `LibrarySectionSaver`
+>   （`LibrarySection.kt`，JSON 字符串；`Playlist` 为此加 `@Serializable`）。转屏 / Activity 重建后
+>   当前页签与详情返回路径都不丢；`LibrarySectionSaverTest` 覆盖全部 12 个分区变体。
+> - **界面读点全部迁完**：`MusicLibraryScreen` 父层、`DiscoverContent`、`TrackFileOpsDialogs`、
+>   `LoginScreen`、`PulsarApp`；`PulsarApp` 只给三个子页面传 slice，不再传整份 state。
+> - **测试**：`JellyfinUiStateShapeTest`（9 项，钉兼容层）删除，换成 `JellyfinUiStateTest`
+>   （2 项：组合根只有三块 slice + 默认实例）；`StateClearedTest` 夹具去掉两个字段；
+>   `LibraryCacheTest` 改断言守卫状态并补「退出详情再进同一张专辑会重拉」。
+>
+> 验证：全量单测 **879 项全绿**（基线 878：删 9 + 增 10），`assembleDebug` 通过。
+> 真机项见 §8。
+
 1. 删除 `selectedAlbum` / `selectedPlaylist`（如果确认没有 UI 读）。
 2. `playbackTracks` 若仍无生产读者，删除或标 `@VisibleForTesting`。
 3. 删除 `batchDeleteTargets`。
@@ -338,6 +361,14 @@ class LibraryCache(
 **验收**：`grep selectedAlbum` 只剩 `LibrarySection.AlbumDetail`；`JellyfinUiState` 不再有 38 个顶层字段。
 
 ### Step 6 — 清理 + 文档
+
+> **已完成 2026-11-13（#16）**：
+> - `CLAUDE.md` 的「界面状态与曲库加载」按新形状重写：组合根只有三块 slice、屏幕直接读写
+>   slice、「当前选中」不在 UI 状态里、导航状态用 `LibrarySectionSaver`；ADR 列表更新到 0010。
+> - `CONTEXT.md` 新增「状态与数据流」一节：界面状态（JellyfinUiState）/ 会话状态（SessionState）/
+>   曲库状态（LibraryState）/ 下载状态（DownloadsState）。
+> - 新增 **ADR-0010**：state 按所有权分 slice，组合后仍单一 StateFlow（含理由与后果）。
+> - 全量单测 + `assembleDebug` 通过；§8 真机清单待用户逐项确认。
 
 1. 更新 `CLAUDE.md` 的 ViewModel / state 章节。
 2. 更新 `CONTEXT.md`：加 **曲库状态（LibraryState）**、**会话状态（SessionState）**、**下载状态（DownloadState）** 三个术语（如果确认采用）。

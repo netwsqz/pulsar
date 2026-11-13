@@ -160,7 +160,7 @@ class OfflineVisibleLibraryTest {
 
     @Test
     fun `专辑列表没拉到（null）时从已下载曲目反推专辑卡片`() {
-        // 回归：登录只写曲目表、快照里没有专辑、用户也没逛过专辑页 → state.albums 为 null。
+        // 回归：登录只写曲目表、快照里没有专辑、用户也没逛过专辑页 → state.library.albums 为 null。
         // 之前这里直接返回 null，专辑页显示「手机里还没有下载的专辑」，而歌曲页明明有歌。
         val visible = offlineVisibleLibrary(
             tracks = listOf(a1, a2, b1),

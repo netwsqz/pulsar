@@ -58,10 +58,8 @@ class StateClearedTest {
             albums = listOf(album),
             discoverAlbums = listOf(album),
             albumTracks = listOf(track),
-            selectedAlbum = album,
             playlists = listOf(playlist),
             playlistTracks = listOf(track),
-            selectedPlaylist = playlist,
             recentlyPlayed = listOf(track),
             mostPlayed = listOf(track),
             recentlyAdded = listOf(album),
@@ -155,8 +153,6 @@ class StateClearedTest {
         assertEquals(before.tracks, online.tracks)
         assertEquals(before.playlists, online.playlists)
         assertEquals(before.playlistTracks, online.playlistTracks)
-        assertEquals(before.selectedAlbum, online.selectedAlbum)
-        assertEquals(before.selectedPlaylist, online.selectedPlaylist)
         assertEquals(before.multiSelectIds, online.multiSelectIds)
         assertEquals(before.historyEpoch, online.historyEpoch)
         assertEquals(before.fileOps, online.fileOps)

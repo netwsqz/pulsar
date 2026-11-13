@@ -206,6 +206,28 @@ _Avoid_: 播放器控制器（界面侧旧叫法）——界面不再直接拿 `
 
 _Avoid_: 把 remote 当成全局控制器或单例——它是会话专用的端口。
 
+## 状态与数据流
+
+### 界面状态（JellyfinUiState）
+
+`JellyfinUiState.kt`。曲库界面的**组合根**：只有 `session` / `library` / `downloads` 三块 slice，组合后仍只对界面发一条 `StateFlow`（ADR-0010）。屏幕直接读写 slice（`state.library.xxx`），不读平铺字段——迁移期的兼容层已在 #16 删除。
+
+_Avoid_: 大 state、旧字段、兼容层——它们描述的是已删除的迁移形态。
+
+### 会话状态（SessionState）
+
+`state/SessionState.kt`。登录表单（地址 / 用户名 / 密码 / 地址历史）、启动恢复标记 `isRestoring`，以及**登录与曲库共用的** `isLoading` / `errorMessage` 通道。登出全清；会话过期保留地址与用户名、清密码与错误位；地址历史永远保留。
+
+### 曲库状态（LibraryState）
+
+`state/LibraryState.kt`。曲库、随机专辑、三节服务器历史、专辑/播放列表详情（**不含**「当前选中哪一张」——那是导航状态）、搜索（`SearchState`）、多选、文件操作与回收站（`FileOpsState`）、离线可见性 `isOffline`。登出 / 过期整块清空；回在线只清快照兜底的几屏。
+
+### 下载状态（DownloadsState）
+
+`state/DownloadsState.kt`。**只装下载派生出来的界面字段**：离线可见的曲目 id、已下载列表、整张删除的进度与提示。名字不叫 `DownloadState`——那个名字已被调度器的单任务进度 `com.example.pulsar.DownloadState` 占用。
+
+**界面字段随登出清，下载字节与名单不清**（ADR-0007）；「已下载」的算法只有 `DownloadLibrary` 一处。
+
 ## 主题与配色
 
 ### 主题色板（Theme palette）

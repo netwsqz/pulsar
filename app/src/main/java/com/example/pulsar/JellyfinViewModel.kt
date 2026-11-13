@@ -22,6 +22,10 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
+import com.example.pulsar.state.DownloadsState
+import com.example.pulsar.state.FileOpsState
+import com.example.pulsar.state.LibraryState
+import com.example.pulsar.state.SessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -70,6 +74,26 @@ class JellyfinViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
+
+    // ── 状态写入口（#16）：组合根只有三块 slice，写哪个 slice 就落到哪个 slice ──
+    // 迁移期的平铺字段 `copy(...)` 已删除；屏幕与测试一律读 `state.library.xxx` 等。
+
+    private fun updateSession(transform: (SessionState) -> SessionState) {
+        _state.value = _state.value.let { it.copy(session = transform(it.session)) }
+    }
+
+    private fun updateLibrary(transform: (LibraryState) -> LibraryState) {
+        _state.value = _state.value.let { it.copy(library = transform(it.library)) }
+    }
+
+    private fun updateDownloads(transform: (DownloadsState) -> DownloadsState) {
+        _state.value = _state.value.let { it.copy(downloads = transform(it.downloads)) }
+    }
+
+    private fun updateFileOps(transform: (FileOpsState) -> FileOpsState) {
+        updateLibrary { it.copy(fileOps = transform(it.fileOps)) }
+    }
+
     private var session: com.example.pulsar.data.jellyfin.JellyfinSession? = null
     private var dataSource: JellyfinApi? = null
     private var loginJob: Job? = null
@@ -135,11 +159,17 @@ class JellyfinViewModel(
     private val snapshotSaveLock = Mutex()
 
     /** 整张专辑的下载正在删：防连点。只在发起线程读写（见 [deleteAlbumCopies]）。
-     * 与界面上的 [JellyfinUiState.isDeletingDownload] 是两回事：这个是守卫，那个是给界面看的进度。 */
+     * 与界面上的 [DownloadsState.isDeleting] 是两回事：这个是守卫，那个是给界面看的进度。 */
     private var downloadDeleteInFlight = false
 
     private val _playbackTracks = MutableStateFlow<Map<String, Track>>(emptyMap())
-    val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
+
+    /**
+     * 播放队列的「曲目镜像」（id → Track）。**界面的播放状态不读它**：播放 UI 只认
+     * `PlaybackSession`；这里只服务 ViewModel 内部（离线可见性覆盖播放队列里的歌、
+     * 删歌 / 改名时同步队列条目）。`internal` 只为单测断言队列条目。
+     */
+    internal val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
 
     private val _currentTrack = MutableStateFlow<Track?>(null)
     val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
@@ -155,7 +185,7 @@ class JellyfinViewModel(
         // 启动即声明"正在恢复会话"：在读到本地会话、拉到曲库之前 UI 直接进主页面、
         // 用灰色波浪骨架占位；不这样做的话这段等待期会落到 tracks == null 分支，
         // 闪一屏空白登录表单。
-        _state.value = _state.value.copy(isRestoring = true)
+        updateSession { it.copy(isRestoring = true) }
         restoreSavedLogin()
         // 地址历史只服务登录页：现在就拉，登录表单随时可显示下拉。
         viewModelScope.launch(dispatcher) {
@@ -164,7 +194,7 @@ class JellyfinViewModel(
             // **之前**的一份快照；等读盘回来 copy 时，会话恢复已经写好的 serverUrl 会被
             // 这份旧快照盖回空串（真机实测：曲库正常但 serverUrl 为空，下载按钮一直禁用）。
             val loaded = serverUrlHistory?.load().orEmpty()
-            _state.value = _state.value.copy(serverUrlHistory = loaded)
+            updateSession { it.copy(serverUrlHistory = loaded) }
         }
         // 剔除历史遗留的「无归属」下载名单条目（serverUrl 为空，永远匹配不上任何账号，
         // 界面上看不见却占着名单）。正常情况这里是一次纯读，只有真存在坏条目才写回。
@@ -179,19 +209,22 @@ class JellyfinViewModel(
         }
     }
 
-    fun updateServerUrl(value: String) { _state.value = _state.value.copy(serverUrl = value, errorMessage = null) }
-    fun updateUsername(value: String) { _state.value = _state.value.copy(username = value, errorMessage = null) }
-    fun updatePassword(value: String) { _state.value = _state.value.copy(password = value, errorMessage = null) }
+    fun updateServerUrl(value: String) { updateSession { it.copy(serverUrl = value, errorMessage = null) } }
+    fun updateUsername(value: String) { updateSession { it.copy(username = value, errorMessage = null) } }
+    fun updatePassword(value: String) { updateSession { it.copy(password = value, errorMessage = null) } }
 
     fun login() {
         loginJob?.cancel()
         val current = _state.value
-        if (current.serverUrl.isBlank() || current.username.isBlank() || current.password.isBlank()) {
-            _state.value = current.copy(errorMessage = "请填写服务器地址、用户名和密码", password = "")
+        val form = current.session
+        if (form.serverUrl.isBlank() || form.username.isBlank() || form.password.isBlank()) {
+            _state.value = current.copy(
+                session = form.copy(errorMessage = "请填写服务器地址、用户名和密码", password = "")
+            )
             return
         }
-        val username = current.username
-        val password = current.password
+        val username = form.username
+        val password = form.password
         invalidateSessionRequests()
         session = null
         // 新登录发起时旧账号的可见性立刻作废（字节不清，ADR-0007）。
@@ -210,26 +243,31 @@ class JellyfinViewModel(
         )
         loginJob = viewModelScope.launch(dispatcher) {
             try {
-                val source = apiFactory.create(current.serverUrl)
+                val source = apiFactory.create(form.serverUrl)
                 val signedIn = source.login(username, password).getOrThrow()
                 val tracks = source.getMusicItems(signedIn.userId, signedIn.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     session = signedIn
                     // 登录成功：下载可见性按新账号作用域算（字节仍共享）。
-                    downloadLibrary?.setAccount(AccountScope(current.serverUrl, signedIn.userId))
+                    downloadLibrary?.setAccount(AccountScope(form.serverUrl, signedIn.userId))
                     dataSource = source
                     authorizationSink.activeAuthorization =
                         source.authorizationHeader(signedIn.accessToken)
-                    _state.value = _state.value.copy(isLoading = false, tracks = tracks)
+                    _state.value = _state.value.let {
+                        it.copy(
+                            session = it.session.copy(isLoading = false),
+                            library = it.library.copy(tracks = tracks),
+                        )
+                    }
                     // 会话就绪：界面可能已经停在某一节上（恢复期间主页面就组合了），
                     // 之前那次「进了这节」因为没会话被静默跳过，这里补跑。
                     reloadCurrentSection()
-                    sessionStore.save(SavedSession(current.serverUrl, signedIn.userId, username, signedIn.accessToken))
-                    serverUrlHistory?.record(current.serverUrl)
+                    sessionStore.save(SavedSession(form.serverUrl, signedIn.userId, username, signedIn.accessToken))
+                    serverUrlHistory?.record(form.serverUrl)
                     // 同 init 里那条：先取值再碰 _state，别让挂起点前的旧快照盖掉新状态。
                     val history = serverUrlHistory?.load()
                     if (history != null) {
-                        _state.value = _state.value.copy(serverUrlHistory = history)
+                        updateSession { it.copy(serverUrlHistory = history) }
                     }
                     // 登录成功 = **整份替换**快照，不沿用旧的：快照里可能还躺着上一个账号的
                     // 专辑列表（token 过期不清快照是铁律 5），merge 进来就是跨账号串数据。
@@ -240,7 +278,7 @@ class JellyfinViewModel(
                 throw error
             } catch (error: Throwable) {
                 if (generation == loginGeneration) {
-                    _state.value = _state.value.copy(isLoading = false, errorMessage = friendlyError(error, isLogin = true))
+                    updateSession { it.copy(isLoading = false, errorMessage = friendlyError(error, isLogin = true)) }
                 }
             }
         }
@@ -251,30 +289,38 @@ class JellyfinViewModel(
             var saved: SavedSession? = null
             try {
                 saved = sessionStore.load()
-                if (saved == null) {
+                val restored = saved
+                if (restored == null) {
                     // 本地没有可恢复的会话：结束恢复态，UI 落到登录表单。
-                    _state.value = _state.value.copy(isRestoring = false)
+                    updateSession { it.copy(isRestoring = false) }
                     return@launch
                 }
                 val generation = ++loginGeneration
                 // 顺手预填地址/用户名：万一后面网络失败回退到登录表单，用户面对的
                 // 不是一张空白表单，只需补密码即可重试。
-                _state.value = _state.value.copy(
-                    isRestoring = true,
-                    isLoading = true,
-                    serverUrl = saved.serverUrl,
-                    username = saved.username
-                )
-                val source = apiFactory.create(saved.serverUrl)
-                val tracks = source.getMusicItems(saved.userId, saved.accessToken).getOrThrow()
+                updateSession {
+                    it.copy(
+                        isRestoring = true,
+                        isLoading = true,
+                        serverUrl = restored.serverUrl,
+                        username = restored.username,
+                    )
+                }
+                val source = apiFactory.create(restored.serverUrl)
+                val tracks = source.getMusicItems(restored.userId, restored.accessToken).getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
-                    session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
+                    session = com.example.pulsar.data.jellyfin.JellyfinSession(restored.userId, restored.accessToken)
                     // 恢复登录：下载可见性按这个账号作用域算（字节仍共享）。
-                    downloadLibrary?.setAccount(AccountScope(saved.serverUrl, saved.userId))
+                    downloadLibrary?.setAccount(AccountScope(restored.serverUrl, restored.userId))
                     dataSource = source
                     authorizationSink.activeAuthorization =
-                        source.authorizationHeader(saved.accessToken)
-                    _state.value = _state.value.copy(isLoading = false, isRestoring = false, tracks = tracks)
+                        source.authorizationHeader(restored.accessToken)
+                    _state.value = _state.value.let {
+                        it.copy(
+                            session = it.session.copy(isLoading = false, isRestoring = false),
+                            library = it.library.copy(tracks = tracks),
+                        )
+                    }
                     // 恢复期间主页面已经组合、界面早就报过「进了哪一节」；会话就绪后补跑一次。
                     reloadCurrentSection()
                     persistSnapshot()
@@ -297,11 +343,13 @@ class JellyfinViewModel(
                     ) {
                         return@launch
                     }
-                    _state.value = _state.value.copy(
-                        isLoading = false,
-                        isRestoring = false,
-                        errorMessage = friendlyError(error)
-                    )
+                    updateSession {
+                        it.copy(
+                            isLoading = false,
+                            isRestoring = false,
+                            errorMessage = friendlyError(error),
+                        )
+                    }
                 }
             }
         }
@@ -323,7 +371,7 @@ class JellyfinViewModel(
         downloadLibrary?.setAccount(AccountScope(saved.serverUrl, saved.userId))
         dataSource = source
         authorizationSink.activeAuthorization = source.authorizationHeader(saved.accessToken)
-        _state.value = _state.value.copy(isLoading = false, isRestoring = false)
+        updateSession { it.copy(isLoading = false, isRestoring = false) }
         applySnapshot(loaded)
         // 已下载集合先算完再进离线态，别让界面在未知集合上筛掉能播的歌。
         goOffline(needsNetwork = false)
@@ -394,7 +442,7 @@ class JellyfinViewModel(
      */
     fun isPlayable(track: Track): Boolean {
         val current = _state.value
-        return offlineIsPlayable(track, current.cachedTrackIds, current.isOffline)
+        return offlineIsPlayable(track, current.downloads.visibleTrackIds, current.library.isOffline)
     }
 
     /**
@@ -405,7 +453,7 @@ class JellyfinViewModel(
      */
     fun unplayableReason(track: Track): String? {
         val current = _state.value
-        return offlineUnplayableReason(track, current.cachedTrackIds, current.isOffline)
+        return offlineUnplayableReason(track, current.downloads.visibleTrackIds, current.library.isOffline)
     }
 
     fun albumCover(album: Album): JellyfinRequest? = coverRequest(album.id, album.imageTag)
@@ -438,8 +486,8 @@ class JellyfinViewModel(
         // 播过的歌服务端 UserData 会变（工单 09）：本地那两份历史缓存作废，回到发现页时
         // 重新拉。**只递增版本号，不清数据**——清成 null 会让发现页两节先闪成骨架再弹回。
         // module 会一并作废三节历史的在途响应（界面在后台时也能挡住旧结果），并补跑当前分区。
-        if (_state.value.recentlyPlayed != null || _state.value.mostPlayed != null) {
-            _state.value = _state.value.copy(historyEpoch = _state.value.historyEpoch + 1)
+        if (_state.value.library.recentlyPlayed != null || _state.value.library.mostPlayed != null) {
+            updateLibrary { it.copy(historyEpoch = it.historyEpoch + 1) }
             libraryCache.onHistoryEpochChanged()
         }
     }
@@ -531,7 +579,12 @@ class JellyfinViewModel(
     fun clearPlaylistDetail() = libraryCache.clearPlaylistDetail()
 
     fun updateSearchQuery(value: String) {
-        _state.value = _state.value.copy(searchQuery = value, errorMessage = null)
+        _state.value = _state.value.let {
+            it.copy(
+                session = it.session.copy(errorMessage = null),
+                library = it.library.copy(search = it.library.search.copy(query = value)),
+            )
+        }
         libraryCache.search(value)
     }
 
@@ -544,40 +597,41 @@ class JellyfinViewModel(
     private suspend fun showOfflinePlaylists() {
         val owned = downloadedPlaylistListings()
         if (owned.isEmpty()) {
-            _state.value = _state.value.copy(
-                isLoading = false,
-                errorMessage = "播放列表需要联网才能查看"
-            )
+            updateSession {
+                it.copy(isLoading = false, errorMessage = "播放列表需要联网才能查看")
+            }
             return
         }
-        _state.value = _state.value.copy(
-            isLoading = false,
-            playlists = owned.map { it.toPlaylist() },
-            errorMessage = null
-        )
+        _state.value = _state.value.let {
+            it.copy(
+                session = it.session.copy(isLoading = false, errorMessage = null),
+                library = it.library.copy(playlists = owned.map { listing -> listing.toPlaylist() }),
+            )
+        }
     }
 
     /** 离线时打开播放列表：已下载的从本地清单读，未下载的明说需要联网。 */
     private suspend fun showOfflinePlaylistTracks(playlist: Playlist) {
         val listing = downloadedPlaylistListings().firstOrNull { it.id == playlist.id }
         if (listing == null) {
-            _state.value = _state.value.copy(
-                isLoading = false,
-                selectedPlaylist = playlist,
-                playlistTracks = null,
-                errorMessage = "这个播放列表没有下载，需要联网才能查看"
-            )
+            _state.value = _state.value.let {
+                it.copy(
+                    session = it.session.copy(isLoading = false, errorMessage = "这个播放列表没有下载，需要联网才能查看"),
+                    library = it.library.copy(playlistTracks = null),
+                )
+            }
             return
         }
         // 曲目表变了：先把曲目表放进 state，再重算已下载集合（knownTracks 要能看到它们），
         // 别拿旧集合去拦能放的歌
-        _state.value = _state.value.copy(
-            isLoading = false,
-            selectedPlaylist = playlist,
-            playlistTracks = listing.tracks,
-            errorMessage = null
-        )
-        _state.value = _state.value.copy(cachedTrackIds = computeDownloadedTrackIds())
+        _state.value = _state.value.let {
+            it.copy(
+                session = it.session.copy(isLoading = false, errorMessage = null),
+                library = it.library.copy(playlistTracks = listing.tracks),
+            )
+        }
+        val cached = computeDownloadedTrackIds()
+        updateDownloads { it.copy(visibleTrackIds = cached) }
     }
 
     /**
@@ -589,9 +643,9 @@ class JellyfinViewModel(
     private suspend fun downloadedPlaylistListings(): List<DownloadedPlaylist> {
         val loaded = loadSnapshot() ?: return emptyList()
         val currentSession = session ?: return emptyList()
-        val mine = loaded.downloadedPlaylistsFor(_state.value.serverUrl, currentSession.userId)
+        val mine = loaded.downloadedPlaylistsFor(_state.value.session.serverUrl, currentSession.userId)
         val store = downloadLedgerStore ?: return mine
-        val ownedIds = store.entriesFor(_state.value.serverUrl, currentSession.userId)
+        val ownedIds = store.entriesFor(_state.value.session.serverUrl, currentSession.userId)
             .filter { it.kind == DownloadKind.PLAYLIST }
             .map { it.id }
             .toSet()
@@ -611,7 +665,7 @@ class JellyfinViewModel(
     private suspend fun writeDownloadedPlaylist(playlist: Playlist, tracks: List<Track>) {
         val store = downloadLedgerStore ?: return
         val currentSession = session ?: return
-        val serverUrl = _state.value.serverUrl
+        val serverUrl = _state.value.session.serverUrl
         val downloaded = store.entriesFor(serverUrl, currentSession.userId)
             .any { it.kind == DownloadKind.PLAYLIST && it.id == playlist.id }
         if (!downloaded) return
@@ -637,21 +691,21 @@ class JellyfinViewModel(
 
     // ── 曲库文件操作（PC 伴生服务，ADR-0001：删的是真文件、改的是内嵌标签） ──
     // 两个方法都是直接 suspend 而非内部 launch：对话框要等结果决定关不关弹窗，
-    // 提交中用 isFileOpsBusy 禁按钮防误关。CancellationException 一律重新抛出。
+    // 提交中用 `library.fileOps.isBusy` 禁按钮防误关。CancellationException 一律重新抛出。
 
-    /** 删除 = 挪进回收站。成功返回 true；失败原因写在 [JellyfinUiState.fileOpsMessage]。 */
+    /** 删除 = 挪进回收站。成功返回 true；失败原因写在 [FileOpsState.message]。 */
     suspend fun deleteTrack(track: Track): Boolean {
-        if (_state.value.isFileOpsBusy) return false
+        if (_state.value.library.fileOps.isBusy) return false
         val fileOps = libraryFilesFactory ?: return falseWithMessage("电脑端服务未配置")
         // 正在播的那首删不得：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
         if (_currentTrack.value?.id == track.id) return falseWithMessage("正在播放的歌曲不能删除")
         val path = track.filePath?.takeIf { it.isNotBlank() }
             ?: return falseWithMessage("拿不到这首歌的文件路径，无法操作")
-        _state.value = _state.value.copy(isFileOpsBusy = true, fileOpsMessage = null)
+        updateFileOps { it.copy(isBusy = true, message = null) }
         val result: Result<com.example.pulsar.data.libraryfiles.LibraryDeleteResponse> = try {
             fileOps().delete(listOf(path))
         } catch (error: CancellationException) {
-            _state.value = _state.value.copy(isFileOpsBusy = false)
+            updateFileOps { it.copy(isBusy = false) }
             throw error
         } catch (error: Throwable) {
             Result.failure(error)
@@ -665,7 +719,7 @@ class JellyfinViewModel(
                     removeTrackEverywhere(track.id)
                     // 手机上的副本跟着走（工单 06）：别占着空间。删副本失败不影响删歌结果。
                     removeCachedCopy(track)
-                    _state.value = _state.value.copy(isFileOpsBusy = false)
+                    updateFileOps { it.copy(isBusy = false) }
                     true
                 }
             },
@@ -675,15 +729,15 @@ class JellyfinViewModel(
 
     /** 改内嵌标签。三个字段只写传了的（null = 不动，空串 = 清空），成功返回 true。 */
     suspend fun renameTrack(track: Track, title: String?, artist: String? = null, album: String? = null): Boolean {
-        if (_state.value.isFileOpsBusy) return false
+        if (_state.value.library.fileOps.isBusy) return false
         val fileOps = libraryFilesFactory ?: return falseWithMessage("电脑端服务未配置")
         val path = track.filePath?.takeIf { it.isNotBlank() }
             ?: return falseWithMessage("拿不到这首歌的文件路径，无法操作")
-        _state.value = _state.value.copy(isFileOpsBusy = true, fileOpsMessage = null)
+        updateFileOps { it.copy(isBusy = true, message = null) }
         val result: Result<com.example.pulsar.data.libraryfiles.LibraryRenameResponse> = try {
             fileOps().rename(path, title = title, artist = artist, album = album)
         } catch (error: CancellationException) {
-            _state.value = _state.value.copy(isFileOpsBusy = false)
+            updateFileOps { it.copy(isBusy = false) }
             throw error
         } catch (error: Throwable) {
             Result.failure(error)
@@ -694,7 +748,7 @@ class JellyfinViewModel(
                     falseWithMessage("改名失败")
                 } else {
                     applyRename(track, title, artist, album)
-                    _state.value = _state.value.copy(isFileOpsBusy = false)
+                    updateFileOps { it.copy(isBusy = false) }
                     true
                 }
             },
@@ -707,12 +761,16 @@ class JellyfinViewModel(
         fun List<Track>.without() = filterNot { it.id == trackId }
         _state.value = _state.value.let { s ->
             s.copy(
-                tracks = s.tracks?.without(),
-                albumTracks = s.albumTracks?.without(),
-                playlistTracks = s.playlistTracks?.without(),
-                searchResults = s.searchResults?.let { it.copy(tracks = it.tracks.without()) },
-                recentlyPlayed = s.recentlyPlayed?.without(),
-                mostPlayed = s.mostPlayed?.without()
+                library = s.library.copy(
+                    tracks = s.library.tracks?.without(),
+                    albumTracks = s.library.albumTracks?.without(),
+                    playlistTracks = s.library.playlistTracks?.without(),
+                    recentlyPlayed = s.library.recentlyPlayed?.without(),
+                    mostPlayed = s.library.mostPlayed?.without(),
+                    search = s.library.search.copy(
+                        results = s.library.search.results?.let { it.copy(tracks = it.tracks.without()) }
+                    ),
+                )
             )
         }
         _playbackTracks.value = _playbackTracks.value - trackId
@@ -728,10 +786,14 @@ class JellyfinViewModel(
         fun List<Track>.replaced() = map { if (it.id == track.id) updated else it }
         _state.value = _state.value.let { s ->
             s.copy(
-                tracks = s.tracks?.replaced(),
-                albumTracks = s.albumTracks?.replaced(),
-                playlistTracks = s.playlistTracks?.replaced(),
-                searchResults = s.searchResults?.let { it.copy(tracks = it.tracks.replaced()) }
+                library = s.library.copy(
+                    tracks = s.library.tracks?.replaced(),
+                    albumTracks = s.library.albumTracks?.replaced(),
+                    playlistTracks = s.library.playlistTracks?.replaced(),
+                    search = s.library.search.copy(
+                        results = s.library.search.results?.let { it.copy(tracks = it.tracks.replaced()) }
+                    ),
+                )
             )
         }
         _playbackTracks.value = _playbackTracks.value + (track.id to updated)
@@ -739,13 +801,15 @@ class JellyfinViewModel(
     }
 
     private fun falseWithMessage(message: String): Boolean {
-        _state.value = _state.value.copy(isFileOpsBusy = false, fileOpsMessage = message)
+        updateFileOps { it.copy(isBusy = false, message = message) }
         return false
     }
 
     /** 清掉上一次文件操作的失败提示（打开弹窗时调，避免旧提示残留在新弹窗里）。 */
     fun clearFileOpsMessage() {
-        if (_state.value.fileOpsMessage != null) _state.value = _state.value.copy(fileOpsMessage = null)
+        if (_state.value.library.fileOps.message != null) {
+            updateFileOps { it.copy(message = null) }
+        }
     }
 
     // ── 回收站（设置页） ─────────────────────────────────────────────
@@ -753,29 +817,27 @@ class JellyfinViewModel(
     /** 拉回收站列表。每次进设置页都重拉——删除/恢复随时会改变它的内容，不缓存。 */
     fun loadRecycle() {
         val fileOps = libraryFilesFactory ?: return
-        if (_state.value.isRecycleLoading) return
+        if (_state.value.library.fileOps.isRecycleLoading) return
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isRecycleLoading = true, recycleMessage = null)
+            updateFileOps { it.copy(isRecycleLoading = true, recycleMessage = null) }
             val result: Result<com.example.pulsar.data.libraryfiles.LibraryRecycleResponse> = try {
                 fileOps().recycle()
             } catch (error: CancellationException) {
-                _state.value = _state.value.copy(isRecycleLoading = false)
+                updateFileOps { it.copy(isRecycleLoading = false) }
                 throw error
             } catch (error: Throwable) {
                 Result.failure(error)
             }
             result.fold(
                 onSuccess = { response ->
-                    _state.value = _state.value.copy(
-                        isRecycleLoading = false,
-                        recycleFiles = response.files
-                    )
+                    updateFileOps {
+                        it.copy(isRecycleLoading = false, recycleFiles = response.files)
+                    }
                 },
                 onFailure = { error ->
-                    _state.value = _state.value.copy(
-                        isRecycleLoading = false,
-                        recycleMessage = friendlyFileOpsError(error)
-                    )
+                    updateFileOps {
+                        it.copy(isRecycleLoading = false, recycleMessage = friendlyFileOpsError(error))
+                    }
                 }
             )
         }
@@ -784,37 +846,38 @@ class JellyfinViewModel(
     /** 把一个文件从回收站挪回原处；成功后立刻从列表移除。 */
     fun restoreRecycle(relPath: String) {
         val fileOps = libraryFilesFactory ?: return
-        if (_state.value.isFileOpsBusy) return
+        if (_state.value.library.fileOps.isBusy) return
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isFileOpsBusy = true, recycleMessage = null)
+            updateFileOps { it.copy(isBusy = true, recycleMessage = null) }
             val result: Result<com.example.pulsar.data.libraryfiles.LibraryRestoreResponse> = try {
                 fileOps().restore(listOf(relPath))
             } catch (error: CancellationException) {
-                _state.value = _state.value.copy(isFileOpsBusy = false)
+                updateFileOps { it.copy(isBusy = false) }
                 throw error
             } catch (error: Throwable) {
                 Result.failure(error)
             }
             result.fold(
                 onSuccess = { response ->
-                    _state.value = if (response.restored.isNotEmpty()) {
-                        _state.value.copy(
-                            isFileOpsBusy = false,
-                            recycleFiles = _state.value.recycleFiles.filterNot { it.relPath == relPath },
-                            recycleMessage = "已恢复到原位置"
-                        )
-                    } else {
-                        _state.value.copy(
-                            isFileOpsBusy = false,
-                            recycleMessage = response.failed.firstOrNull()?.error ?: "恢复失败"
-                        )
+                    updateFileOps {
+                        if (response.restored.isNotEmpty()) {
+                            it.copy(
+                                isBusy = false,
+                                recycleFiles = it.recycleFiles.filterNot { file -> file.relPath == relPath },
+                                recycleMessage = "已恢复到原位置",
+                            )
+                        } else {
+                            it.copy(
+                                isBusy = false,
+                                recycleMessage = response.failed.firstOrNull()?.error ?: "恢复失败",
+                            )
+                        }
                     }
                 },
                 onFailure = { error ->
-                    _state.value = _state.value.copy(
-                        isFileOpsBusy = false,
-                        recycleMessage = friendlyFileOpsError(error)
-                    )
+                    updateFileOps {
+                        it.copy(isBusy = false, recycleMessage = friendlyFileOpsError(error))
+                    }
                 }
             )
         }
@@ -823,30 +886,31 @@ class JellyfinViewModel(
     /** 真删回收站（全功能唯一不可逆的操作），UI 已二次确认。 */
     fun purgeRecycle() {
         val fileOps = libraryFilesFactory ?: return
-        if (_state.value.isFileOpsBusy) return
+        if (_state.value.library.fileOps.isBusy) return
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isFileOpsBusy = true, recycleMessage = null)
+            updateFileOps { it.copy(isBusy = true, recycleMessage = null) }
             val result: Result<com.example.pulsar.data.libraryfiles.LibraryPurgeResponse> = try {
                 fileOps().purge()
             } catch (error: CancellationException) {
-                _state.value = _state.value.copy(isFileOpsBusy = false)
+                updateFileOps { it.copy(isBusy = false) }
                 throw error
             } catch (error: Throwable) {
                 Result.failure(error)
             }
             result.fold(
                 onSuccess = { response ->
-                    _state.value = _state.value.copy(
-                        isFileOpsBusy = false,
-                        recycleFiles = emptyList(),
-                        recycleMessage = "已清空（${response.purged} 个文件）"
-                    )
+                    updateFileOps {
+                        it.copy(
+                            isBusy = false,
+                            recycleFiles = emptyList(),
+                            recycleMessage = "已清空（${response.purged} 个文件）",
+                        )
+                    }
                 },
                 onFailure = { error ->
-                    _state.value = _state.value.copy(
-                        isFileOpsBusy = false,
-                        recycleMessage = friendlyFileOpsError(error)
-                    )
+                    updateFileOps {
+                        it.copy(isBusy = false, recycleMessage = friendlyFileOpsError(error))
+                    }
                 }
             )
         }
@@ -856,36 +920,41 @@ class JellyfinViewModel(
 
     /** 进多选模式并先勾上一首（长按菜单进来的）。 */
     fun enterMultiSelect(trackId: String) {
-        _state.value = _state.value.copy(multiSelectIds = setOf(trackId), fileOpsMessage = null)
+        updateLibrary {
+            it.copy(
+                multiSelectIds = setOf(trackId),
+                fileOps = it.fileOps.copy(message = null),
+            )
+        }
     }
 
     /** 勾上/取消一首。 */
     fun toggleMultiSelect(trackId: String) {
-        val current = _state.value.multiSelectIds
-        _state.value = _state.value.copy(
-            multiSelectIds = if (trackId in current) current - trackId else current + trackId
-        )
+        updateLibrary {
+            val selected = it.multiSelectIds
+            it.copy(multiSelectIds = if (trackId in selected) selected - trackId else selected + trackId)
+        }
     }
 
     /** 全选：只选 UI 传进来的当前列表（专辑详情页就该只有这张专辑的歌）。 */
     fun selectAllTracks(ids: List<String>) {
-        _state.value = _state.value.copy(multiSelectIds = ids.toSet())
+        updateLibrary { it.copy(multiSelectIds = ids.toSet()) }
     }
 
     /** 退出多选模式（取消按钮 / 返回键 / 删完 / 切页）。 */
     fun clearMultiSelect() {
-        if (_state.value.multiSelectIds.isNotEmpty()) {
-            _state.value = _state.value.copy(multiSelectIds = emptySet())
+        if (_state.value.library.multiSelectIds.isNotEmpty()) {
+            updateLibrary { it.copy(multiSelectIds = emptySet()) }
         }
     }
 
     /**
      * 批量删除。正在播的那首不发请求（spec 铁律 3）；服务端一次请求逐个处理，
      * 返回**成功删掉的数目**。部分失败时不拦截：成功的照常生效，失败的原因写在
-     * [JellyfinUiState.fileOpsMessage]。全部成功时顺带退出多选模式。
+     * [FileOpsState.message]。全部成功时顺带退出多选模式。
      */
     suspend fun deleteTracks(tracks: List<Track>): Int {
-        if (_state.value.isFileOpsBusy) return 0
+        if (_state.value.library.fileOps.isBusy) return 0
         val fileOps = libraryFilesFactory ?: return 0
         val currentId = _currentTrack.value?.id
         val deletable = tracks.filter { it.id != currentId && !it.filePath.isNullOrBlank() }
@@ -895,12 +964,12 @@ class JellyfinViewModel(
             )
             return 0
         }
-        _state.value = _state.value.copy(isFileOpsBusy = true, fileOpsMessage = null)
+        updateFileOps { it.copy(isBusy = true, message = null) }
         val paths = deletable.map { it.filePath.orEmpty() }
         val result: Result<com.example.pulsar.data.libraryfiles.LibraryDeleteResponse> = try {
             fileOps().delete(paths)
         } catch (error: CancellationException) {
-            _state.value = _state.value.copy(isFileOpsBusy = false)
+            updateFileOps { it.copy(isBusy = false) }
             throw error
         } catch (error: Throwable) {
             Result.failure(error)
@@ -919,15 +988,15 @@ class JellyfinViewModel(
                     deletedIds.forEach(::removeTrackEverywhere)
                     // 副本跟着歌一起走（工单 06）。removeCachedCopy 自己吞失败。
                     deletable.filter { it.id in deletedIds }.forEach(::removeCachedCopy)
-                    _state.value = _state.value.copy(
-                        isFileOpsBusy = false,
-                        multiSelectIds = emptySet()
-                    )
+                    updateLibrary { it.copy(multiSelectIds = emptySet()) }
+                    updateFileOps { it.copy(isBusy = false) }
                     if (response.failed.isNotEmpty()) {
-                        _state.value = _state.value.copy(
-                            fileOpsMessage = "${response.failed.size} 首删除失败：" +
-                                response.failed.first().error.take(80)
-                        )
+                        updateFileOps {
+                            it.copy(
+                                message = "${response.failed.size} 首删除失败：" +
+                                    response.failed.first().error.take(80)
+                            )
+                        }
                     }
                     deletedIds.size
                 }
@@ -980,9 +1049,9 @@ class JellyfinViewModel(
             val current = _state.value
             val previous = loadSnapshot()
             val next = LibrarySnapshot(
-                tracks = current.tracks ?: previous?.tracks.orEmpty(),
-                albums = current.albums ?: previous?.albums.orEmpty(),
-                discoverAlbums = current.discoverAlbums ?: previous?.discoverAlbums.orEmpty(),
+                tracks = current.library.tracks ?: previous?.tracks.orEmpty(),
+                albums = current.library.albums ?: previous?.albums.orEmpty(),
+                discoverAlbums = current.library.discoverAlbums ?: previous?.discoverAlbums.orEmpty(),
                 // 已下载列表清单不来自服务器：这是本地攒的，重建快照时原样带过去
                 downloadedPlaylists = previous?.downloadedPlaylists.orEmpty()
             )
@@ -999,7 +1068,7 @@ class JellyfinViewModel(
         // 已下载列表清单也按账号隔离：只留当前账号那几条，别的账号的一个不带。
         // 从盘上读（而不是只用内存副本）：会话过期后重登时内存里可能还没加载过。
         val mine = loadSnapshot()?.downloadedPlaylists.orEmpty()
-            .filter { currentSession != null && it.serverUrl == _state.value.serverUrl && it.userId == currentSession.userId }
+            .filter { currentSession != null && it.serverUrl == _state.value.session.serverUrl && it.userId == currentSession.userId }
         val next = LibrarySnapshot(tracks = tracks, downloadedPlaylists = mine)
         snapshot = next
         repo.save(next)
@@ -1009,10 +1078,12 @@ class JellyfinViewModel(
     private fun applySnapshot(loaded: LibrarySnapshot) {
         val current = _state.value
         _state.value = current.copy(
-            tracks = current.tracks ?: loaded.tracks.takeIf { it.isNotEmpty() },
-            albums = current.albums ?: loaded.albums.takeIf { it.isNotEmpty() },
-            discoverAlbums = current.discoverAlbums ?: loaded.discoverAlbums.takeIf { it.isNotEmpty() },
-            albumTracks = current.albumTracks ?: offlineAlbumTracks(loaded)
+            library = current.library.copy(
+                tracks = current.library.tracks ?: loaded.tracks.takeIf { it.isNotEmpty() },
+                albums = current.library.albums ?: loaded.albums.takeIf { it.isNotEmpty() },
+                discoverAlbums = current.library.discoverAlbums ?: loaded.discoverAlbums.takeIf { it.isNotEmpty() },
+                albumTracks = current.library.albumTracks ?: offlineAlbumTracks(loaded),
+            )
         )
     }
 
@@ -1022,7 +1093,7 @@ class JellyfinViewModel(
      * 不用为快照多存一份几乎重复的曲目表。
      */
     private fun offlineAlbumTracks(loaded: LibrarySnapshot): List<Track>? {
-        val album = _state.value.selectedAlbum ?: return null
+        val album = libraryCache.currentAlbum ?: return null
         return loaded.tracks.filter { it.album == album.name }.takeIf { it.isNotEmpty() }
     }
 
@@ -1045,10 +1116,10 @@ class JellyfinViewModel(
     private fun knownTracks(): List<Track> {
         val current = _state.value
         return buildList {
-            current.tracks?.let(::addAll)
-            current.albumTracks?.let(::addAll)
-            current.playlistTracks?.let(::addAll)
-            current.searchResults?.tracks?.let(::addAll)
+            current.library.tracks?.let(::addAll)
+            current.library.albumTracks?.let(::addAll)
+            current.library.playlistTracks?.let(::addAll)
+            current.library.search.results?.tracks?.let(::addAll)
             addAll(_playbackTracks.value.values)
         }.distinctBy { it.id }
     }
@@ -1062,24 +1133,30 @@ class JellyfinViewModel(
         if (loaded != null) applySnapshot(loaded)
         // 快照连「全部音乐」都撑不起来（没有快照 / 刚被 login 清掉）：没有可显示的库，
         // 退回「连不上服务器」+ 登录表单，跟没有离线能力时的行为一致——空骨架更糟。
-        if (_state.value.tracks == null) {
-            _state.value = _state.value.copy(
-                isLoading = false,
-                errorMessage = friendlyError(JellyfinError.Network(IOException("offline, no snapshot")))
-            )
+        if (_state.value.library.tracks == null) {
+            updateSession {
+                it.copy(
+                    isLoading = false,
+                    errorMessage = friendlyError(JellyfinError.Network(IOException("offline, no snapshot"))),
+                )
+            }
             return false
         }
         // 已下载集合先算完再进离线态（见 [computeDownloadedTrackIds]）。
         val cached = computeDownloadedTrackIds()
         // 翻转判定读**写之前一刻**的离线态：上面两个挂起点之间可能有另一节也失败了，
         // 用入口处的旧值会让两个调用都返回 true、各补跑一次当前分区。
-        val flipped = !_state.value.isOffline
-        _state.value = _state.value.copy(
-            isLoading = false,
-            isOffline = true,
-            cachedTrackIds = cached,
-            errorMessage = if (needsNetwork) "播放列表需要联网才能查看" else null
-        )
+        val flipped = !_state.value.library.isOffline
+        _state.value = _state.value.let {
+            it.copy(
+                session = it.session.copy(
+                    isLoading = false,
+                    errorMessage = if (needsNetwork) "播放列表需要联网才能查看" else null,
+                ),
+                library = it.library.copy(isOffline = true),
+                downloads = it.downloads.copy(visibleTrackIds = cached),
+            )
+        }
         startOfflineRetry()
         // 只有真的从在线翻到离线才值得让调用方补跑当前分区（本来就是离线态时不用）。
         return flipped
@@ -1105,7 +1182,7 @@ class JellyfinViewModel(
         }
         persistSnapshot()
         // 当前这次搜索是在快照里搜的：联网后用同样的词重新搜一遍（用户不用重打）。
-        if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
+        if (_state.value.library.search.query.isNotBlank()) updateSearchQuery(_state.value.library.search.query)
         // 快照来源的几屏刚被清掉：按当前所在分区补跑（原先靠界面把 isOffline 当 LaunchedEffect key）。
         reloadCurrentSection()
     }
@@ -1120,7 +1197,7 @@ class JellyfinViewModel(
     private fun markOnline(): Boolean {
         stopOfflineRetry()
         val current = _state.value
-        if (!current.isOffline) return false
+        if (!current.library.isOffline) return false
         _state.value = current.copy(
             // 快照来源的几屏清掉（幂等守卫据此重拉），离线标记一并落下。
             // 刷新圈不在这里收：由 refreshDiscover 等到四路都落地才收（#12）。
@@ -1146,7 +1223,7 @@ class JellyfinViewModel(
         val currentSession = session ?: return
         offlineRetryJob = viewModelScope.launch(dispatcher) {
             repeat(kOfflineRetryMaxAttempts) {
-                if (!isActive || !_state.value.isOffline) return@launch
+                if (!isActive || !_state.value.library.isOffline) return@launch
                 delay(OFFLINE_RETRY_INTERVAL_MS)
                 val result = try {
                     src.getMusicItems(currentSession.userId, currentSession.accessToken)
@@ -1203,15 +1280,15 @@ class JellyfinViewModel(
      * 空列表处理：列表页转圈没有尽头，空态是更诚实的占位。
      */
     fun loadCachedAlbums() {
-        val tracks = _state.value.tracks
+        val tracks = _state.value.library.tracks
         if (tracks == null) {
-            _state.value = _state.value.copy(cachedAlbums = emptyList())
+            updateDownloads { it.copy(cachedAlbums = emptyList()) }
             return
         }
         viewModelScope.launch(dispatcher) {
             // 分组需要专辑对象（封面/详情跳转用）。专辑页没逛过、快照里也没有时，
             // 在线就现拉一次（幂等），落地后再分组；离线只能用快照里有的。
-            if (_state.value.albums == null && !_state.value.isOffline) {
+            if (_state.value.library.albums == null && !_state.value.library.isOffline) {
                 loadAlbums()
                 libraryCache.awaitAlbums()
             }
@@ -1226,7 +1303,7 @@ class JellyfinViewModel(
      */
     fun deleteDownloadedTrack(track: Track) {
         val library = downloadLibrary ?: return
-        val tracks = _state.value.tracks ?: return
+        val tracks = _state.value.library.tracks ?: return
         if (_currentTrack.value?.id == track.id) return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
@@ -1241,14 +1318,14 @@ class JellyfinViewModel(
      * 删掉一张专辑的下载（界面已二次确认）。规则全部在 [DownloadLibrary.delete] 里：
      * 按名单只删当初下过的那批、正在播的保留、名单缺失时兜底到已有完整副本的那几首。
      *
-     * 进度与结果走 state（工单 13）：删除期间 [JellyfinUiState.isDeletingDownload] 为 true
+     * 进度与结果走 state（工单 13）：删除期间 [DownloadsState.isDeleting] 为 true
      * （确认框显示进度、禁按钮），删完写一条「已删除 N 首」到
-     * [JellyfinUiState.downloadDeleteMessage] 由界面弹掉。**跑在 viewModelScope**，
+     * [DownloadsState.deleteMessage] 由界面弹掉。**跑在 viewModelScope**，
      * 页面切走也不中断——删一半的破坏性操作最难受。
      */
     fun deleteAlbumCopies(album: Album) {
         val library = downloadLibrary ?: return
-        val tracks = _state.value.tracks ?: return
+        val tracks = _state.value.library.tracks ?: return
         val currentSession = session ?: return
         // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
         if (downloadDeleteInFlight) return
@@ -1256,9 +1333,9 @@ class JellyfinViewModel(
         // 会话代次：删除可能跨过「退出登录 / 会话过期」，结果不该写到新会话的界面上。
         val generation = loginGeneration
         // target 的归属在挂起点之前定死：删除过程中就算退出登录，这批字节仍按原账号删。
-        val serverUrl = _state.value.serverUrl
+        val serverUrl = _state.value.session.serverUrl
         val userId = currentSession.userId
-        _state.value = _state.value.copy(isDeletingDownload = true, downloadDeleteMessage = null)
+        updateDownloads { it.copy(isDeleting = true, deleteMessage = null) }
         viewModelScope.launch(dispatcher) {
             try {
                 val target = buildDownloadTarget(
@@ -1278,32 +1355,34 @@ class JellyfinViewModel(
                         refreshCachedAlbums(tracks)
                         // 统计由 module 在 delete() 内部刷新（#7），这里不再重复查字节。
                         // 报的是**真删掉的副本数**：正在播的那首被跳过就不算它。
-                        _state.value = _state.value.copy(
-                            downloadDeleteMessage = downloadDeletedMessage(result.deletedCount)
-                        )
+                        val message = downloadDeletedMessage(result.deletedCount)
+                        updateDownloads { it.copy(deleteMessage = message) }
                     }
                 }
             } finally {
                 downloadDeleteInFlight = false
-                _state.value = _state.value.copy(isDeletingDownload = false)
+                updateDownloads { it.copy(isDeleting = false) }
             }
         }
     }
 
     /** 界面弹完「已删除 N 首」后清掉，避免转屏 / 返回后重复弹。 */
     fun dismissDownloadDeleteMessage() {
-        _state.value = _state.value.copy(downloadDeleteMessage = null)
+        updateDownloads { it.copy(deleteMessage = null) }
     }
 
     /** 重算已下载列表。专辑对象从专辑页拿（没加载过就退快照）按专辑名配对。 */
     private suspend fun refreshCachedAlbums(tracks: List<Track>) {
         val cached = computeDownloadedTrackIds()
-        val albums = _state.value.albums ?: loadSnapshot()?.albums.orEmpty()
-        _state.value = _state.value.copy(
-            cachedAlbums = groupCachedByAlbum(tracks, albums, cached),
-            // 离线时已下载集合跟着删下载走：删掉的那首马上从列表里消失。
-            cachedTrackIds = if (_state.value.isOffline) cached else _state.value.cachedTrackIds
-        )
+        val albums = _state.value.library.albums ?: loadSnapshot()?.albums.orEmpty()
+        val offline = _state.value.library.isOffline
+        updateDownloads {
+            it.copy(
+                cachedAlbums = groupCachedByAlbum(tracks, albums, cached),
+                // 离线时已下载集合跟着删下载走：删掉的那首马上从列表里消失。
+                visibleTrackIds = if (offline) cached else it.visibleTrackIds,
+            )
+        }
     }
 
     /**

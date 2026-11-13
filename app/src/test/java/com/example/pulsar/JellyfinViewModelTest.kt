@@ -53,7 +53,7 @@ class JellyfinViewModelTest {
 
         advanceUntilIdle()
 
-        assertEquals(listOf(track), viewModel.state.value.tracks)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
         assertEquals("auth-header", authorization.value)
     }
 
@@ -65,7 +65,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(0, api.musicItemsCalls)
-        assertNull(viewModel.state.value.tracks)
+        assertNull(viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -75,8 +75,8 @@ class JellyfinViewModelTest {
 
         // 还没推进调度器：恢复协程尚未跑完。此时 UI 必须知道"正在恢复"，才能
         // 直接进主页面并用灰色波浪骨架占位，而不是先闪一屏空白登录表单。
-        assertTrue(viewModel.state.value.isRestoring)
-        assertNull(viewModel.state.value.tracks)
+        assertTrue(viewModel.state.value.session.isRestoring)
+        assertNull(viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -86,8 +86,8 @@ class JellyfinViewModelTest {
 
         advanceUntilIdle()
 
-        assertTrue(!viewModel.state.value.isRestoring)
-        assertEquals(listOf(track), viewModel.state.value.tracks)
+        assertTrue(!viewModel.state.value.session.isRestoring)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -96,8 +96,8 @@ class JellyfinViewModelTest {
 
         advanceUntilIdle()
 
-        assertTrue(!viewModel.state.value.isRestoring)
-        assertNull(viewModel.state.value.tracks)
+        assertTrue(!viewModel.state.value.session.isRestoring)
+        assertNull(viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -108,8 +108,8 @@ class JellyfinViewModelTest {
 
         advanceUntilIdle()
 
-        assertTrue(!viewModel.state.value.isRestoring)
-        assertNull(viewModel.state.value.tracks)
+        assertTrue(!viewModel.state.value.session.isRestoring)
+        assertNull(viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -121,8 +121,8 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 连不上服务器时回退到登录表单，但地址/用户名已填好，用户只需补密码重试。
-        assertEquals("https://server.test", viewModel.state.value.serverUrl)
-        assertEquals("user", viewModel.state.value.username)
+        assertEquals("https://server.test", viewModel.state.value.session.serverUrl)
+        assertEquals("user", viewModel.state.value.session.username)
     }
 
     @Test
@@ -136,7 +136,7 @@ class JellyfinViewModelTest {
 
         assertTrue(sessions.cleared)
         assertNull(authorization.value)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("失效"))
+        assertTrue(viewModel.state.value.session.errorMessage!!.contains("失效"))
     }
 
     @Test
@@ -152,7 +152,7 @@ class JellyfinViewModelTest {
 
         assertNull(authorization.value)
         assertTrue(sessions.cleared)
-        assertNull(viewModel.state.value.tracks)
+        assertNull(viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -164,7 +164,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertTrue(!sessions.cleared)
-        assertTrue(viewModel.state.value.errorMessage!!.contains("连接"))
+        assertTrue(viewModel.state.value.session.errorMessage!!.contains("连接"))
     }
 
     @Test
@@ -178,7 +178,7 @@ class JellyfinViewModelTest {
         viewModel.loadAlbums()
         advanceUntilIdle()
         viewModel.setPlaybackQueue(listOf(track), "track-1")
-        assertTrue(viewModel.state.value.albums != null)
+        assertTrue(viewModel.state.value.library.albums != null)
         assertTrue(viewModel.playbackTracks.value.isNotEmpty())
 
         api.searchError = JellyfinError.Unauthorized()
@@ -188,11 +188,11 @@ class JellyfinViewModelTest {
 
         assertNull(authorization.value)
         assertTrue(sessions.cleared)
-        assertNull(viewModel.state.value.albums)
-        assertNull(viewModel.state.value.tracks)
+        assertNull(viewModel.state.value.library.albums)
+        assertNull(viewModel.state.value.library.tracks)
         assertTrue(viewModel.playbackTracks.value.isEmpty())
         assertNull(viewModel.currentTrack.value)
-        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
     }
 
     @Test
@@ -212,7 +212,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf("latest"), api.searchQueries)
-        assertEquals(listOf(track), viewModel.state.value.searchResults?.tracks)
+        assertEquals(listOf(track), viewModel.state.value.library.search.results?.tracks)
     }
 
     @Test
@@ -227,8 +227,8 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.searchQueries.isEmpty())
-        assertNull(viewModel.state.value.searchResults)
-        assertEquals(false, viewModel.state.value.isSearching)
+        assertNull(viewModel.state.value.library.search.results)
+        assertEquals(false, viewModel.state.value.library.search.isSearching)
     }
 
     // ===== 歌词加载（loadLyricsForCurrentTrack / clearLyrics） =====
@@ -354,10 +354,10 @@ class JellyfinViewModelTest {
 
         assertTrue(ok)
         // 本地立刻更新，不等 Jellyfin 重扫
-        assertEquals(listOf(current), viewModel.state.value.tracks)
+        assertEquals(listOf(current), viewModel.state.value.library.tracks)
         assertNull(viewModel.playbackTracks.value["track-2"])
         assertEquals(listOf(listOf("E:\\music\\b.flac")), api.deletedPaths)
-        assertTrue(!viewModel.state.value.isFileOpsBusy)
+        assertTrue(!viewModel.state.value.library.fileOps.isBusy)
     }
 
     @Test
@@ -371,8 +371,8 @@ class JellyfinViewModelTest {
         val ok = viewModel.deleteTrack(other)
 
         assertTrue(!ok)
-        assertEquals(listOf(track, other), viewModel.state.value.tracks)
-        assertTrue(viewModel.state.value.fileOpsMessage?.isNotBlank() == true)
+        assertEquals(listOf(track, other), viewModel.state.value.library.tracks)
+        assertTrue(viewModel.state.value.library.fileOps.message?.isNotBlank() == true)
     }
 
     @Test
@@ -387,7 +387,7 @@ class JellyfinViewModelTest {
         assertTrue(!ok)
         assertEquals(0, api.deleteCalls)
         // 文件还在，本地列表也不能动
-        assertEquals(listOf(current), viewModel.state.value.tracks)
+        assertEquals(listOf(current), viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -412,7 +412,7 @@ class JellyfinViewModelTest {
 
         assertTrue(ok)
         // 本地字段被替换，filePath 不变（改名不挪文件）
-        assertEquals(current.copy(title = "新歌名", album = "新专辑"), viewModel.state.value.tracks.orEmpty().single())
+        assertEquals(current.copy(title = "新歌名", album = "新专辑"), viewModel.state.value.library.tracks.orEmpty().single())
         // 正在播的这首也要跟着换，播放页头显示新名字
         assertEquals(current.copy(title = "新歌名", album = "新专辑"), viewModel.currentTrack.value)
         assertEquals(1, api.renameCalls)
@@ -433,9 +433,9 @@ class JellyfinViewModelTest {
         val ok = viewModel.renameTrack(current, title = "新歌名")
 
         assertTrue(!ok)
-        assertEquals(listOf(current), viewModel.state.value.tracks)
+        assertEquals(listOf(current), viewModel.state.value.library.tracks)
         // 密钥错要单独提示去检查，不是笼统的服务出错
-        assertTrue(viewModel.state.value.fileOpsMessage?.contains("密钥") == true)
+        assertTrue(viewModel.state.value.library.fileOps.message?.contains("密钥") == true)
     }
 
     // ── 回收站（工单 06：设置页看回收站、恢复、清空） ──────────────────────
@@ -455,8 +455,8 @@ class JellyfinViewModelTest {
         viewModel.loadRecycle()
         advanceUntilIdle()
 
-        assertEquals(listOf("周杰伦/七里香/a.flac"), viewModel.state.value.recycleFiles.map { it.relPath })
-        assertTrue(!viewModel.state.value.isRecycleLoading)
+        assertEquals(listOf("周杰伦/七里香/a.flac"), viewModel.state.value.library.fileOps.recycleFiles.map { it.relPath })
+        assertTrue(!viewModel.state.value.library.fileOps.isRecycleLoading)
     }
 
     @Test
@@ -469,8 +469,8 @@ class JellyfinViewModelTest {
         viewModel.loadRecycle()
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.recycleMessage?.contains("服务") == true)
-        assertTrue(viewModel.state.value.recycleFiles.isEmpty())
+        assertTrue(viewModel.state.value.library.fileOps.recycleMessage?.contains("服务") == true)
+        assertTrue(viewModel.state.value.library.fileOps.recycleFiles.isEmpty())
     }
 
     @Test
@@ -493,7 +493,7 @@ class JellyfinViewModelTest {
         viewModel.restoreRecycle("a.flac")
         advanceUntilIdle()
 
-        assertEquals(listOf("b.flac"), viewModel.state.value.recycleFiles.map { it.relPath })
+        assertEquals(listOf("b.flac"), viewModel.state.value.library.fileOps.recycleFiles.map { it.relPath })
         assertEquals(listOf(listOf("a.flac")), api.restoredPaths)
     }
 
@@ -511,7 +511,7 @@ class JellyfinViewModelTest {
         viewModel.purgeRecycle()
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.recycleFiles.isEmpty())
+        assertTrue(viewModel.state.value.library.fileOps.recycleFiles.isEmpty())
         assertEquals(1, api.purgeCalls)
     }
 
@@ -522,13 +522,13 @@ class JellyfinViewModelTest {
         val viewModel = createViewModelWithFileOps(FakeLibraryFilesApi(), tracks = listOf(track))
 
         viewModel.enterMultiSelect("track-1")
-        assertEquals(setOf("track-1"), viewModel.state.value.multiSelectIds)
+        assertEquals(setOf("track-1"), viewModel.state.value.library.multiSelectIds)
         viewModel.selectAllTracks(listOf("track-1", "track-2", "track-3"))
-        assertEquals(setOf("track-1", "track-2", "track-3"), viewModel.state.value.multiSelectIds)
+        assertEquals(setOf("track-1", "track-2", "track-3"), viewModel.state.value.library.multiSelectIds)
         viewModel.toggleMultiSelect("track-2")
-        assertEquals(setOf("track-1", "track-3"), viewModel.state.value.multiSelectIds)
+        assertEquals(setOf("track-1", "track-3"), viewModel.state.value.library.multiSelectIds)
         viewModel.clearMultiSelect()
-        assertTrue(viewModel.state.value.multiSelectIds.isEmpty())
+        assertTrue(viewModel.state.value.library.multiSelectIds.isEmpty())
     }
 
     @Test
@@ -544,10 +544,10 @@ class JellyfinViewModelTest {
         val deleted = viewModel.deleteTracks(listOf(b, c))
 
         assertEquals(2, deleted)
-        assertEquals(listOf(a), viewModel.state.value.tracks)
+        assertEquals(listOf(a), viewModel.state.value.library.tracks)
         assertNull(viewModel.playbackTracks.value["b"])
         assertNull(viewModel.playbackTracks.value["c"])
-        assertTrue(viewModel.state.value.multiSelectIds.isEmpty())
+        assertTrue(viewModel.state.value.library.multiSelectIds.isEmpty())
     }
 
     @Test
@@ -569,9 +569,9 @@ class JellyfinViewModelTest {
 
         assertEquals(1, deleted)
         // 成功的生效
-        assertEquals(listOf(b), viewModel.state.value.tracks)
+        assertEquals(listOf(b), viewModel.state.value.library.tracks)
         // 失败的有提示
-        assertTrue(viewModel.state.value.fileOpsMessage?.contains("失败") == true)
+        assertTrue(viewModel.state.value.library.fileOps.message?.contains("失败") == true)
     }
 
     @Test
@@ -585,7 +585,7 @@ class JellyfinViewModelTest {
         val deleted = viewModel.deleteTracks(listOf(current, other))
 
         assertEquals(1, deleted)
-        assertEquals(listOf(current), viewModel.state.value.tracks)
+        assertEquals(listOf(current), viewModel.state.value.library.tracks)
         // 只发了正在播之外的那一个路径
         assertEquals(listOf(listOf("E:\\music\\other.flac")), api.deletedPaths)
     }
@@ -640,10 +640,10 @@ class JellyfinViewModelTest {
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
-        assertTrue(viewModel.state.value.isOffline)
-        assertEquals(listOf(track), viewModel.state.value.tracks)
+        assertTrue(viewModel.state.value.library.isOffline)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
         // 离线态拿不到服务器，没有错误弹给用户
-        assertNull(viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.session.errorMessage)
         viewModel.stopOfflineForTest()
     }
 
@@ -656,8 +656,8 @@ class JellyfinViewModelTest {
             api
         )
         advanceUntilIdle()
-        assertTrue(!viewModel.state.value.isOffline)
-        assertTrue(viewModel.state.value.errorMessage != null)
+        assertTrue(!viewModel.state.value.library.isOffline)
+        assertTrue(viewModel.state.value.session.errorMessage != null)
     }
 
     @Test
@@ -671,15 +671,15 @@ class JellyfinViewModelTest {
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
-        assertTrue(viewModel.state.value.isOffline)
+        assertTrue(viewModel.state.value.library.isOffline)
 
         // 网络恢复：探活请求成功
         api.musicItemsError = null
         advanceTimeBy(20_000)
         advanceBounded()
 
-        assertTrue(!viewModel.state.value.isOffline)
-        assertNull(viewModel.state.value.cachedTrackIds)
+        assertTrue(!viewModel.state.value.library.isOffline)
+        assertNull(viewModel.state.value.downloads.visibleTrackIds)
         viewModel.stopOfflineForTest()
     }
 
@@ -754,8 +754,8 @@ class JellyfinViewModelTest {
         advanceTimeBy(400)
         advanceBounded()
 
-        assertTrue(viewModel.state.value.isOfflineSearch)
-        assertEquals(listOf(track), viewModel.state.value.searchResults?.tracks)
+        assertTrue(viewModel.state.value.library.search.isOfflineSearch)
+        assertEquals(listOf(track), viewModel.state.value.library.search.results?.tracks)
         viewModel.stopOfflineForTest()
     }
 
@@ -775,8 +775,8 @@ class JellyfinViewModelTest {
         viewModel.loadPlaylists()
         advanceBounded()
 
-        assertTrue(viewModel.state.value.isOffline)
-        assertEquals("播放列表需要联网才能查看", viewModel.state.value.errorMessage)
+        assertTrue(viewModel.state.value.library.isOffline)
+        assertEquals("播放列表需要联网才能查看", viewModel.state.value.session.errorMessage)
         viewModel.stopOfflineForTest()
     }
 
@@ -902,11 +902,11 @@ class JellyfinViewModelTest {
 
         val state = viewModel.state.value
         // 原始状态保留全量（回在线要用），界面派生的那一份才筛。
-        assertEquals(listOf(kept, dropped), state.tracks)
+        assertEquals(listOf(kept, dropped), state.library.tracks)
         val visible = offlineVisibleLibrary(
-            tracks = state.tracks,
-            albums = state.albums,
-            visibleTrackIds = state.cachedTrackIds.orEmpty()
+            tracks = state.library.tracks,
+            albums = state.library.albums,
+            visibleTrackIds = state.downloads.visibleTrackIds.orEmpty()
         )
         assertEquals(listOf(kept), visible.tracks)
         // 专辑只下了一首也还在（选曲下载不该让整张消失）
@@ -926,17 +926,17 @@ class JellyfinViewModelTest {
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
-        assertTrue(viewModel.state.value.isOffline)
+        assertTrue(viewModel.state.value.library.isOffline)
 
         api.musicItemsError = null
         advanceTimeBy(20_000)
         advanceBounded()
 
         val state = viewModel.state.value
-        assertFalse(state.isOffline)
+        assertFalse(state.library.isOffline)
         // 回在线时 cachedTrackIds 清成 null：界面不筛，直接显示原件全量。
-        assertNull(state.cachedTrackIds)
-        assertEquals(listOf(track), state.tracks)
+        assertNull(state.downloads.visibleTrackIds)
+        assertEquals(listOf(track), state.library.tracks)
         viewModel.stopOfflineForTest()
     }
 
@@ -1047,13 +1047,13 @@ class JellyfinViewModelTest {
         viewModel.updatePassword("pass")
         viewModel.login()
         advanceUntilIdle()
-        assertTrue(!viewModel.state.value.isOffline)
+        assertTrue(!viewModel.state.value.library.isOffline)
 
         api.albumsError = JellyfinError.Network(IOException("no network"))
         viewModel.loadAlbums()
         advanceBounded()
 
-        assertTrue(viewModel.state.value.isOffline)
+        assertTrue(viewModel.state.value.library.isOffline)
         assertTrue(viewModel.isPlayable(track))
         // 重登后迁移会补一条专辑条目（存量副本反推），原来那条下载记录不能丢
         assertTrue(ledger.entries.any { it.trackIds.contains("track-1") })
@@ -1100,12 +1100,12 @@ class JellyfinViewModelTest {
 
         viewModel.loadPlaylists()
         advanceBounded()
-        assertEquals(listOf(offlinePlaylist.id), viewModel.state.value.playlists?.map { it.id })
+        assertEquals(listOf(offlinePlaylist.id), viewModel.state.value.library.playlists?.map { it.id })
 
         viewModel.loadPlaylistTracks(offlinePlaylist)
         advanceBounded()
-        assertEquals(listOf(track), viewModel.state.value.playlistTracks)
-        assertNull(viewModel.state.value.errorMessage)
+        assertEquals(listOf(track), viewModel.state.value.library.playlistTracks)
+        assertNull(viewModel.state.value.session.errorMessage)
         assertTrue(viewModel.isPlayable(track))
         viewModel.stopOfflineForTest()
     }
@@ -1130,8 +1130,8 @@ class JellyfinViewModelTest {
         viewModel.loadPlaylistTracks(notDownloadedPlaylist)
         advanceBounded()
 
-        assertNull(viewModel.state.value.playlistTracks)
-        assertEquals("这个播放列表没有下载，需要联网才能查看", viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.library.playlistTracks)
+        assertEquals("这个播放列表没有下载，需要联网才能查看", viewModel.state.value.session.errorMessage)
         viewModel.stopOfflineForTest()
     }
 
@@ -1157,7 +1157,7 @@ class JellyfinViewModelTest {
         advanceBounded()
 
         // 一个可见的都没有：保持 null，界面照旧「需要联网」，不误报「暂无播放列表」
-        assertNull(viewModel.state.value.playlists)
+        assertNull(viewModel.state.value.library.playlists)
         viewModel.stopOfflineForTest()
     }
 
@@ -1249,7 +1249,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf("https://server.test"), history.recorded)
-        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.session.serverUrlHistory)
     }
 
     @Test
@@ -1277,7 +1277,7 @@ class JellyfinViewModelTest {
         history.record("https://old.test")
         advanceUntilIdle()
 
-        assertEquals(listOf("https://old.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals(listOf("https://old.test"), viewModel.state.value.session.serverUrlHistory)
     }
 
     /**
@@ -1313,16 +1313,16 @@ class JellyfinViewModelTest {
         // 先放行会话恢复：它会写 serverUrl 和 tracks。
         sessionGate.complete(Unit)
         advanceUntilIdle()
-        assertEquals("https://server.test", viewModel.state.value.serverUrl)
-        assertEquals(listOf(track), viewModel.state.value.tracks)
+        assertEquals("https://server.test", viewModel.state.value.session.serverUrl)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
 
         // 再放行地址历史读盘。它带着「serverUrl 为空」的旧快照回来，不能把新状态盖掉。
         historyGate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(listOf("https://old.test"), viewModel.state.value.serverUrlHistory)
-        assertEquals("https://server.test", viewModel.state.value.serverUrl)
-        assertEquals(listOf(track), viewModel.state.value.tracks)
+        assertEquals(listOf("https://old.test"), viewModel.state.value.session.serverUrlHistory)
+        assertEquals("https://server.test", viewModel.state.value.session.serverUrl)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -1339,12 +1339,12 @@ class JellyfinViewModelTest {
         viewModel.updatePassword("pass")
         viewModel.login()
         advanceUntilIdle()
-        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.session.serverUrlHistory)
 
         viewModel.signOut()
         advanceUntilIdle()
 
-        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.session.serverUrlHistory)
     }
 
     @Test
@@ -1357,7 +1357,7 @@ class JellyfinViewModelTest {
         val authorization = FakeAuthorizationSink()
         val viewModel = createViewModel(sessions, api, authorization, snapshotRepository = snapshotRepo)
         advanceBounded()
-        assertTrue(viewModel.state.value.isOffline)
+        assertTrue(viewModel.state.value.library.isOffline)
 
         // 网络恢复了，但 token 已被服务端吊销：探活必须如实过期，而不是每 15s 空转
         api.musicItemsError = JellyfinError.Unauthorized()
@@ -1366,8 +1366,8 @@ class JellyfinViewModelTest {
 
         assertTrue(sessions.cleared)
         assertNull(authorization.value)
-        assertTrue(!viewModel.state.value.isOffline)
-        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        assertTrue(!viewModel.state.value.library.isOffline)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
         viewModel.stopOfflineForTest()
     }
 
@@ -1398,7 +1398,7 @@ class JellyfinViewModelTest {
                 CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2),
                 CachedAlbum(albumB, tracks = listOf(t3), totalCount = 1)
             ),
-            viewModel.state.value.cachedAlbums
+            viewModel.state.value.downloads.cachedAlbums
         )
     }
 
@@ -1420,7 +1420,7 @@ class JellyfinViewModelTest {
 
         assertEquals(
             listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 1)),
-            viewModel.state.value.cachedAlbums
+            viewModel.state.value.downloads.cachedAlbums
         )
     }
 
@@ -1456,10 +1456,10 @@ class JellyfinViewModelTest {
         assertTrue(mediaDownloads.removedKeys.contains("stream/t2"))
         assertEquals(1, library.state.value.stats.completeCount)
         // 提示报的是**真删掉的副本数**：正在播的那首被跳过，所以是 1 不是 2（用户故事 62）
-        assertEquals("已删除 1 首", viewModel.state.value.downloadDeleteMessage)
+        assertEquals("已删除 1 首", viewModel.state.value.downloads.deleteMessage)
         assertEquals(
             listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2)),
-            viewModel.state.value.cachedAlbums
+            viewModel.state.value.downloads.cachedAlbums
         )
     }
 
@@ -1483,15 +1483,15 @@ class JellyfinViewModelTest {
 
         viewModel.deleteAlbumCopies(albumA)
         // 忙碌位在**发起线程**同步置位：界面这一帧就能显示进度、禁掉按钮（连点进不来）
-        assertTrue(viewModel.state.value.isDeletingDownload)
-        assertNull(viewModel.state.value.downloadDeleteMessage)
+        assertTrue(viewModel.state.value.downloads.isDeleting)
+        assertNull(viewModel.state.value.downloads.deleteMessage)
 
         advanceUntilIdle()
-        assertFalse(viewModel.state.value.isDeletingDownload)
-        assertEquals("已删除 2 首", viewModel.state.value.downloadDeleteMessage)
+        assertFalse(viewModel.state.value.downloads.isDeleting)
+        assertEquals("已删除 2 首", viewModel.state.value.downloads.deleteMessage)
         // 界面弹完自己清掉，避免转屏/返回后再弹一次
         viewModel.dismissDownloadDeleteMessage()
-        assertNull(viewModel.state.value.downloadDeleteMessage)
+        assertNull(viewModel.state.value.downloads.deleteMessage)
     }
 
     @Test
@@ -1517,8 +1517,8 @@ class JellyfinViewModelTest {
 
         // 第二次被守卫挡在门外：只剩第一次那一遍的删除记录
         assertEquals(listOf("stream/t1"), mediaDownloads.removedKeys)
-        assertEquals("已删除 1 首", viewModel.state.value.downloadDeleteMessage)
-        assertFalse(viewModel.state.value.isDeletingDownload)
+        assertEquals("已删除 1 首", viewModel.state.value.downloads.deleteMessage)
+        assertFalse(viewModel.state.value.downloads.isDeleting)
     }
 
     @Test
@@ -1543,7 +1543,7 @@ class JellyfinViewModelTest {
         mediaDownloads.removeGate = gate
         viewModel.deleteAlbumCopies(albumA)
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.isDeletingDownload)
+        assertTrue(viewModel.state.value.downloads.isDeleting)
 
         viewModel.signOut()
         gate.complete(Unit)
@@ -1552,8 +1552,8 @@ class JellyfinViewModelTest {
         // 字节照删（本地数据，与界面在展示哪个会话无关）……
         assertTrue(mediaDownloads.removedKeys.contains("stream/t1"))
         // ……但结果不写进新会话的 state：提示不该飘在登录页上
-        assertFalse(viewModel.state.value.isDeletingDownload)
-        assertNull(viewModel.state.value.downloadDeleteMessage)
+        assertFalse(viewModel.state.value.downloads.isDeleting)
+        assertNull(viewModel.state.value.downloads.deleteMessage)
     }
 
     @Test
@@ -1587,7 +1587,7 @@ class JellyfinViewModelTest {
         assertTrue(mediaDownloads.removedKeys.contains("stream/t3"))
         assertEquals(
             listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 1)),
-            viewModel.state.value.cachedAlbums
+            viewModel.state.value.downloads.cachedAlbums
         )
     }
 
@@ -1660,7 +1660,7 @@ class JellyfinViewModelTest {
         assertEquals(setOf("stream/t1"), mediaDownloads.completeKeys)
         assertEquals(
             listOf(CachedAlbum(albumA, tracks = listOf(t1), totalCount = 2)),
-            viewModel.state.value.cachedAlbums
+            viewModel.state.value.downloads.cachedAlbums
         )
     }
 
@@ -1678,7 +1678,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         // 切换前：旧账号确实看得到自己的下载。专辑列表没加载时从曲目反推卡片
         // （见 groupCachedByAlbum），所以这里不是空列表——本用例只关心「切换后清空」。
-        assertEquals(1, viewModel.state.value.cachedAlbums?.size)
+        assertEquals(1, viewModel.state.value.downloads.cachedAlbums?.size)
 
         api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
         viewModel.updateServerUrl("https://server.test")
@@ -1687,7 +1687,7 @@ class JellyfinViewModelTest {
         viewModel.login()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.cachedAlbums)
+        assertNull(viewModel.state.value.downloads.cachedAlbums)
     }
 
     @Test
@@ -1703,7 +1703,7 @@ class JellyfinViewModelTest {
         viewModel.deleteTrack(deletable)
 
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.tracks.isNullOrEmpty())
+        assertTrue(viewModel.state.value.library.tracks.isNullOrEmpty())
         assertEquals(listOf("stream/t1"), mediaDownloads.removedKeys)
     }
 
@@ -1767,8 +1767,8 @@ class JellyfinViewModelTest {
         viewModel.loadMostPlayed()
         advanceUntilIdle()
 
-        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        assertEquals(listOf(recent), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.library.mostPlayed)
         // 幂等：字段非空即已加载，切回发现页不重发
         assertEquals(1, api.recentlyPlayedCalls)
         assertEquals(1, api.mostPlayedCalls)
@@ -1788,7 +1788,7 @@ class JellyfinViewModelTest {
         viewModel.loadRecentlyAdded()
         advanceUntilIdle()
 
-        assertEquals(listOf(album), viewModel.state.value.recentlyAdded)
+        assertEquals(listOf(album), viewModel.state.value.library.recentlyAdded)
     }
 
     @Test
@@ -1808,10 +1808,10 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 失败的一节保持 null（界面隐藏该 section），另一节照常显示
-        assertNull(viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.library.mostPlayed)
         // 局部失败不升级成整页错误，也不把用户踢回登录
-        assertNull(viewModel.state.value.errorMessage)
+        assertNull(viewModel.state.value.session.errorMessage)
     }
 
     @Test
@@ -1826,7 +1826,7 @@ class JellyfinViewModelTest {
 
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
-        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
 
         // 服务恢复：失败不能写成「已加载且为空」，否则这一节到进程结束都不再请求
         api.recentlyPlayedResult = Result.success(listOf(track))
@@ -1834,7 +1834,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(2, api.recentlyPlayedCalls)
-        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(track), viewModel.state.value.library.recentlyPlayed)
     }
 
     @Test
@@ -1850,8 +1850,8 @@ class JellyfinViewModelTest {
         viewModel.loadRecentlyPlayed()
         advanceBounded()
 
-        assertTrue(viewModel.state.value.isOffline)
-        assertNull(viewModel.state.value.recentlyPlayed)
+        assertTrue(viewModel.state.value.library.isOffline)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
         viewModel.stopOfflineForTest()
     }
 
@@ -1868,7 +1868,7 @@ class JellyfinViewModelTest {
 
         viewModel.loadRecentlyAdded()
         advanceUntilIdle()
-        assertNull(viewModel.state.value.recentlyAdded)
+        assertNull(viewModel.state.value.library.recentlyAdded)
 
         api.recentlyAddedResult = Result.success(listOf(album))
         viewModel.loadRecentlyAdded()
@@ -1876,7 +1876,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(2, api.recentlyAddedCalls)
-        assertEquals(listOf(album), viewModel.state.value.recentlyAdded)
+        assertEquals(listOf(album), viewModel.state.value.library.recentlyAdded)
     }
 
     @Test
@@ -1894,7 +1894,7 @@ class JellyfinViewModelTest {
 
         assertTrue(sessions.cleared)
         assertNull(authorization.value)
-        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
     }
 
     @Test
@@ -1916,7 +1916,7 @@ class JellyfinViewModelTest {
         gate.complete(Unit)
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
     }
 
     @Test
@@ -1935,7 +1935,7 @@ class JellyfinViewModelTest {
         viewModel.loadMostPlayed()
         viewModel.loadRecentlyAdded()
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.recentlyPlayed != null)
+        assertTrue(viewModel.state.value.library.recentlyPlayed != null)
 
         api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
         viewModel.updateServerUrl("https://server.test")
@@ -1944,9 +1944,9 @@ class JellyfinViewModelTest {
         viewModel.login()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.recentlyPlayed)
-        assertNull(viewModel.state.value.mostPlayed)
-        assertNull(viewModel.state.value.recentlyAdded)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
+        assertNull(viewModel.state.value.library.mostPlayed)
+        assertNull(viewModel.state.value.library.recentlyAdded)
     }
 
     @Test
@@ -1980,9 +1980,9 @@ class JellyfinViewModelTest {
         assertEquals(2, api.recentlyAddedCalls)
         // 随机专辑也一起重拉（它本来就不幂等，这里锁住接线）
         assertEquals(2, api.randomAlbumsCalls)
-        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
-        assertEquals(listOf(added), viewModel.state.value.recentlyAdded)
+        assertEquals(listOf(recent), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(frequent), viewModel.state.value.library.mostPlayed)
+        assertEquals(listOf(added), viewModel.state.value.library.recentlyAdded)
     }
 
     @Test
@@ -2002,8 +2002,8 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 失败只影响最近播放：界面只对那一节不再显示骨架，最常播放照常显示
-        assertEquals(setOf(LibrarySectionKey.RecentlyPlayed), viewModel.state.value.discoverFailedSections)
-        assertEquals(listOf(frequent), viewModel.state.value.mostPlayed)
+        assertEquals(setOf(LibrarySectionKey.RecentlyPlayed), viewModel.state.value.library.discoverFailedSections)
+        assertEquals(listOf(frequent), viewModel.state.value.library.mostPlayed)
     }
 
     @Test
@@ -2017,15 +2017,15 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
-        assertTrue(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.discoverFailedSections)
+        assertTrue(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.library.discoverFailedSections)
 
         // 失败字段保持 null，所以幂等守卫放行；再次加载先清标记再请求
         api.recentlyPlayedResult = Result.success(listOf(track))
         viewModel.loadRecentlyPlayed()
-        assertFalse(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.discoverFailedSections)
+        assertFalse(LibrarySectionKey.RecentlyPlayed in viewModel.state.value.library.discoverFailedSections)
         advanceUntilIdle()
 
-        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(track), viewModel.state.value.library.recentlyPlayed)
     }
 
     @Test
@@ -2050,9 +2050,9 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 旧数据还在（界面不会先空一帧），只是版本号推进了
-        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(track), viewModel.state.value.mostPlayed)
-        assertEquals(1, viewModel.state.value.historyEpoch)
+        assertEquals(listOf(track), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(track), viewModel.state.value.library.mostPlayed)
+        assertEquals(1, viewModel.state.value.library.historyEpoch)
 
         viewModel.loadRecentlyPlayed()
         viewModel.loadMostPlayed()
@@ -2090,8 +2090,8 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 请求还没回来：旧列表必须还在（这就是「不闪」）
-        assertEquals(listOf(old), viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(old), viewModel.state.value.mostPlayed)
+        assertEquals(listOf(old), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(old), viewModel.state.value.library.mostPlayed)
 
         gate.complete(Unit)
         advanceUntilIdle()
@@ -2120,13 +2120,13 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 刷新进行中：旧数据都在，界面不会掉进骨架屏
-        assertTrue(viewModel.state.value.isDiscoverRefreshing)
-        assertEquals(listOf(old), viewModel.state.value.recentlyPlayed)
-        assertEquals(listOf(old), viewModel.state.value.mostPlayed)
+        assertTrue(viewModel.state.value.library.isDiscoverRefreshing)
+        assertEquals(listOf(old), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(listOf(old), viewModel.state.value.library.mostPlayed)
 
         gate.complete(Unit)
         advanceUntilIdle()
-        assertFalse(viewModel.state.value.isDiscoverRefreshing)
+        assertFalse(viewModel.state.value.library.isDiscoverRefreshing)
         assertEquals(2, api.recentlyPlayedCalls)
     }
 
@@ -2139,10 +2139,10 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         viewModel.refreshDiscover()
-        assertTrue(viewModel.state.value.isDiscoverRefreshing)
+        assertTrue(viewModel.state.value.library.isDiscoverRefreshing)
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.isDiscoverRefreshing)
+        assertFalse(viewModel.state.value.library.isDiscoverRefreshing)
     }
 
     @Test
@@ -2157,12 +2157,12 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
-        assertEquals(listOf(recent), viewModel.state.value.recentlyPlayed)
+        assertEquals(listOf(recent), viewModel.state.value.library.recentlyPlayed)
 
         viewModel.signOut()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.recentlyPlayed)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
     }
 
     @Test
@@ -2176,15 +2176,15 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.recentlyPlayed != null)
+        assertTrue(viewModel.state.value.library.recentlyPlayed != null)
 
         // 曲库请求撞上 401 → 会话过期，历史一并清空
         viewModel.loadAlbums()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.recentlyPlayed)
-        assertNull(viewModel.state.value.mostPlayed)
-        assertNull(viewModel.state.value.recentlyAdded)
+        assertNull(viewModel.state.value.library.recentlyPlayed)
+        assertNull(viewModel.state.value.library.mostPlayed)
+        assertNull(viewModel.state.value.library.recentlyAdded)
     }
 
     // ===== 曲库加载 module 接线（#12）：界面只报「进了哪一节」 =====
@@ -2202,14 +2202,14 @@ class JellyfinViewModelTest {
         // 恢复还没完成（本地会话还没读出来）：主页面已经组合并报过「进了专辑页」，静默无操作
         viewModel.onSectionEntered(LibrarySection.Albums)
         assertEquals(0, api.albumsCalls)
-        assertNull(viewModel.state.value.albums)
-        assertFalse(viewModel.state.value.isLoading)
+        assertNull(viewModel.state.value.library.albums)
+        assertFalse(viewModel.state.value.session.isLoading)
 
         // 恢复完成 → 会话就绪 → 按记住的分区补跑，不用等用户再切一次页签
         gate.complete(Unit)
         advanceUntilIdle()
 
-        assertEquals(albums, viewModel.state.value.albums)
+        assertEquals(albums, viewModel.state.value.library.albums)
         assertEquals(1, api.albumsCalls)
     }
 
@@ -2223,7 +2223,8 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.onSectionEntered(LibrarySection.AlbumDetail(album))
         advanceUntilIdle()
-        assertEquals(album, viewModel.state.value.selectedAlbum)
+        // 详情页确实拉过（Fake 返回空列表）；换会话后曲库清空，不能再有上一会话的数据。
+        assertEquals(emptyList<Track>(), viewModel.state.value.library.albumTracks)
 
         viewModel.signOut()
         advanceUntilIdle()
@@ -2239,8 +2240,7 @@ class JellyfinViewModelTest {
         viewModel.login()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.selectedAlbum)
-        assertNull(viewModel.state.value.albumTracks)
+        assertNull(viewModel.state.value.library.albumTracks)
     }
 
     @Test
@@ -2259,12 +2259,12 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         // 改前两者共用一个 albumsJob：进播放列表会把专辑请求取消，专辑页永远停在骨架
-        assertEquals(emptyList<Playlist>(), viewModel.state.value.playlists)
-        assertNull(viewModel.state.value.albums)
+        assertEquals(emptyList<Playlist>(), viewModel.state.value.library.playlists)
+        assertNull(viewModel.state.value.library.albums)
 
         gate.complete(Unit)
         advanceUntilIdle()
-        assertEquals(listOf(album), viewModel.state.value.albums)
+        assertEquals(listOf(album), viewModel.state.value.library.albums)
     }
 
     // ── 工单 13：登出 / 过期 / 回在线的清理语义收在 slice 上 ────────────────
@@ -2286,8 +2286,8 @@ class JellyfinViewModelTest {
         viewModel.loadRecentlyPlayed()
         viewModel.enterMultiSelect(track.id)
         advanceUntilIdle()
-        assertEquals(listOf(track), viewModel.state.value.recentlyPlayed)
-        assertEquals(setOf(track.id), viewModel.state.value.multiSelectIds)
+        assertEquals(listOf(track), viewModel.state.value.library.recentlyPlayed)
+        assertEquals(setOf(track.id), viewModel.state.value.library.multiSelectIds)
 
         viewModel.signOut()
         advanceUntilIdle()
@@ -2296,9 +2296,9 @@ class JellyfinViewModelTest {
         assertEquals(LibraryState(), viewModel.state.value.library)
         assertEquals(DownloadsState(), viewModel.state.value.downloads)
         // 登出只清会话与表单；地址历史是本地数据，留着
-        assertEquals("", viewModel.state.value.serverUrl)
-        assertEquals("", viewModel.state.value.username)
-        assertEquals(listOf("https://server.test"), viewModel.state.value.serverUrlHistory)
+        assertEquals("", viewModel.state.value.session.serverUrl)
+        assertEquals("", viewModel.state.value.session.username)
+        assertEquals(listOf("https://server.test"), viewModel.state.value.session.serverUrlHistory)
     }
 
     @Test
@@ -2322,20 +2322,20 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         viewModel.onMediaItemTransition(MediaItem.Builder().setMediaId(track.id).build())
         // 改前过期不清这两个：版本号留着、回收站列表留着——同一个「会话结束」却清法不同
-        assertEquals(1, viewModel.state.value.historyEpoch)
-        assertEquals(listOf(recycleFile), viewModel.state.value.recycleFiles)
+        assertEquals(1, viewModel.state.value.library.historyEpoch)
+        assertEquals(listOf(recycleFile), viewModel.state.value.library.fileOps.recycleFiles)
 
         // 401 → 会话过期
         viewModel.loadAlbums()
         advanceUntilIdle()
 
-        assertEquals("登录已失效，请重新登录", viewModel.state.value.errorMessage)
+        assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
         assertEquals(LibraryState(), viewModel.state.value.library)
         assertEquals(DownloadsState(), viewModel.state.value.downloads)
         // 过期保留表单（用户只需重填密码），地址历史不动
-        assertEquals("https://server.test", viewModel.state.value.serverUrl)
-        assertEquals("user", viewModel.state.value.username)
-        assertEquals("", viewModel.state.value.password)
+        assertEquals("https://server.test", viewModel.state.value.session.serverUrl)
+        assertEquals("user", viewModel.state.value.session.username)
+        assertEquals("", viewModel.state.value.session.password)
     }
 
     private fun TestScope.createViewModelWithFileOps(

@@ -465,7 +465,8 @@ class LibraryCacheTest {
         cache.loadAlbumTracks(album)
         // 开拉即清：界面不当成「已经加载好了」
         assertNull(host.state().library.albumTracks)
-        assertEquals(album, host.state().library.selectedAlbum)
+        // 选中专辑不再是界面状态（#16）：守卫状态收在 module 自己身上。
+        assertEquals(album, cache.currentAlbum)
         advanceUntilIdle()
 
         assertEquals(listOf(track), host.state().library.albumTracks)
@@ -486,7 +487,23 @@ class LibraryCacheTest {
         cache.loadAlbumTracks(otherAlbum)
         advanceUntilIdle()
         assertEquals(2, api.albumTracksCalls)
-        assertEquals(otherAlbum, host.state().library.selectedAlbum)
+        assertEquals(otherAlbum, cache.currentAlbum)
+    }
+
+    @Test
+    fun `退出详情页再进同一张专辑会重新拉曲目`() = runTest {
+        val api = FakeApi()
+        val host = FakeHost(connection(api))
+        val cache = newCache(host)
+
+        cache.loadAlbumTracks(album)
+        advanceUntilIdle()
+        cache.clearAlbumDetail()
+        assertNull(cache.currentAlbum)
+        cache.loadAlbumTracks(album)
+        advanceUntilIdle()
+
+        assertEquals(2, api.albumTracksCalls)
     }
 
     @Test

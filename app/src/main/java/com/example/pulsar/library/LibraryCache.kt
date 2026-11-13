@@ -135,6 +135,19 @@ internal class LibraryCache(
     private var mostPlayedEpoch = -1
     private var recentlyAddedEpoch = -1
 
+    /**
+     * 当前打开的专辑 / 播放列表详情（#16）。
+     *
+     * **不是界面状态**：导航真相是界面层的 `LibrarySection.AlbumDetail(album)` /
+     * `PlaylistDetail(playlist)`，详情页自己带着模型，界面从不读这两个字段。这里只服务两件事：
+     * 幂等守卫（同 id 不重复拉）与断网时的专辑曲目快照兜底（`JellyfinViewModel.offlineAlbumTracks`）。
+     * 会话切换 / 登出时随 [invalidate] 一起作废。
+     */
+    internal var currentAlbum: Album? = null
+        private set
+    internal var currentPlaylist: Playlist? = null
+        private set
+
     private val library: LibraryState get() = host.state().library
 
     // ── 入口：界面只报「进了哪一节」 ────────────────────────────────
@@ -263,10 +276,15 @@ internal class LibraryCache(
 
     fun loadAlbumTracks(album: Album) {
         val current = library
-        if (current.selectedAlbum?.id == album.id && current.albumTracks != null) return
+        if (currentAlbum?.id == album.id && current.albumTracks != null) return
         loadLibrary(
             slot = LibrarySlot.AlbumTracks,
-            before = { it.copy(selectedAlbum = album, albumTracks = null) },
+            // 记住这次要看哪张专辑（幂等守卫 / 离线快照兜底）；开拉即清旧曲目，
+            // 界面不当成「已经加载好了」。
+            before = {
+                currentAlbum = album
+                it.copy(albumTracks = null)
+            },
             request = { it.api.getAlbumTracks(it.session.userId, it.session.accessToken, album.id) },
             apply = { lib, tracks -> lib.copy(albumTracks = tracks) },
         )
@@ -290,16 +308,20 @@ internal class LibraryCache(
 
     fun loadPlaylistTracks(playlist: Playlist) {
         val current = library
-        if (current.selectedPlaylist?.id == playlist.id && current.playlistTracks != null) return
+        if (currentPlaylist?.id == playlist.id && current.playlistTracks != null) return
         // 离线：已下载过的从本地清单里读，没下载过的照旧「需要联网」。
         if (current.isOffline) {
+            currentPlaylist = playlist
             launchLocal(LibrarySlot.PlaylistTracks) { host.loadOfflinePlaylistTracks(playlist) }
             return
         }
         loadLibrary(
             slot = LibrarySlot.PlaylistTracks,
             needsNetwork = true,
-            before = { it.copy(selectedPlaylist = playlist, playlistTracks = null) },
+            before = {
+                currentPlaylist = playlist
+                it.copy(playlistTracks = null)
+            },
             request = { it.api.getPlaylistTracks(it.session.userId, it.session.accessToken, playlist.id) },
             apply = { lib, tracks -> lib.copy(playlistTracks = tracks) },
             // 在线拿到曲目表 = 顺手把「已下载列表清单」刷新一份（列表名 + 曲目表）。
@@ -425,26 +447,21 @@ internal class LibraryCache(
         recentlyPlayedEpoch = -1
         mostPlayedEpoch = -1
         recentlyAddedEpoch = -1
+        // 详情页选择属于这个会话：新会话重新进详情页会重新上报（#16）。
+        currentAlbum = null
+        currentPlaylist = null
     }
 
     fun clearAlbumDetail() {
         cancel(LibrarySlot.AlbumTracks)
-        host.update {
-            it.copy(
-                session = it.session.copy(errorMessage = null),
-                library = it.library.copy(selectedAlbum = null),
-            )
-        }
+        currentAlbum = null
+        host.update { it.copy(session = it.session.copy(errorMessage = null)) }
     }
 
     fun clearPlaylistDetail() {
         cancel(LibrarySlot.PlaylistTracks)
-        host.update {
-            it.copy(
-                session = it.session.copy(errorMessage = null),
-                library = it.library.copy(selectedPlaylist = null),
-            )
-        }
+        currentPlaylist = null
+        host.update { it.copy(session = it.session.copy(errorMessage = null)) }
     }
 
     /** 等专辑列表这一节落地（已下载页分组前要先有专辑对象）。 */

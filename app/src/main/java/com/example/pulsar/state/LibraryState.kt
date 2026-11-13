@@ -24,15 +24,8 @@ data class LibraryState(
     val albums: List<Album>? = null,
     val discoverAlbums: List<Album>? = null,
     val albumTracks: List<Track>? = null,
-    /**
-     * 详情页当前选中的专辑 / 播放列表。**没有生产 UI 读取**（导航真相是
-     * `LibrarySection.AlbumDetail(album)`），只用于幂等守卫（同 id 不重复拉）。
-     * #16 会删掉这两个字段。
-     */
-    val selectedAlbum: Album? = null,
     val playlists: List<Playlist>? = null,
     val playlistTracks: List<Track>? = null,
-    val selectedPlaylist: Playlist? = null,
     /**
      * 发现页个人化聚合（工单 02）。null = 还没成功拉到（含上次失败，进页会重试）；
      * 空列表 = 拉到了但服务端没有数据（没播过歌），界面据此隐藏该 section。

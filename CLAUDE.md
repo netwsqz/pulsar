@@ -40,7 +40,7 @@ lint 任务在 `app/build.gradle.kts` 里被整体禁用（release 构建时 lin
 单 `app` 模块，按层分包：
 
 - `data/jellyfin/`、`data/qqdownload/`、`data/libraryfiles/`：网络与 PC 服务访问，统一返回 `Result<T>`。DTO 转换里 `toAlbum()` 的 imageTag **只取 `Primary`，不要回退到 Backdrop**。
-- `state/`：`JellyfinUiState` 的三个 slice。`library/`：曲库加载 `LibraryCache`。
+- `state/`：`JellyfinUiState` 的三个 slice（见「界面状态与曲库加载」）。`library/`：曲库加载 `LibraryCache`。
 - `offline/`：离线策略纯 module。`download/`：下载真相 `DownloadLibrary`。
 - `playback/`（含 `usb/`）：播放会话与 USB 驱动。
 - `ui/theme/`、`ui/components/`：设计 token、液态玻璃、通用组件。`domain/model/`：领域模型。
@@ -59,8 +59,9 @@ lint 任务在 `app/build.gradle.kts` 里被整体禁用（release 构建时 lin
 
 ### 界面状态与曲库加载
 
-- `JellyfinUiState` 是**组合根**，内部三个 slice：`session`（登录表单、恢复、错误通道）、`library`（曲库/发现/详情/搜索/多选/文件操作/离线）、`downloads`（下载派生的 UI 字段）。对外仍是一条 `StateFlow`。
-- **迁移期兼容层还在**（旧顶层字段的读写落到 slice 上，由 #16 删除）：**新代码直接读写 slice**（`state.library.xxx`），不要再往兼容层加字段。
+- `JellyfinUiState` 是**组合根**，**只有三个字段**：`session`（登录表单、恢复、错误通道）、`library`（曲库/发现/详情/搜索/多选/文件操作/离线）、`downloads`（下载派生的 UI 字段）。对外仍是一条 `StateFlow`（ADR-0010）。**屏幕直接读写 slice**（`state.library.xxx`）；平铺字段与迁移期兼容层已在 #16 删除，`JellyfinUiStateTest` 钉死形状，别再往组合根加字段。
+- 详情页的「当前专辑 / 播放列表」**不在 UI 状态里**：导航真相是界面层的 `LibrarySection.AlbumDetail(album)` / `PlaylistDetail(playlist)`，幂等守卫与离线快照兜底用 `LibraryCache.currentAlbum` / `currentPlaylist`（session 切换时一并作废）。别把 `selectedAlbum` / `selectedPlaylist` 加回 `LibraryState`。
+- 顶部页签与详情来源用 `rememberSaveable(stateSaver = LibrarySectionSaver)`（`LibrarySection.kt`）：转屏 / Activity 重建后当前页与返回路径不丢。别改回 `remember`。
 - 登出/过期的清空语义收在 slice 的 `cleared()` 里，约定「字段默认值 = 已清」。`downloads.cleared()` 清的是 UI 字段；ADR-0007 的「下载不清」说的是字节与名单。
 - **`LibraryCache`**：每节（专辑/发现随机/三节历史/专辑曲目/播放列表/播放列表曲目/搜索）一份 job + 代次，**互不取消**。三态语义只在这里实现：`null` = 没拉到/失败（会重试）、空列表 = 拉到了但服务端没数据、**失败绝不写空列表**。界面只调 `viewModel.onSectionEntered(section)`；会话就绪/离线翻转/切歌后的补跑由 module 触发，**不要再往 UI 的 LaunchedEffect 加 sessionReady / isOffline / historyEpoch 当 key**。
 - `isLoading` / `errorMessage` 仍是登录与曲库**共用**的通道（`isLoading` 按在途节计数），别当成已经分节。
@@ -118,4 +119,4 @@ lint 任务在 `app/build.gradle.kts` 里被整体禁用（release 构建时 lin
 - 根目录 `qq-music-api-v2/`、`node_modules/`、`qrcode*.png`、`qrresp*.json`、`{var`、`Poppins,Righteous/`、`*.log` 是历史实验/误产物，已 gitignore，**不是项目代码**。
 - **`docs/archive/` 是过时归档**，只作历史参考；新的阶段性总结也放这里。正在进行的架构重构见 `docs/refactor-roadmap.md`。
 - 工单走 GitHub Issues（`netwsqz/pulsar`，`gh` CLI，见 `docs/agents/issue-tracker.md`）；`.scratch/` 只作历史。triage 标签见 `docs/agents/triage-labels.md`，领域文档约定见 `docs/agents/domain.md`。
-- 已接受 ADR 0001–0009（`docs/adr/`）。最常约束写代码的：**0004** 只取 Auxio 设计规格、不取代码；**0007** 下载取代自动缓存、播放链路纯只读；**0008** 离线只显示已下载；**0009** 顶层 5 项、无流派页。
+- 已接受 ADR 0001–0010（`docs/adr/`）。最常约束写代码的：**0004** 只取 Auxio 设计规格、不取代码；**0007** 下载取代自动缓存、播放链路纯只读；**0008** 离线只显示已下载；**0009** 顶层 5 项、无流派页；**0010** state 按所有权分 slice、组合后仍单一 StateFlow。

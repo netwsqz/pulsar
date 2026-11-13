@@ -144,7 +144,7 @@ class DiscoverSectionsTest {
 
     @Test
     fun `曲库还没拉到（tracks 为 null）时不给整页空态`() {
-        // state.tracks == null = 会话还没恢复完，界面正在骨架屏；这不是「确实没有内容」。
+        // state.library.tracks == null = 会话还没恢复完，界面正在骨架屏；这不是「确实没有内容」。
         val sut = discoverSections(
             dailyPicksAvailable = false,
             recentlyPlayed = null,

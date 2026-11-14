@@ -45,7 +45,13 @@ internal fun unifiedSearchViewState(
             qqSongs = qq.songs,
             qqAlbums = qq.albums,
             qqStatus = qqStatus,
-            searchNotice = input.searchNotice
+            searchNotice = input.searchNotice,
+            // Results 说明至少一边有结果；曲库又确实搜过且为空时，有结果的只可能是 QQ。
+            libraryMessage = if (librarySearchedEmpty) {
+                libraryEmptyMessage(input.query, searchedEmpty = true)
+            } else {
+                null
+            }
         )
     }
 }

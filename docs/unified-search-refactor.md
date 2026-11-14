@@ -1,6 +1,6 @@
 # UnifiedSearchView 重构执行计划
 
-> 状态：**待研究**。本文是 candidate 5（合并搜索视图收成一个纯 module）的执行规格，不是 ADR。
+> 状态：**代码已落地**（#17–#19），§8 真机清单待验。本文是 candidate 5（合并搜索视图收成一个纯 module）的执行规格，不是 ADR。
 > 相关：`docs/offline-policy-refactor.md`（离线搜索输入）、`docs/library-state-refactor.md`（SearchState slice）。
 > ADR 边界：**ADR-0006 明确决定「不新建聚合 ViewModel；两个 ViewModel 各跑各的 300ms 防抖」**。本方案只抽纯视图状态 + 回调值对象，**不动双 ViewModel / 双防抖结构**。
 

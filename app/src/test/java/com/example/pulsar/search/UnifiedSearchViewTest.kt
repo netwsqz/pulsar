@@ -150,15 +150,16 @@ class UnifiedSearchViewTest {
                 qqSongs = listOf(searchSong),
                 qqAlbums = listOf(searchAlbum),
                 qqStatus = null,
-                searchNotice = null
+                searchNotice = null,
+                libraryMessage = "曲库中没找到「周杰伦」"
             ),
             state
         )
     }
 
     @Test
-    fun `曲库还没拉到但 QQ 有结果时显示结果并标明曲库没搜成`() {
-        // results == null 不能当成「曲库没有」——QQ 分区据此说「曲库搜索未完成」而不是「没找到」。
+    fun `曲库还没拉到但 QQ 有结果时显示结果且不谎报曲库没找到`() {
+        // results == null 不能当成「曲库没有」——没搜成就不在 QQ 分区上方说「曲库中没找到」。
         val state = view(
             input(results = null),
             qq(songs = listOf(searchSong))
@@ -167,6 +168,17 @@ class UnifiedSearchViewTest {
         assertFalse(state.librarySearchedEmpty)
         assertNull(state.library)
         assertEquals(listOf(searchSong), state.qqSongs)
+        assertNull(state.libraryMessage)
+    }
+
+    @Test
+    fun `曲库有结果时 QQ 分区不出现曲库没找到的提示`() {
+        val state = view(
+            input(results = searchedResults),
+            qq(songs = listOf(searchSong))
+        ) as SearchViewState.Results
+
+        assertNull(state.libraryMessage)
     }
 
     @Test
@@ -315,9 +327,46 @@ class UnifiedSearchViewTest {
                 qqSongs = listOf(searchSong),
                 qqAlbums = emptyList(),
                 qqStatus = null,
-                searchNotice = OfflineSearchNotice.DownloadedOnly
+                searchNotice = OfflineSearchNotice.DownloadedOnly,
+                libraryMessage = "曲库中没找到「周杰伦」"
             ),
             state
         )
+    }
+
+    // ── 文案单点 ────────────────────────────────────────────────────────
+
+    @Test
+    fun `整页空态的曲库那句与 QQ 分区同一来源`() {
+        // 改前「曲库中没找到「X」」在 SearchContent 与 QQ 分区各写一份；现在只由这里给。
+        val state = view(
+            input(results = SearchResults()),
+            qq(searchStatus = "QQ 音乐服务连不上")
+        ) as SearchViewState.LibraryEmptyQqError
+
+        assertEquals("曲库中没找到「周杰伦」", state.libraryMessage)
+    }
+
+    @Test
+    fun `曲库没搜成时整页空态说曲库搜索未完成`() {
+        val state = view(
+            input(results = null),
+            qq(searchStatus = "QQ 音乐服务连不上")
+        ) as SearchViewState.LibraryEmptyQqError
+
+        assertEquals("曲库搜索未完成", state.libraryMessage)
+    }
+
+    @Test
+    fun `离线空态文案按离线口径区分`() {
+        val downloaded = view(
+            input(results = SearchResults(), searchNotice = OfflineSearchNotice.DownloadedOnly)
+        ) as SearchViewState.OfflineEmpty
+        val snapshot = view(
+            input(results = SearchResults(), searchNotice = OfflineSearchNotice.SnapshotOnly)
+        ) as SearchViewState.OfflineEmpty
+
+        assertEquals("已下载的歌曲里没找到「周杰伦」\n联网后能搜全曲库", downloaded.message)
+        assertEquals("快照里没找到「周杰伦」\n联网后能搜全曲库", snapshot.message)
     }
 }

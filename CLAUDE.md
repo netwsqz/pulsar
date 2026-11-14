@@ -30,7 +30,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 单 `app` 模块，按层分包：
 
 - `data/`（jellyfin / qqdownload / libraryfiles）：网络与 PC 服务，统一返回 `Result<T>`；`toAlbum()` 的 imageTag **只取 `Primary`，不回退 Backdrop**。
-- `state/`（三个 slice）、`library/`（`LibraryCache`）、`offline/`（纯 module）、`download/`（`DownloadLibrary`）、`playback/`（含 `usb/`）、`ui/`（theme / components）、`domain/model/`、`server/`（PC 伴生 Python 服务）。
+- `state/`（三个 slice）、`library/`（`LibraryCache`）、`offline/`（纯 module）、`search/`（合并搜索纯函数）、`download/`（`DownloadLibrary`）、`playback/`（含 `usb/`）、`ui/`（theme / components）、`domain/model/`、`server/`（PC 伴生 Python 服务）。
 - 页面级 Composable 仍集中在 `MainActivity.kt`（约 5000 行）；`NowPlayingScreen.kt`、`QQDownloadScreen.kt` 独立成文件。
 
 ## 跨层约定
@@ -53,6 +53,11 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 - 发现页三节历史来自服务端（`SortBy=DatePlayed/PlayCount/DateCreated`）；单节失败保持 `null` 并记入 `discoverFailedSections`，三节全失败才给错误+重试。
 - 搜索防抖 300ms；空串立即清结果、不发请求。
 
+### 合并搜索（ADR-0006）
+
+- 合并规则只在 `search/UnifiedSearchView.kt` 的纯函数 `unifiedSearchViewState` 一处：曲库 / QQ 谁盖谁、错误优先级（曲库错误 > QQ 状态 > 离线空态 > 普通空态）与「曲库中没找到 / 曲库搜索未完成 / 离线空态」这些合并相关文案都由 `SearchViewState` 给。页面只按类型渲染，**别再内联 `libraryEmpty` / `bothEmpty`**，也别在页面另写一份合并文案。
+- **两个 ViewModel 与两套 300ms 防抖不动**：这是 ADR-0006 的决定，不新建聚合 ViewModel；`SearchActions.onQueryChange` 仍然同时喂两边。QQ 侧失败只在分区内降级，不盖曲库结果。
+
 ### 播放
 
 - **`PlaybackSession` 是播放 UI 的唯一门面**：界面只读 `PlaybackUiState`、只发 `PlaybackIntent`，不直接持有 `MediaController`。`PlaybackRemote` 是控制器接缝（生产 `MediaControllerPlaybackRemote`，测试 `FakePlaybackRemote`）。
@@ -67,7 +72,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 - **曲库快照** `filesDir/library-snapshot.json`：只在线下兜底，能连服务器时一律以服务器为准；覆盖发现/全部音乐/专辑 + 离线搜索，播放列表不在其中。
 - **下载**是用户主动存的原文件副本（`SimpleCache`，`filesDir/media_cache`）。**播放链路纯只读、绝不写盘**（`setCacheWriteDataSinkFactory(null)`），写盘只有 `CacheWriter` + `createDataSourceForDownloading()`；`NoOpCacheEvictor`（无自动淘汰、无上限、无一键清空）；只有完整副本才算数；`PulsarApplication.mediaCacheStore` 是进程级单例，服务销毁时不能释放。
 - **`DownloadLibrary` 是「已下载」的唯一真相**：`已下载 = 字节完整 ∩ 当前账号名单`。界面只读 `DownloadSnapshot`、只发 `enqueue` / `cancel` / `delete`；名单读改写只走 `DownloadLedgerStore.update`。
-- **`offline/OfflinePolicy.kt` 是纯 module**：输入 `OfflineInput`，输出 `OfflineView`。界面只读 `OfflineView`，不要自己拼 `isOffline && cachedTrackIds`；离线文案只在 `OfflineNotice` / `OfflineEmpty` / `OfflineSearchNotice` 的 `message()` 里定义。
+- **`offline/OfflinePolicy.kt` 是纯 module**：输入 `OfflineInput`，输出 `OfflineView`。界面只读 `OfflineView`，不要自己拼 `isOffline && cachedTrackIds`；离线文案只在 `OfflineNotice` / `OfflineEmpty` / `OfflineSearchNotice` 的 `message()` / `emptyMessage()` 里定义。
 - 离线时各屏**只显示已下载**（ADR-0008），过滤是界面层派生，原始列表保持全量、**别改 state**。专辑有一首已下载就显示；`downloadedTrackIds == null` = 未知不筛，空集才是「一首都没下载」。离线时播放队列不动。
 - `isOffline` 是全局态，**任意**请求的 `Network` 错误都会 `goOffline()`。退出登录/过期**不清下载**，只清曲库快照。
 - `SimpleCache` 三个坑：残条目 `isCached(key, 0, -1)` 抛 `IllegalArgumentException`；构造失败延迟到读取时才报；清空/退出登录要 `keepKeys` 跳过正在播的 key。

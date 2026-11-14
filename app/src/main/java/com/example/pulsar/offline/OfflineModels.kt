@@ -106,6 +106,15 @@ internal fun OfflineSearchNotice.message(): String = when (this) {
 }
 
 /**
+ * 离线搜索无结果时的空态文案：范围只有已下载 / 快照，跟在线搜索的「未找到相关内容」
+ * 不是一回事。字面量按 CLAUDE.md 的约定留在离线 module，搜索页只转交。
+ */
+internal fun OfflineSearchNotice.emptyMessage(query: String): String = when (this) {
+    OfflineSearchNotice.DownloadedOnly -> "已下载的歌曲里没找到「$query」\n联网后能搜全曲库"
+    OfflineSearchNotice.SnapshotOnly -> "快照里没找到「$query」\n联网后能搜全曲库"
+}
+
+/**
  * 搜索页该不该打离线标识、打哪一句；null = 不打（在线搜索）。
  *
  * [isFiltering] 必须来自 [OfflineView.isFiltering]（离线且已下载集合已知），

@@ -4,6 +4,7 @@ import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.offline.OfflineSearchNotice
+import com.example.pulsar.offline.emptyMessage
 
 /**
  * 合并搜索（ADR-0006）的窄输入：曲库那一半。
@@ -61,7 +62,7 @@ internal sealed interface SearchViewState {
      * 至少一边有内容可显示。
      *
      * [library] 为 null 时表示曲库还没拉到 / 拉失败；[librarySearchedEmpty] 区分
-     * 「搜过了确实没有」（QQ 分区说「曲库中没找到」）与「曲库没搜成」（说「曲库搜索未完成」）。
+     * 「搜过了确实没有」与「没搜成」——只有前者才会在 QQ 分区上方说「曲库中没找到」。
      */
     data class Results(
         val library: SearchResults?,
@@ -71,7 +72,14 @@ internal sealed interface SearchViewState {
         /** QQ 分区里的常驻小字；null = 没失败。曲库有结果时它只降级、不变成整页错误。 */
         val qqStatus: String?,
         /** 离线搜索标识；null = 在线搜索。界面据此标明「离线搜索」并渲染对应文案。 */
-        val searchNotice: OfflineSearchNotice?
+        val searchNotice: OfflineSearchNotice?,
+        /**
+         * QQ 分区上方那句「曲库中没找到「X」」；null = 不显示。
+         *
+         * 只在曲库确实搜过且为空时给（此时 [Results] 能成立，说明有结果的只可能是 QQ）。
+         * 由合并规则算好，分区不再自己判断「曲库空不空」——文案与判据都只有这里一个来源。
+         */
+        val libraryMessage: String? = null
     ) : SearchViewState
 
     /** 两边都空，且曲库侧有错误：整页错误 + 曲库重试。 */
@@ -86,7 +94,10 @@ internal sealed interface SearchViewState {
         val query: String,
         val librarySearchedEmpty: Boolean,
         val qqStatus: String
-    ) : SearchViewState
+    ) : SearchViewState {
+        /** 曲库那一句的唯一出处（与 QQ 分区的 [Results.libraryMessage] 共用同一句）。 */
+        val libraryMessage: String get() = libraryEmptyMessage(query, librarySearchedEmpty)
+    }
 
     /** 两边都空，没有错误、也不在离线搜索。 */
     data class BothEmpty(val query: String) : SearchViewState
@@ -98,5 +109,17 @@ internal sealed interface SearchViewState {
     data class OfflineEmpty(
         val query: String,
         val searchNotice: OfflineSearchNotice
-    ) : SearchViewState
+    ) : SearchViewState {
+        /** 离线空态文案：字面量在 `offline/OfflineSearchNotice.emptyMessage`，这里只转交。 */
+        val message: String get() = searchNotice.emptyMessage(query)
+    }
 }
+
+/**
+ * 「曲库没搜到」那一句的唯一出处：整页空态与 QQ 分区上方共用。
+ *
+ * 搜过了确实没有 → 「曲库中没找到」；没搜成（results 还是 null）→ 「曲库搜索未完成」。
+ * 两种情况不能混：把没搜成说成没找到是在谎报。
+ */
+internal fun libraryEmptyMessage(query: String, searchedEmpty: Boolean): String =
+    if (searchedEmpty) "曲库中没找到「$query」" else "曲库搜索未完成"

@@ -201,10 +201,13 @@ internal fun DownloadServiceScreen(
  *
  * 失败只降级：分区内一行小字 + 重试，绝不变成整页错误——曲库明明搜到了，
  * 不能被另一边的故障盖掉。下载动作的反馈不走这里（那是 Snackbar 的事）。
+ *
+ * 「曲库中没找到」那句话由合并规则算好后经 [libraryMessage] 传入：分区不再自己判断
+ * 「曲库空不空」，字面量也只有 `SearchModels.libraryEmptyMessage` 一个来源。
  */
 internal fun LazyListScope.qqSearchSection(
     state: QQDownloadUiState,
-    libraryEmpty: Boolean,
+    libraryMessage: String?,
     onDownloadSong: (QQSongDto) -> Unit,
     onRequestRedownload: (QQSongDto) -> Unit,
     onDownloadAlbum: (QQAlbumDto) -> Unit,
@@ -217,10 +220,10 @@ internal fun LazyListScope.qqSearchSection(
     // 什么都没有（没结果、没错误、没在搜）时连标题都不出：别在曲库结果下面留一个空分区。
     if (!hasResults && statusText == null && !state.isSearching) return
     // 「搜过了确实没有」说清楚：只在曲库为空、QQ 有结果时出现在 QQ 分区上方。
-    if (libraryEmpty && hasResults) {
+    if (libraryMessage != null) {
         item(key = "qqLibraryEmpty") {
             Text(
-                "曲库中没找到「${state.searchQuery}」",
+                libraryMessage,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = Dimens.SpaceTiny, top = Dimens.SpaceTiny)

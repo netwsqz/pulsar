@@ -35,7 +35,6 @@ import com.example.pulsar.ui.theme.deepened
 import com.example.pulsar.ui.theme.rememberCoverGradient
 import com.example.pulsar.offline.OfflineEmpty
 import com.example.pulsar.offline.OfflineInput
-import com.example.pulsar.offline.OfflineSearchNotice
 import com.example.pulsar.offline.message
 import com.example.pulsar.offline.offlineView
 import com.example.pulsar.search.SearchActions
@@ -3558,8 +3557,7 @@ private fun SearchContent(
                     verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
                 ) {
                     Text(
-                        if (view.librarySearchedEmpty) "曲库中没找到「${view.query}」"
-                        else "曲库搜索未完成",
+                        view.libraryMessage,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -3571,13 +3569,7 @@ private fun SearchContent(
                     )
                     TextButton(onClick = actions.onRetryQqSearch) { Text("重试") }
                 }
-                is SearchViewState.OfflineEmpty -> EmptyState(
-                    if (view.searchNotice == OfflineSearchNotice.DownloadedOnly) {
-                        "已下载的歌曲里没找到「${view.query}」\n联网后能搜全曲库"
-                    } else {
-                        "快照里没找到「${view.query}」\n联网后能搜全曲库"
-                    }
-                )
+                is SearchViewState.OfflineEmpty -> EmptyState(view.message)
                 is SearchViewState.BothEmpty -> EmptyState("未找到相关内容")
                 is SearchViewState.Results -> {
                     LazyColumn(
@@ -3632,7 +3624,7 @@ private fun SearchContent(
                         // QQ 分区永远在曲库之后。
                         qqSearchSection(
                             state = state.qq,
-                            libraryEmpty = view.librarySearchedEmpty,
+                            libraryMessage = view.libraryMessage,
                             onDownloadSong = actions.onDownloadSong,
                             onRequestRedownload = actions.onRequestRedownload,
                             onDownloadAlbum = actions.onDownloadAlbum,

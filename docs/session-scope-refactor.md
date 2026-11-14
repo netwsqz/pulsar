@@ -1,6 +1,6 @@
 # SessionScope 重构执行计划
 
-> 状态：**待研究**。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
+> 状态：**进行中（#20 已落地，未接线）**。#20 代码完成、待真机确认；#21–#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
 > 相关：`docs/download-library-refactor.md`（AccountScope）、`docs/library-state-refactor.md`（SessionState）。
 > 安全红线（CLAUDE.md）：**token 绝不出现在 URL、日志或 UI**；请求头用 MediaBrowser 格式；退出登录/会话过期时清库缓存与播放队列。
 
@@ -130,6 +130,16 @@ fun interface SessionScopedJellyfinApiFactory {
 **验收**：知道 12 个 API 方法、7 个 `activeAuthorization` 写点、2 个会话模型的所有位置。
 
 ### Step 1 — 引入 `Session` + `SessionManager`（不改调用方）
+
+> **已完成 2026-11-15（#20）**：新增 `session/Session.kt`（`Session` + 登录页预填的 `LoginHint`）
+> 与 `session/SessionManager.kt`，内部委托旧 `SessionRepository` / `JellyfinApiFactory`，**未接线**，
+> 生产行为零变化。与原文的差异：
+> - `api` 暂时暴露旧 `JellyfinApi?`（Step 4 才换成 `SessionScopedJellyfinApi`）。
+> - `expire()` 用 `LoginHint(serverUrl, username)` 保留登录页预填（不含令牌），`signOut()` 清空它。
+> - `Session.toString()` 对令牌打码；`SessionManagerTest` 断言令牌不出现在 URL / toString。
+> - 测试 16 例：restore 成功 / 无会话 / 读失败、login 成功 / 保存失败 / 失败时摘旧会话、
+>   signOut（含存储失败）、expire（含重复过期、与登录落盘的竞态）、header 跟随、
+>   令牌只进 header 不进 URL、toString 脱敏。全量 921 例与 `assembleDebug` 通过。
 
 1. 新增 `app/src/main/java/com/example/pulsar/session/Session.kt`、`SessionManager.kt`。
 2. `SessionManager.restore/login/signOut/expire` 内部暂时调用旧 `SessionRepository` / `JellyfinApiFactory`。

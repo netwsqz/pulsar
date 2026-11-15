@@ -5,10 +5,14 @@ import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import com.example.pulsar.ui.components.DeleteProgressNotice
+import com.example.pulsar.ui.components.EmptyState
+import com.example.pulsar.ui.components.ErrorState
 import com.example.pulsar.ui.components.GlassPanel
+import com.example.pulsar.ui.components.LibraryScreenScaffold
 import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
 import com.example.pulsar.ui.components.MediaRowText
+import com.example.pulsar.ui.components.OfflineNoticeText
 import com.example.pulsar.ui.components.PlayingBarCount
 import com.example.pulsar.ui.components.PlayingBarGap
 import com.example.pulsar.ui.components.PlayingBarMaxHeight
@@ -20,6 +24,7 @@ import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.VolumeFeedbackState
 import com.example.pulsar.ui.components.coverScrimHeight
 import com.example.pulsar.ui.components.glassBarSliderColors
+import com.example.pulsar.ui.components.libraryLoadState
 import com.example.pulsar.ui.components.menuTopLeft
 import com.example.pulsar.ui.components.pausedPlayingBarProgress
 import com.example.pulsar.ui.components.playingBarHeight
@@ -149,13 +154,11 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -417,71 +420,6 @@ private fun PulsarApp(
             )
         }
     }
-}
-
-@Composable
-private fun ErrorState(
-    message: String,
-    modifier: Modifier = Modifier,
-    onRetry: (() -> Unit)? = null
-) {
-    // 撑满宽度 + 居中：空态/错误态在 LazyColumn item 里也要从一侧到另一侧居中，
-    // 不能只在自身固有宽度里居中（spec §5）。调用方不用再各自传 fillMaxWidth。
-    Column(
-        modifier = modifier.fillMaxWidth().padding(Dimens.SpaceMedium),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-    ) {
-        Icon(
-            imageVector = Icons.Filled.CloudOff,
-            contentDescription = null,
-            modifier = Modifier.size(Dimens.TouchTargetSmall),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-        )
-        Text(
-            text = message,
-            color = MaterialTheme.colorScheme.error,
-            textAlign = TextAlign.Center
-        )
-        onRetry?.let { retry ->
-            TextButton(onClick = retry) { Text("重新加载") }
-        }
-    }
-}
-
-@Composable
-private fun EmptyState(
-    message: String,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier.fillMaxWidth().padding(Dimens.SpaceMedium),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-    ) {
-        Icon(
-            imageVector = Icons.Filled.MusicNote,
-            contentDescription = null,
-            modifier = Modifier.size(Dimens.TouchTargetSmall),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-        )
-        Text(
-            text = message,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-    }
-}
-/** 离线过滤生效时标题下的一行小字（ADR-0008）：解释歌为什么变少了。
- * 字号跟行内歌手副标题一致（bodySmall）——离线提示比副标题还小就看不清（spec §11）。 */
-@Composable
-private fun OfflineNoticeText(text: String, modifier: Modifier = Modifier) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = modifier
-    )
 }
 
 /**
@@ -3048,49 +2986,37 @@ private fun AlbumsContent(
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        // 顶部只让出状态栏；标题行自己给玻璃岛让位（padding top），
-        // grid 滚动时专辑卡仍能滚到玻璃岛底下透过去（和底部播放条同款行为）。
-        modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = Dimens.SpaceMedium),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    LibraryScreenScaffold(
+        title = "专辑",
+        loadState = libraryLoadState(
+            items = albums,
+            isLoading = session.isLoading,
+            errorMessage = session.errorMessage,
+            // 离线空态与在线空态不能互相顶替：用户要能分清「曲库空了」和「离线只能看下载」。
+            emptyMessage = if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无专辑",
+            onRetry = onRetry
+        ),
+        offlineNotice = offlineNotice,
+        modifier = modifier,
+        loading = {
+            // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
+            // 骨架从**顶部**开始排（scaffold 默认 TopStart），居中会让它加载完瞬移。
+            // 底部留白与真实网格一致，最后一行不会钻到迷你播放条下面。
+            AlbumGridSkeleton(
+                modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.BottomContentInset)
+            )
+        }
     ) {
-        // 标题行：与发现页同款层级；专辑页没有「换一批」语义，只放标题。
-        Text(
-            "专辑",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
-        )
-        offlineNotice?.let { notice -> OfflineNoticeText(notice) }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when {
-                albums == null && session.isLoading -> {
-                    // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
-                    // 骨架在 Box 里从**顶部**开始排（默认 TopStart），不加居中——居中会让它加载完瞬移。
-                    // 底部留白与真实网格一致，最后一行不会钻到迷你播放条下面。
-                    AlbumGridSkeleton(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.BottomContentInset)
-                    )
-                }
-                albums == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
-                albums.orEmpty().isEmpty() -> EmptyState(
-                    if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无专辑"
-                )
-                else -> {
-                    val albumList = albums.orEmpty()
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(2),
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                        horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
-                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
-                    ) {
-                        items(albumList, key = { it.id }) { album ->
-                            AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
-                        }
-                    }
-                }
+        val albumList = albums.orEmpty()
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
+            horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+        ) {
+            items(albumList, key = { it.id }) { album ->
+                AlbumGridCard(album, coverFor(album), onClick = { onOpenAlbum(album) })
             }
         }
     }
@@ -3401,44 +3327,40 @@ private fun PlaylistsContent(
 ) {
     val playlists = library.playlists
     val playlistList = playlists.orEmpty()
-    Column(
-        modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = Dimens.SpaceMedium),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    LibraryScreenScaffold(
+        title = "播放列表",
+        loadState = libraryLoadState(
+            items = playlists,
+            isLoading = session.isLoading,
+            errorMessage = session.errorMessage,
+            emptyMessage = "暂无播放列表",
+            // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
+            // 这条优先于网络错误——断网时重试必然失败，不给按钮。已加载的照常显示。
+            offlineUnavailableMessage = if (library.isOffline) "播放列表需要联网才能查看" else null,
+            onRetry = onRetry
+        ),
+        // 改前这一页的空态 / 错误态是竖直居中的（与专辑页居顶不同），保持一致。
+        contentAlignment = Alignment.Center,
+        modifier = modifier,
+        loading = {
+            // 骨架要撑满：行骨架本来就 fillMaxSize，居中不影响位置。
+            TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
+        }
     ) {
-        Text(
-            "播放列表",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
-        )
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
-                playlists == null && session.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
-                // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
-                // 已加载的照常显示——断网不该把现成的列表藏掉。
-                playlists == null && library.isOffline -> EmptyState("播放列表需要联网才能查看")
-                playlists == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
-                playlistList.isEmpty() -> EmptyState("暂无播放列表")
-                else -> {
-                    LazyColumn(
-                        Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
-                    ) {
-                        itemsIndexed(playlistList, key = { _, p -> p.id }) { index, playlist ->
-                            SearchResultRow(
-                                cover = coverFor(playlist),
-                                title = playlist.name,
-                                subtitle = playlist.trackCount?.let { "$it 首" } ?: "播放列表",
-                                onClick = { onOpenPlaylist(playlist) },
-                                showDivider = index != playlistList.lastIndex,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                    }
-                }
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+        ) {
+            itemsIndexed(playlistList, key = { _, p -> p.id }) { index, playlist ->
+                SearchResultRow(
+                    cover = coverFor(playlist),
+                    title = playlist.name,
+                    subtitle = playlist.trackCount?.let { "$it 首" } ?: "播放列表",
+                    onClick = { onOpenPlaylist(playlist) },
+                    showDivider = index != playlistList.lastIndex,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

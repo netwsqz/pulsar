@@ -132,6 +132,10 @@ data class DetailActions(
 
 **验收**：站点清单 + 差异表；知道先迁哪两个屏。
 
+> **已完成 2026-11-15（#24）**：差异表落在 [issue #24 评论](https://github.com/netwsqz/pulsar/issues/24#issuecomment-6892458474)。
+> 实际扫到 11 处三态块（规格列的 10 处之外，另有三节历史这一组组合态）；`TracksContent` 的错误分支确认是**漏的**
+> ——`library.tracks == null` 时无条件画骨架，错误永远不显示，留给 #25 补。
+
 ### Step 1 — `LoadState` + `LibraryScreenScaffold`，迁 2 个简单列表页
 
 1. 新增 `app/src/main/java/com/example/pulsar/ui/components/LibraryScreenScaffold.kt`、`LoadState.kt`。
@@ -141,6 +145,12 @@ data class DetailActions(
 3. 编译 + 真机看这两页的加载 / 错误 / 空态。
 
 **验收**：两页视觉与交互不变；代码里不再有各自的三态 `when`。
+
+> **已完成 2026-11-15（#24）**：新增 `ui/components/LoadState.kt`（`LoadState` + 纯函数
+> `libraryLoadState`）与 `ui/components/LibraryScreenScaffold.kt`；`ErrorState` / `EmptyState` /
+> `OfflineNoticeText` 从 `MainActivity.kt` 移到 `ui/components/StateMessages.kt`（只搬家，样式未改）。
+> 两页的分支顺序与对齐差异原样保留（播放列表「离线优先于错误」、专辑居顶 / 播放列表居中）；
+> `LibraryLoadStateTest` 9 项钉死映射。全量 944 项 0 失败，`assembleDebug` 通过；真机验收待用户确认。
 
 ### Step 2 — 迁歌曲页与艺术家页（顺手补 error 分支）
 

@@ -5,7 +5,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import com.example.pulsar.data.jellyfin.JellyfinApi
-import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
@@ -22,6 +21,9 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
+import com.example.pulsar.session.Session
+import com.example.pulsar.session.SessionManager
+import com.example.pulsar.session.toJellyfinSession
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.FileOpsState
 import com.example.pulsar.state.LibraryState
@@ -49,9 +51,8 @@ internal const val OFFLINE_RETRY_INTERVAL_MS = 15_000L
 private const val kOfflineRetryMaxAttempts = 500
 
 class JellyfinViewModel(
-    private val sessionStore: SessionRepository,
-    private val apiFactory: JellyfinApiFactory,
-    private val authorizationSink: AuthorizationSink,
+    /** 会话与接口的唯一来源（#21）：登录 / 恢复 / 过期 / 登出都经这里，不再自己存凭据。 */
+    private val sessionManager: SessionManager,
     private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
     /** 曲库文件操作的 API 工厂（删除/改名走 PC 伴生服务，与 Jellyfin 会话无关）。测试注入 Fake。 */
     private val libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
@@ -94,11 +95,20 @@ class JellyfinViewModel(
         updateLibrary { it.copy(fileOps = transform(it.fileOps)) }
     }
 
-    private var session: com.example.pulsar.data.jellyfin.JellyfinSession? = null
-    private var dataSource: JellyfinApi? = null
     private var loginJob: Job? = null
     private var loginGeneration = 0
     private var offlineRetryJob: Job? = null
+
+    /** 会话与 API 都从 [SessionManager] 现读，ViewModel 不再留第二份凭据。 */
+    private data class ActiveConnection(val api: JellyfinApi, val session: Session)
+
+    private fun activeConnection(): ActiveConnection? {
+        val api = sessionManager.api.value ?: return null
+        val session = sessionManager.current.value ?: return null
+        return ActiveConnection(api, session)
+    }
+
+    private fun activeSession(): Session? = sessionManager.current.value
 
     /**
      * 曲库加载（#12）：每节一份 job + 代次，三态语义只在那里实现。
@@ -116,9 +126,14 @@ class JellyfinViewModel(
             }
 
             override fun connection(): LibraryCache.Connection? {
-                val api = dataSource ?: return null
-                val current = session ?: return null
-                return LibraryCache.Connection(api, current)
+                // 恢复会话时 module 会先发布会话再等曲库校验；校验完成前界面仍按
+                // 「会话未就绪」处理（改前要等 getMusicItems 成功，别让各节抢跑）。
+                if (_state.value.session.isRestoring) return null
+                val connection = activeConnection() ?: return null
+                return LibraryCache.Connection(
+                    connection.api,
+                    connection.session.toJellyfinSession()
+                )
             }
 
             override fun expireSession() { this@JellyfinViewModel.expireSession() }
@@ -226,11 +241,8 @@ class JellyfinViewModel(
         val username = form.username
         val password = form.password
         invalidateSessionRequests()
-        session = null
         // 新登录发起时旧账号的可见性立刻作废（字节不清，ADR-0007）。
         downloadLibrary?.setAccount(null)
-        dataSource = null
-        authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
         clearLyrics()
@@ -243,16 +255,15 @@ class JellyfinViewModel(
         )
         loginJob = viewModelScope.launch(dispatcher) {
             try {
-                val source = apiFactory.create(form.serverUrl)
-                val signedIn = source.login(username, password).getOrThrow()
-                val tracks = source.getMusicItems(signedIn.userId, signedIn.accessToken).getOrThrow()
+                // 凭据的创建、校验、落盘与发布只在 SessionManager 里做。
+                val signedIn = sessionManager.login(form.serverUrl, username, password).getOrThrow()
+                val connection = activeConnection() ?: error("会话已建立但没有可用接口")
+                val tracks = connection.api
+                    .getMusicItems(signedIn.userId, signedIn.accessToken)
+                    .getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
-                    session = signedIn
                     // 登录成功：下载可见性按新账号作用域算（字节仍共享）。
-                    downloadLibrary?.setAccount(AccountScope(form.serverUrl, signedIn.userId))
-                    dataSource = source
-                    authorizationSink.activeAuthorization =
-                        source.authorizationHeader(signedIn.accessToken)
+                    downloadLibrary?.setAccount(AccountScope(signedIn.serverUrl, signedIn.userId))
                     _state.value = _state.value.let {
                         it.copy(
                             session = it.session.copy(isLoading = false),
@@ -262,7 +273,6 @@ class JellyfinViewModel(
                     // 会话就绪：界面可能已经停在某一节上（恢复期间主页面就组合了），
                     // 之前那次「进了这节」因为没会话被静默跳过，这里补跑。
                     reloadCurrentSection()
-                    sessionStore.save(SavedSession(form.serverUrl, signedIn.userId, username, signedIn.accessToken))
                     serverUrlHistory?.record(form.serverUrl)
                     // 同 init 里那条：先取值再碰 _state，别让挂起点前的旧快照盖掉新状态。
                     val history = serverUrlHistory?.load()
@@ -278,6 +288,8 @@ class JellyfinViewModel(
                 throw error
             } catch (error: Throwable) {
                 if (generation == loginGeneration) {
+                    // 凭据已落盘但曲库拉取失败：撤销这次半截会话，保持「失败即回登录页」。
+                    if (sessionManager.current.value != null) sessionManager.expire()
                     updateSession { it.copy(isLoading = false, errorMessage = friendlyError(error, isLogin = true)) }
                 }
             }
@@ -286,12 +298,14 @@ class JellyfinViewModel(
 
     private fun restoreSavedLogin() {
         loginJob = viewModelScope.launch(dispatcher) {
-            var saved: SavedSession? = null
             try {
-                saved = sessionStore.load()
-                val restored = saved
+                if (!sessionManager.restore()) {
+                    // 本地没有可恢复的会话（或读盘失败）：结束恢复态，UI 落到登录表单。
+                    updateSession { it.copy(isRestoring = false) }
+                    return@launch
+                }
+                val restored = activeSession()
                 if (restored == null) {
-                    // 本地没有可恢复的会话：结束恢复态，UI 落到登录表单。
                     updateSession { it.copy(isRestoring = false) }
                     return@launch
                 }
@@ -306,15 +320,13 @@ class JellyfinViewModel(
                         username = restored.username,
                     )
                 }
-                val source = apiFactory.create(restored.serverUrl)
-                val tracks = source.getMusicItems(restored.userId, restored.accessToken).getOrThrow()
+                val connection = activeConnection() ?: error("会话已恢复但没有可用接口")
+                val tracks = connection.api
+                    .getMusicItems(restored.userId, restored.accessToken)
+                    .getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
-                    session = com.example.pulsar.data.jellyfin.JellyfinSession(restored.userId, restored.accessToken)
                     // 恢复登录：下载可见性按这个账号作用域算（字节仍共享）。
                     downloadLibrary?.setAccount(AccountScope(restored.serverUrl, restored.userId))
-                    dataSource = source
-                    authorizationSink.activeAuthorization =
-                        source.authorizationHeader(restored.accessToken)
                     _state.value = _state.value.let {
                         it.copy(
                             session = it.session.copy(isLoading = false, isRestoring = false),
@@ -331,18 +343,19 @@ class JellyfinViewModel(
                 // 只在代次仍匹配时才修改状态与会话，防止已取消的恢复任务误清新登录的 token。
                 val currentGeneration = loginGeneration
                 if (error is JellyfinError.Unauthorized && currentGeneration == loginGeneration) {
-                    sessionStore.clear()
-                    authorizationSink.activeAuthorization = null
+                    sessionManager.expire()
                 }
                 if (currentGeneration == loginGeneration) {
                     // 断网启动：本地存过会话但连不上服务器。用曲库快照把界面撑起来，
                     // 别让用户打开就是一片空白（用户故事 7）。撑不起来才回落到登录表单。
-                    val savedSession = saved
-                    if (error is JellyfinError.Network && savedSession != null &&
-                        restoreFromSnapshotOffline(savedSession)
+                    if (error is JellyfinError.Network && sessionManager.current.value != null &&
+                        restoreFromSnapshotOffline()
                     ) {
                         return@launch
                     }
+                    // 校验失败（断网 / 服务端异常）：撤掉已发布的会话与鉴权头，
+                    // 但保留存储，下次启动还能恢复（与过期不同）。
+                    sessionManager.clearInMemory()
                     updateSession {
                         it.copy(
                             isLoading = false,
@@ -360,17 +373,14 @@ class JellyfinViewModel(
      * （离线时本来也验证不了）。真失效了，探活的第一次 401 会照常走 [expireSession]
      * 收场——而会话过期不碰下载（铁律 5）。
      */
-    private suspend fun restoreFromSnapshotOffline(saved: SavedSession): Boolean {
+    private suspend fun restoreFromSnapshotOffline(): Boolean {
         val loaded = snapshotRepository?.load() ?: return false
         // 曲目表是快照的骨架：没有它，「全部音乐」和离线可见性判定都无从谈起，等于没兜底。
         if (loaded.tracks.isEmpty()) return false
-        val source = apiFactory.create(saved.serverUrl)
+        val session = activeSession() ?: return false
         snapshot = loaded
-        session = com.example.pulsar.data.jellyfin.JellyfinSession(saved.userId, saved.accessToken)
         // 断网恢复也拿到了本地会话：下载可见性按这个账号作用域算。
-        downloadLibrary?.setAccount(AccountScope(saved.serverUrl, saved.userId))
-        dataSource = source
-        authorizationSink.activeAuthorization = source.authorizationHeader(saved.accessToken)
+        downloadLibrary?.setAccount(AccountScope(session.serverUrl, session.userId))
         updateSession { it.copy(isLoading = false, isRestoring = false) }
         applySnapshot(loaded)
         // 已下载集合先算完再进离线态，别让界面在未知集合上筛掉能播的歌。
@@ -392,11 +402,14 @@ class JellyfinViewModel(
     }
 
     fun signOut() {
+        // 先同步撤内存会话与鉴权头，再清 UI；存储清理由 module 随后异步完成。
+        sessionManager.clearInMemory()
         resetSession(keepLoginForm = false, errorMessage = null)
         // 主动退出只清快照（换账号不串曲库清单）。**下载不清**——那是用户主动存的
         // （ADR-0007 / 用户故事 16）；按账号隔离可见性归工单 08。清快照失败也不挡退出登录。
         viewModelScope.launch(dispatcher) {
-            sessionStore.clear()
+            // 会话存储由 SessionManager 统一清；下载字节与名单不归它管（ADR-0007）。
+            sessionManager.signOut()
             clearLocalCopyAndSnapshot()
         }
     }
@@ -414,11 +427,8 @@ class JellyfinViewModel(
         loginJob = null
         // 内含 stopOfflineRetry()：探活属于这个会话，不能再跑。
         invalidateSessionRequests()
-        session = null
         // 退出/过期 = 暂时没人登录：可见性清空，字节与统计不动（ADR-0007）。
         downloadLibrary?.setAccount(null)
-        dataSource = null
-        authorizationSink.activeAuthorization = null
         _playbackTracks.value = emptyMap()
         _currentTrack.value = null
         clearLyrics()
@@ -428,8 +438,7 @@ class JellyfinViewModel(
     }
 
     fun streamUrl(track: Track): String? {
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
+        val (src, currentSession) = activeConnection() ?: return null
         return src.streamUrl(track.id, currentSession.accessToken)
     }
 
@@ -461,15 +470,13 @@ class JellyfinViewModel(
 
     fun trackCover(track: Track): JellyfinRequest? {
         if (track.id.isBlank()) return null
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
+        val (src, currentSession) = activeConnection() ?: return null
         return src.imageRequest(track.id, track.imageTag, currentSession.accessToken)
     }
 
     private fun coverRequest(itemId: String, imageTag: String?): JellyfinRequest? {
         val tag = imageTag ?: return null
-        val src = dataSource ?: return null
-        val currentSession = session ?: return null
+        val (src, currentSession) = activeConnection() ?: return null
         return src.imageRequest(itemId, tag, currentSession.accessToken)
     }
 
@@ -499,8 +506,7 @@ class JellyfinViewModel(
      */
     fun loadLyricsForCurrentTrack() {
         val track = _currentTrack.value ?: return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
+        val (src, currentSession) = activeConnection() ?: return
         val generation = ++lyricsGeneration
         _lyrics.value = Lyrics.NONE
         lyricsJob?.cancel()
@@ -642,10 +648,10 @@ class JellyfinViewModel(
      */
     private suspend fun downloadedPlaylistListings(): List<DownloadedPlaylist> {
         val loaded = loadSnapshot() ?: return emptyList()
-        val currentSession = session ?: return emptyList()
-        val mine = loaded.downloadedPlaylistsFor(_state.value.session.serverUrl, currentSession.userId)
+        val currentSession = activeSession() ?: return emptyList()
+        val mine = loaded.downloadedPlaylistsFor(currentSession.serverUrl, currentSession.userId)
         val store = downloadLedgerStore ?: return mine
-        val ownedIds = store.entriesFor(_state.value.session.serverUrl, currentSession.userId)
+        val ownedIds = store.entriesFor(currentSession.serverUrl, currentSession.userId)
             .filter { it.kind == DownloadKind.PLAYLIST }
             .map { it.id }
             .toSet()
@@ -664,8 +670,8 @@ class JellyfinViewModel(
 
     private suspend fun writeDownloadedPlaylist(playlist: Playlist, tracks: List<Track>) {
         val store = downloadLedgerStore ?: return
-        val currentSession = session ?: return
-        val serverUrl = _state.value.session.serverUrl
+        val currentSession = activeSession() ?: return
+        val serverUrl = currentSession.serverUrl
         val downloaded = store.entriesFor(serverUrl, currentSession.userId)
             .any { it.kind == DownloadKind.PLAYLIST && it.id == playlist.id }
         if (!downloaded) return
@@ -1064,11 +1070,11 @@ class JellyfinViewModel(
     /** 登录成功时的整份替换快照：旧账号的数据一个字段都不留（换账号不串数据）。 */
     private suspend fun replaceSnapshot(tracks: List<Track>) {
         val repo = snapshotRepository ?: return
-        val currentSession = session
+        val currentSession = activeSession()
         // 已下载列表清单也按账号隔离：只留当前账号那几条，别的账号的一个不带。
         // 从盘上读（而不是只用内存副本）：会话过期后重登时内存里可能还没加载过。
         val mine = loadSnapshot()?.downloadedPlaylists.orEmpty()
-            .filter { currentSession != null && it.serverUrl == _state.value.session.serverUrl && it.userId == currentSession.userId }
+            .filter { currentSession != null && it.serverUrl == currentSession.serverUrl && it.userId == currentSession.userId }
         val next = LibrarySnapshot(tracks = tracks, downloadedPlaylists = mine)
         snapshot = next
         repo.save(next)
@@ -1219,8 +1225,7 @@ class JellyfinViewModel(
      */
     private fun startOfflineRetry() {
         if (offlineRetryJob?.isActive == true) return
-        val src = dataSource ?: return
-        val currentSession = session ?: return
+        val (src, currentSession) = activeConnection() ?: return
         offlineRetryJob = viewModelScope.launch(dispatcher) {
             repeat(kOfflineRetryMaxAttempts) {
                 if (!isActive || !_state.value.library.isOffline) return@launch
@@ -1326,14 +1331,14 @@ class JellyfinViewModel(
     fun deleteAlbumCopies(album: Album) {
         val library = downloadLibrary ?: return
         val tracks = _state.value.library.tracks ?: return
-        val currentSession = session ?: return
+        val currentSession = activeSession() ?: return
         // 守卫和置位都留在**发起线程**：置位放协程里，两次快速点击能同时穿过守卫。
         if (downloadDeleteInFlight) return
         downloadDeleteInFlight = true
         // 会话代次：删除可能跨过「退出登录 / 会话过期」，结果不该写到新会话的界面上。
         val generation = loginGeneration
         // target 的归属在挂起点之前定死：删除过程中就算退出登录，这批字节仍按原账号删。
-        val serverUrl = _state.value.session.serverUrl
+        val serverUrl = currentSession.serverUrl
         val userId = currentSession.userId
         updateDownloads { it.copy(isDeleting = true, deleteMessage = null) }
         viewModelScope.launch(dispatcher) {
@@ -1400,7 +1405,8 @@ class JellyfinViewModel(
      */
     private fun expireSession() {
         resetSession(keepLoginForm = true, errorMessage = "登录已失效，请重新登录")
-        viewModelScope.launch(dispatcher) { sessionStore.clear() }
+        // 清内存会话与存储、保留登录页预填都由 module 做；它的清库是异步的。
+        sessionManager.expire()
     }
 
     override fun onCleared() {

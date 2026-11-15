@@ -12,9 +12,7 @@ class JellyfinViewModelFactory(private val application: Application) : ViewModel
             "Unsupported ViewModel class: ${modelClass.name}"
         }
         return JellyfinViewModel(
-            sessionStore = (application as PulsarApplication).sessionRepository(),
-            apiFactory = application.jellyfinApiFactory(),
-            authorizationSink = application,
+            sessionManager = (application as PulsarApplication).sessionManager,
             dispatcher = Dispatchers.Main.immediate,
             libraryFilesFactory = application.libraryFilesFactory(),
             mediaDownloads = application.mediaDownloads(),

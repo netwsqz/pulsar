@@ -15,6 +15,7 @@ import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.session.SessionManager
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
@@ -77,6 +78,24 @@ class PulsarApplication : Application(), AuthorizationSink {
     }
 
     fun sessionRepository(): SessionRepository = SessionStore(pulsarPreferencesDataStore)
+
+    /**
+     * 会话与鉴权头的唯一来源（#21）。**进程级单例**：播放服务 / 下载上游 / 界面
+     * 必须看到同一份会话；ViewModel 重建不能把登录态重来一遍。
+     */
+    val sessionManager: SessionManager by lazy {
+        SessionManager(
+            store = sessionRepository(),
+            apiFactory = jellyfinApiFactory(),
+            scope = sessionScope,
+            authorizationSink = this,
+        )
+    }
+
+    /** 会话存储的异步清理（expire）用；与播放上报、下载的作用域分开。 */
+    private val sessionScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
 
     /** 登录页的服务器地址历史（最近 5 条，省得重新手敲）。 */
     fun serverUrlHistory(): ServerUrlHistory = DataStoreServerUrlHistory(pulsarPreferencesDataStore)

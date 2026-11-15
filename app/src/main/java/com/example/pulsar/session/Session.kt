@@ -1,6 +1,7 @@
 package com.example.pulsar.session
 
 import com.example.pulsar.SavedSession
+import com.example.pulsar.data.jellyfin.JellyfinSession
 
 /**
  * 当前 Jellyfin 会话（工单 #20）：服务地址、用户与令牌的唯一值对象。
@@ -27,6 +28,10 @@ data class LoginHint(
 /** #20 过渡桥：旧存储仍用 [SavedSession]，Step 4 合并模型后删除。 */
 internal fun SavedSession.toSession(): Session =
     Session(serverUrl, userId, username, accessToken)
+
+/** #21 过渡桥：旧数据层接口仍收 [JellyfinSession]，Step 4 合并模型后删除。 */
+internal fun Session.toJellyfinSession(): JellyfinSession =
+    JellyfinSession(userId, accessToken)
 
 /** #20 过渡桥：登录成功后先按旧格式落盘，Step 4 合并模型后删除。 */
 internal fun Session.toSavedSession(): SavedSession =

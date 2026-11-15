@@ -1,5 +1,6 @@
 package com.example.pulsar.session
 
+import com.example.pulsar.AuthorizationSink
 import com.example.pulsar.SavedSession
 import com.example.pulsar.SessionRepository
 import com.example.pulsar.data.jellyfin.JellyfinApi
@@ -267,6 +268,49 @@ class SessionManagerTest {
     }
 
     @Test
+    fun `manager is the only writer of the global authorization sink`() = runTest {
+        val sink = FakeAuthorizationSink()
+        val store = FakeSessionRepository(saved)
+        val manager = SessionManager(store, FakeJellyfinApiFactory(), this, sink)
+
+        assertTrue(manager.restore())
+        assertEquals("MediaBrowser Token=\"token-1\"", sink.activeAuthorization)
+
+        manager.signOut()
+        assertNull(sink.activeAuthorization)
+    }
+
+    @Test
+    fun `clearInMemory drops the session but keeps it for the next launch`() = runTest {
+        val sink = FakeAuthorizationSink()
+        val store = FakeSessionRepository(saved)
+        val manager = SessionManager(store, FakeJellyfinApiFactory(), this, sink)
+        manager.restore()
+
+        manager.clearInMemory()
+
+        assertNull(manager.current.value)
+        assertNull(manager.api.value)
+        assertNull(manager.authorizationHeader)
+        assertNull(sink.activeAuthorization)
+        assertEquals(saved, store.session)
+        assertEquals(0, store.clearCalls)
+    }
+
+    @Test
+    fun `expire also clears the global authorization sink`() = runTest {
+        val sink = FakeAuthorizationSink()
+        val manager = SessionManager(FakeSessionRepository(saved), FakeJellyfinApiFactory(), this, sink)
+        manager.restore()
+        assertEquals("MediaBrowser Token=\"token-1\"", sink.activeAuthorization)
+
+        manager.expire()
+        advanceUntilIdle()
+
+        assertNull(sink.activeAuthorization)
+    }
+
+    @Test
     fun `session token is only sent in the authorization header`() {
         val session = Session("https://media.example.com", "user-1", "alice", "secret-token")
         val builder = JellyfinUrlBuilder(session.serverUrl)
@@ -285,6 +329,10 @@ class SessionManagerTest {
         val session = Session("https://media.example.com", "user-1", "alice", "secret-token")
 
         assertFalse(session.toString().contains("secret-token"))
+    }
+
+    private class FakeAuthorizationSink : AuthorizationSink {
+        override var activeAuthorization: String? = null
     }
 
     private class FakeSessionRepository(

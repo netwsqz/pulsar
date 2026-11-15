@@ -1,6 +1,6 @@
 # SessionScope 重构执行计划
 
-> 状态：**进行中（#20 已落地，未接线）**。#20 代码完成、待真机确认；#21–#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
+> 状态：**进行中（#20 / #21 已落地，待真机确认）**。#22–#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
 > 相关：`docs/download-library-refactor.md`（AccountScope）、`docs/library-state-refactor.md`（SessionState）。
 > 安全红线（CLAUDE.md）：**token 绝不出现在 URL、日志或 UI**；请求头用 MediaBrowser 格式；退出登录/会话过期时清库缓存与播放队列。
 
@@ -154,6 +154,26 @@ fun interface SessionScopedJellyfinApiFactory {
 **验收**：新测试全绿；生产行为零变化。
 
 ### Step 2 — ViewModel 走 SessionManager
+
+> **已完成 2026-11-15（#21）**：`JellyfinViewModel` 只收一个 `SessionManager`，删掉
+> `sessionStore` / `apiFactory` / `authorizationSink` 字段与 7 处 `activeAuthorization`
+> 写入；登录 / 恢复 / 退出 / 过期都经 module，`session` / `dataSource` 改为
+> `sessionManager.current` / `api` 现读。与原文的差异：
+> - `SessionManager` 增加可选 `AuthorizationSink`（生产是 `PulsarApplication`），
+>   成为全局鉴权头的唯一写点；Step 3 再让播放服务直接读 manager。
+> - `login()` 仍归 ViewModel 管表单与代次；凭据落盘 / 发布在 manager，随后用
+>   `manager.api` 拉曲库。**登录成功但曲库拉取失败时调 `expire()`** 撤销刚落的
+>   凭据并回登录页；清存储是异步的，极小窗口内进程被杀仍可能留下会话。
+> - `restore()` 在 module 里先发布再校验；为避免各节抢跑，`LibraryCache.Host.connection()`
+>   在 `isRestoring` 期间仍返回 null（与改前「校验成功才算就绪」一致）。断网且无快照时
+>   ViewModel 调 `clearInMemory()` 撤内存会话与鉴权头、**保留存储**（下次启动还能恢复），
+>   与 `expire()` 的清存储语义区分；`signOut()` 也先同步撤内存凭据再清 UI。
+> - `signOut()` 的存储清理仍在 ViewModel 协程里异步完成；进程在清理前被杀仍可能残留
+>   会话（改前同样存在，Step 3 可收进 module 自己的作用域）。
+> - 测试 926 例：`SessionManagerTest` 新增鉴权头 sink 写入 / 过期清理 /
+>   `clearInMemory` 保留存储；`JellyfinViewModelTest` 新增「登录后曲库失败不留
+>   半截会话」与「恢复已发布但校验完成前进入分区不抢跑」，并把网络恢复失败用例
+>   钉到鉴权头清空。全量单测与 `assembleDebug` 通过；真机四条路径待用户确认。
 
 1. `JellyfinViewModel` 的 `session` / `dataSource` 字段替换成 `sessionManager.current` / `api`。
 2. 删除 7 处 `authorizationSink.activeAuthorization = ...` 写入；由 manager 统一写。

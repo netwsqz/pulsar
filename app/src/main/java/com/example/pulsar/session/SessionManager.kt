@@ -1,5 +1,6 @@
 package com.example.pulsar.session
 
+import com.example.pulsar.AuthorizationSink
 import com.example.pulsar.SessionRepository
 import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
@@ -13,21 +14,25 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * 会话凭据的唯一来源（候选 6 / 工单 #20）。
+ * 会话凭据的唯一来源（候选 6 / 工单 #20、#21）。
  *
- * **本步只建 module，不接线**：生产仍由 [com.example.pulsar.JellyfinViewModel] 管会话，
- * 现有行为不变。内部暂时委托旧的 [SessionRepository] / [JellyfinApiFactory]，
- * Step 4 再把数据接口收成会话作用域接口并删掉旧模型。
+ * **#21 起已接线**：`JellyfinViewModel` 只从这个 module 取 `current` / `api`，
+ * 登录 / 恢复 / 退出 / 过期都由它执行；内部暂时委托旧的 [SessionRepository] /
+ * [JellyfinApiFactory]，Step 4 再把数据接口收成会话作用域接口并删掉旧模型。
  *
  * 三条约定：
  * - [current] 是会话真相；[api] 随它一起换，旧 API 不会留给在途协程之外的人。
  * - [authorizationHeader] 只给播放服务 / 下载上游用；**不要进 UI、不要打日志**。
  * - 登出只清会话；下载字节与名单不归这里管（ADR-0007）。
+ *
+ * [authorizationSink]（生产上是 `PulsarApplication`）也由本类统一写：
+ * ViewModel 不再有第二个写 `activeAuthorization` 的地方；Step 3 再让播放服务直接读本类。
  */
 class SessionManager(
     private val store: SessionRepository,
     private val apiFactory: JellyfinApiFactory,
     private val scope: CoroutineScope,
+    private val authorizationSink: AuthorizationSink? = null,
 ) {
     private val _current = MutableStateFlow<Session?>(null)
     val current: StateFlow<Session?> = _current.asStateFlow()
@@ -113,6 +118,16 @@ class SessionManager(
     }
 
     /**
+     * 只撤内存里的会话 / API / 鉴权头，**保留存储**。
+     *
+     * 给「恢复出了会话、但校验请求失败（如断网且没有快照）」用：界面回到登录表单，
+     * 下次启动仍能恢复这份可用会话；这与 [expire] 的清存储语义不同。
+     */
+    fun clearInMemory() {
+        clearSession()
+    }
+
+    /**
      * 会话过期：清内存会话与存储，但把服务地址 / 用户名留给登录页预填。
      *
      * 清存储是异步的（规格要求本方法是普通函数）。`login` 的「落盘 + 发布」在同一把
@@ -134,7 +149,9 @@ class SessionManager(
     private fun publish(session: Session, api: JellyfinApi) {
         // 先放 API 再放会话：观察 current 的一侧拿到的 api 一定属于这个会话。
         _api.value = api
-        header = api.authorizationHeader(session.accessToken)
+        val value = api.authorizationHeader(session.accessToken)
+        header = value
+        authorizationSink?.activeAuthorization = value
         _current.value = session
     }
 
@@ -142,6 +159,7 @@ class SessionManager(
         // 与 publish 相反：先撤鉴权头与 API，最后撤会话，读方不会在 current 还有值时
         // 拿到空 header。
         header = null
+        authorizationSink?.activeAuthorization = null
         _api.value = null
         _current.value = null
     }

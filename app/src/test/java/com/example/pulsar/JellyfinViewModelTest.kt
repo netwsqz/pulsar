@@ -159,11 +159,14 @@ class JellyfinViewModelTest {
     fun `network failure keeps saved session`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
-        val viewModel = createViewModel(sessions, api)
+        val authorization = FakeAuthorizationSink("stale-auth")
+        val viewModel = createViewModel(sessions, api, authorization)
 
         advanceUntilIdle()
 
         assertTrue(!sessions.cleared)
+        // 界面已回登录表单：内存里的鉴权头不能还挂着（存储保留，下次启动再恢复）。
+        assertNull(authorization.value)
         assertTrue(viewModel.state.value.session.errorMessage!!.contains("连接"))
     }
 
@@ -1269,6 +1272,26 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `登录成功后曲库拉取失败不留半截会话`() = runTest {
+        val sessions = FakeSessionRepository(null)
+        val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IOException("no network")))
+        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        val authorization = FakeAuthorizationSink()
+        val viewModel = createViewModel(sessions, api, authorization)
+        advanceUntilIdle()
+        viewModel.updateServerUrl("https://server.test")
+        viewModel.updateUsername("user")
+        viewModel.updatePassword("pass")
+        viewModel.login()
+        advanceUntilIdle()
+
+        // 凭据先由 SessionManager 落盘，曲库失败后必须撤销，别让下次启动恢复到半登录态。
+        assertTrue(sessions.cleared)
+        assertNull(authorization.value)
+        assertTrue(viewModel.state.value.session.errorMessage!!.contains("连接"))
+    }
+
+    @Test
     fun `启动时载入地址历史到状态`() = runTest {
         val history = FakeServerUrlHistory()
         val viewModel = createViewModel(
@@ -2214,6 +2237,31 @@ class JellyfinViewModelTest {
     }
 
     @Test
+    fun `恢复会话已发布但曲库校验完成前，进入分区不抢跑`() = runTest {
+        val albums = listOf(Album("album-1", "专辑", "歌手", 1, null))
+        val gate = CompletableDeferred<Unit>()
+        val sessions = FakeSessionRepository(
+            SavedSession("https://server.test", "user-1", "user", "secret")
+        )
+        val api = FakeJellyfinApi(albums = albums).apply { musicItemsGate = gate }
+        val viewModel = createViewModel(sessions, api)
+
+        // SessionManager.restore() 已经发布 current/api，但 ViewModel 的 getMusicItems
+        // 还挂在 gate 上；此时界面报「进了专辑页」不能被当成会话就绪。
+        advanceUntilIdle()
+        viewModel.onSectionEntered(LibrarySection.Albums)
+        advanceUntilIdle()
+        assertEquals(0, api.albumsCalls)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        // 校验成功后照常补跑记住的分区
+        assertEquals(albums, viewModel.state.value.library.albums)
+        assertEquals(1, api.albumsCalls)
+    }
+
+    @Test
     fun `退出登录后不再用上一个会话的分区补跑`() = runTest {
         val album = Album("album-1", "专辑", "歌手", 1, null)
         val api = FakeJellyfinApi(albums = listOf(album))
@@ -2392,10 +2440,22 @@ class JellyfinViewModelTest {
         // 生产路径只有一条：有下载能力就一定接真 module（旧 ViewModel 派生已在 #7 删除）。
         val library = downloadLibrary
             ?: mediaDownloads?.let { downloadLibraryFor(it, downloadLedgerStore) }
+        // 会话统一走真 SessionManager，只替换存储 / API / 鉴权头的 Fake（#21）。
+        val sessionManager = com.example.pulsar.session.SessionManager(
+            sessions,
+            FakeApiFactory(api),
+            this,
+            authorization
+        )
         return JellyfinViewModel(
-            sessions, FakeApiFactory(api), authorization, StandardTestDispatcher(testScheduler),
-            libraryFilesFactory, mediaDownloads, snapshotRepository, serverUrlHistory,
-            downloadLedgerStore, library
+            sessionManager = sessionManager,
+            dispatcher = StandardTestDispatcher(testScheduler),
+            libraryFilesFactory = libraryFilesFactory,
+            mediaDownloads = mediaDownloads,
+            snapshotRepository = snapshotRepository,
+            serverUrlHistory = serverUrlHistory,
+            downloadLedgerStore = downloadLedgerStore,
+            downloadLibrary = library
         )
     }
 
@@ -2526,6 +2586,8 @@ class JellyfinViewModelTest {
         var lyricsResult: Result<Lyrics>? = null
     ) : JellyfinApi {
         var musicItemsCalls = 0
+        /** 非空时 getMusicItems 会挂起到测试放行：复现「会话已发布但曲库还没校验完」。 */
+        var musicItemsGate: CompletableDeferred<Unit>? = null
         var searchError: Throwable? = null
         val searchQueries = mutableListOf<String>()
         var lyricsCalls = 0
@@ -2560,6 +2622,7 @@ class JellyfinViewModelTest {
             loginResult ?: Result.failure<com.example.pulsar.data.jellyfin.JellyfinSession>(IllegalStateException())
         override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> {
             musicItemsCalls++
+            musicItemsGate?.await()
             return musicItemsError?.let { Result.failure(it) } ?: Result.success(tracks)
         }
         var albumsCalls = 0

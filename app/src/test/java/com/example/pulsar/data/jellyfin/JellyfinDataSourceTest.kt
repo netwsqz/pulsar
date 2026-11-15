@@ -3,6 +3,7 @@ package com.example.pulsar.data.jellyfin
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.session.Session
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -37,13 +38,17 @@ class JellyfinDataSourceTest {
             )
         })
 
-        val result = JellyfinDataSource(
+        val result = JellyfinLoginDataSource(
             client = client,
             urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
             deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
         ).login("alice", "s3cret")
 
         assertTrue(result.isSuccess)
+        assertEquals(
+            Session("https://media.example.com", "user-1", "alice", "token-1"),
+            result.getOrThrow()
+        )
         val request = requireNotNull(capturedRequest)
         assertEquals("/Users/AuthenticateByName", request.url.encodedPath)
         assertEquals("POST", request.method.value)
@@ -74,11 +79,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getMusicItems("user-1", "token-1")
+        val result = newDataSource(client, deviceId).getMusicItems()
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -88,6 +89,43 @@ class JellyfinDataSourceTest {
         assertEquals(
             "MediaBrowser Client=\"Pulsar\", Device=\"Android\", " +
                 "DeviceId=\"$deviceId\", Version=\"0.1.0\", Token=\"token-1\"",
+            request.headers[HttpHeaders.Authorization]
+        )
+        client.close()
+    }
+
+    @Test
+    fun `scoped api binds the session user and token at creation`() = runTest {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(
+                content = "{\"Items\":[]}",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
+            )
+        })
+        val session = Session(
+            serverUrl = "https://media.example.com",
+            userId = "user-42",
+            username = "bob",
+            accessToken = "bound-token",
+        )
+
+        val result = JellyfinDataSource(
+            client = client,
+            urlBuilder = JellyfinUrlBuilder(session.serverUrl),
+            deviceId = "device-1",
+            session = session,
+        ).getAlbums()
+
+        assertTrue(result.isSuccess)
+        val request = requireNotNull(capturedRequest)
+        assertEquals("/Users/user-42/Items", request.url.encodedPath)
+        assertFalse(request.url.toString().contains("bound-token"))
+        assertEquals(
+            "MediaBrowser Client=\"Pulsar\", Device=\"Android\", " +
+                "DeviceId=\"device-1\", Version=\"0.1.0\", Token=\"bound-token\"",
             request.headers[HttpHeaders.Authorization]
         )
         client.close()
@@ -106,11 +144,7 @@ class JellyfinDataSourceTest {
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             )
         })
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        ).getMusicItems("user-1", "token-1")
+        val result = newDataSource(client, "41e55f58-619c-45d1-9bc7-6e59b70437fd").getMusicItems()
 
         assertTrue(result.isSuccess)
         val tracks = result.getOrThrow()
@@ -123,13 +157,9 @@ class JellyfinDataSourceTest {
     fun `streamUrl builds playable URL without exposing token`() {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        )
+        val dataSource = newDataSource(client, deviceId, accessToken = "secret-token")
 
-        val url = dataSource.streamUrl("track-1", "secret-token")
+        val url = dataSource.streamUrl("track-1")
 
         assertEquals("https://media.example.com/Videos/track-1/stream?static=true", url)
         assertFalse(url.contains("secret-token"))
@@ -140,19 +170,29 @@ class JellyfinDataSourceTest {
     fun `authorizationHeader uses MediaBrowser format with token`() {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        )
+        val dataSource = newDataSource(client, deviceId)
 
-        val header = dataSource.authorizationHeader("token-1")
+        val header = dataSource.authorizationHeader()
 
         assertEquals(
             "MediaBrowser Client=\"Pulsar\", Device=\"Android\", " +
                 "DeviceId=\"$deviceId\", Version=\"0.1.0\", Token=\"token-1\"",
             header
         )
+        client.close()
+    }
+
+    @Test
+    fun `data source and URL builder share one MediaBrowser authorization format`() {
+        val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
+        val deviceId = "device-1"
+        val dataSource = newDataSource(client, deviceId)
+        val builderHeader = JellyfinUrlBuilder("https://media.example.com")
+            .mediaStreamRequest("track-1", "token-1", deviceId)
+            .headers
+            .getValue("Authorization")
+
+        assertEquals(builderHeader, dataSource.authorizationHeader())
         client.close()
     }
 
@@ -169,11 +209,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getAlbums("user-1", "token-1")
+        val result = newDataSource(client, deviceId).getAlbums()
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -208,11 +244,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getRandomAlbums("user-1", "token-1", limit = 8)
+        val result = newDataSource(client, deviceId).getRandomAlbums(limit = 8)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -246,11 +278,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getRecentlyPlayed("user-1", "token-1", limit = 20)
+        val result = newDataSource(client, deviceId).getRecentlyPlayed(limit = 20)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -287,11 +315,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getMostPlayed("user-1", "token-1", limit = 20)
+        val result = newDataSource(client, deviceId).getMostPlayed(limit = 20)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -322,11 +346,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getRecentlyAdded("user-1", "token-1", limit = 12)
+        val result = newDataSource(client, deviceId).getRecentlyAdded(limit = 12)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -349,16 +369,12 @@ class JellyfinDataSourceTest {
         val client = HttpClient(MockEngine {
             respond(content = "", status = HttpStatusCode.Unauthorized)
         })
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        )
+        val dataSource = newDataSource(client, "device-1")
 
         val results = listOf(
-            dataSource.getRecentlyPlayed("user-1", "expired", limit = 20),
-            dataSource.getMostPlayed("user-1", "expired", limit = 20),
-            dataSource.getRecentlyAdded("user-1", "expired", limit = 12)
+            dataSource.getRecentlyPlayed(limit = 20),
+            dataSource.getMostPlayed(limit = 20),
+            dataSource.getRecentlyAdded(limit = 12)
         )
 
         results.forEach { result ->
@@ -379,11 +395,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getAlbums("user-1", "token-1")
+        val result = newDataSource(client, deviceId).getAlbums()
 
         assertTrue(result.isSuccess)
         assertEquals(
@@ -405,11 +417,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getAlbumTracks("user-1", "token-1", "album-1")
+        val result = newDataSource(client, deviceId).getAlbumTracks("album-1")
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -442,11 +450,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getPlaylists("user-1", "token-1")
+        val result = newDataSource(client, deviceId).getPlaylists()
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -478,11 +482,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getPlaylistTracks("user-1", "token-1", "playlist-1")
+        val result = newDataSource(client, deviceId).getPlaylistTracks("playlist-1")
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -505,13 +505,9 @@ class JellyfinDataSourceTest {
     fun `imageRequest builds image URL with token in header only`() {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        )
+        val dataSource = newDataSource(client, deviceId, accessToken = "secret-token")
 
-        val request = dataSource.imageRequest("album-1", "tag-1", "secret-token")
+        val request = dataSource.imageRequest("album-1", "tag-1")
 
         assertEquals(
             "https://media.example.com/Items/album-1/Images/Primary?tag=tag-1",
@@ -530,13 +526,9 @@ class JellyfinDataSourceTest {
     fun `imageRequest omits tag query when image tag is null`() {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        )
+        val dataSource = newDataSource(client, deviceId)
 
-        val request = dataSource.imageRequest("album-1", null, "secret-token")
+        val request = dataSource.imageRequest("album-1", null)
 
         assertEquals(
             "https://media.example.com/Items/album-1/Images/Primary",
@@ -558,15 +550,11 @@ class JellyfinDataSourceTest {
                 headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString())
             )
         })
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        )
+        val dataSource = newDataSource(client, "41e55f58-619c-45d1-9bc7-6e59b70437fd")
 
-        dataSource.getMusicItems("user-1", "token-1")
-        dataSource.getAlbumTracks("user-1", "token-1", "album-1")
-        dataSource.search("user-1", "token-1", "Beatles")
+        dataSource.getMusicItems()
+        dataSource.getAlbumTracks("album-1")
+        dataSource.search("Beatles")
 
         assertEquals("PrimaryImageAspectRatio,Genres,Path", fields[0])
         assertEquals("PrimaryImageAspectRatio,Genres,Path", fields[1])
@@ -586,11 +574,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).search("user-1", "token-1", "Beatles")
+        val result = newDataSource(client, deviceId).search("Beatles")
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -622,11 +606,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).search("user-1", "token-1", "One")
+        val result = newDataSource(client, deviceId).search("One")
 
         assertTrue(result.isSuccess)
         val results = result.getOrThrow()
@@ -640,11 +620,7 @@ class JellyfinDataSourceTest {
     fun `search with blank query fails`() = runTest {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).search("user-1", "token-1", "   ")
+        val result = newDataSource(client, deviceId).search("   ")
 
         assertTrue(result.isFailure)
         client.close()
@@ -660,11 +636,7 @@ class JellyfinDataSourceTest {
             respond(content = "", status = HttpStatusCode.NoContent)
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).reportPlaybackStarted("token-1", "track-9", positionTicks = 0)
+        val result = newDataSource(client, deviceId).reportPlaybackStarted("track-9", positionTicks = 0)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -689,11 +661,7 @@ class JellyfinDataSourceTest {
             capturedRequest = request
             respond(content = "", status = HttpStatusCode.NoContent)
         })
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        ).reportPlaybackStopped("token-1", "track-9", positionTicks = 900_000_000L)
+        val result = newDataSource(client, "device-1").reportPlaybackStopped("track-9", positionTicks = 900_000_000L)
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -710,14 +678,10 @@ class JellyfinDataSourceTest {
         val client = HttpClient(MockEngine {
             respond(content = "", status = HttpStatusCode.Unauthorized)
         })
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        )
+        val dataSource = newDataSource(client, "device-1")
 
-        val started = dataSource.reportPlaybackStarted("expired", "track-9", 0)
-        val stopped = dataSource.reportPlaybackStopped("expired", "track-9", 10_000)
+        val started = dataSource.reportPlaybackStarted("track-9", 0)
+        val stopped = dataSource.reportPlaybackStopped("track-9", 10_000)
 
         assertTrue(started.exceptionOrNull() is JellyfinError.Unauthorized)
         assertTrue(stopped.exceptionOrNull() is JellyfinError.Unauthorized)
@@ -727,13 +691,9 @@ class JellyfinDataSourceTest {
     @Test
     fun `playback reporting surfaces network failure as Result failure`() = runTest {
         val client = HttpClient(MockEngine { throw java.io.IOException("offline") })
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        )
+        val dataSource = newDataSource(client, "device-1")
 
-        val result = dataSource.reportPlaybackStarted("token-1", "track-9", 0)
+        val result = dataSource.reportPlaybackStarted("track-9", 0)
 
         assertTrue(result.exceptionOrNull() is JellyfinError.Network)
         client.close()
@@ -746,14 +706,10 @@ class JellyfinDataSourceTest {
             requests++
             respond("{}", HttpStatusCode.OK)
         })
-        val dataSource = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        )
+        val dataSource = newDataSource(client, "device-1")
 
-        assertTrue(dataSource.reportPlaybackStarted("token-1", "  ", 0).isFailure)
-        assertTrue(dataSource.reportPlaybackStopped("token-1", "  ", 0).isFailure)
+        assertTrue(dataSource.reportPlaybackStarted("  ", 0).isFailure)
+        assertTrue(dataSource.reportPlaybackStopped("  ", 0).isFailure)
         assertEquals(0, requests)
         client.close()
     }
@@ -772,11 +728,7 @@ class JellyfinDataSourceTest {
             )
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getLyrics("token-1", "track-9")
+        val result = newDataSource(client, deviceId).getLyrics("track-9")
 
         assertTrue(result.isSuccess)
         val request = requireNotNull(capturedRequest)
@@ -803,11 +755,7 @@ class JellyfinDataSourceTest {
             respond(content = "", status = HttpStatusCode.NotFound)
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getLyrics("token-1", "track-missing")
+        val result = newDataSource(client, deviceId).getLyrics("track-missing")
 
         // 没歌词是常态不是错误：404 归一化为成功 + Lyrics.NONE，UI 显示空态而不弹错误。
         assertTrue(result.isSuccess)
@@ -821,11 +769,7 @@ class JellyfinDataSourceTest {
             respond(content = "", status = HttpStatusCode.Unauthorized)
         })
         val deviceId = "41e55f58-619c-45d1-9bc7-6e59b70437fd"
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = deviceId
-        ).getLyrics("expired-token", "track-9")
+        val result = newDataSource(client, deviceId).getLyrics("track-9")
 
         assertTrue(result.isFailure)
         assertTrue(result.exceptionOrNull() is JellyfinError.Unauthorized)
@@ -835,13 +779,36 @@ class JellyfinDataSourceTest {
     @Test
     fun `lyrics with blank track id fails`() = runTest {
         val client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
-        val result = JellyfinDataSource(
-            client = client,
-            urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
-            deviceId = "device-1"
-        ).getLyrics("token-1", "  ")
+        val result = newDataSource(client, "device-1").getLyrics("  ")
 
         assertTrue(result.isFailure)
         client.close()
     }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun `scoped data source rejects a URL builder for another server`() {
+        JellyfinDataSource(
+            client = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) }),
+            urlBuilder = JellyfinUrlBuilder("https://other.example.com"),
+            deviceId = "device-1",
+            session = Session("https://media.example.com", "user-1", "alice", "token-1"),
+        )
+    }
+
+    /** 会话作用域数据源：凭据在创建时绑定，调用方不再逐方法搬 userId / token。 */
+    private fun newDataSource(
+        client: HttpClient,
+        deviceId: String,
+        accessToken: String = "token-1",
+    ) = JellyfinDataSource(
+        client = client,
+        urlBuilder = JellyfinUrlBuilder("https://media.example.com"),
+        deviceId = deviceId,
+        session = Session(
+            serverUrl = "https://media.example.com",
+            userId = "user-1",
+            username = "alice",
+            accessToken = accessToken,
+        ),
+    )
 }

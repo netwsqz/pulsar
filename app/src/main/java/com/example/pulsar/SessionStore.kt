@@ -4,20 +4,15 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.example.pulsar.session.Session
 import kotlinx.coroutines.flow.first
 
 /**
- * 已保存的登录会话，用于启动时自动恢复登录。
+ * 会话存储。只保存会话凭据（accessToken），不保存密码。
  *
- * 只保存会话凭据（accessToken），不保存密码。
+ * **键名与字段名属于升级契约**（#23 / D7）：改 Kotlin 类型不改变这里的键，
+ * 老版本落盘的会话在新版本仍能读出来。
  */
-data class SavedSession(
-    val serverUrl: String,
-    val userId: String,
-    val username: String,
-    val accessToken: String
-)
-
 private const val KEY_SERVER_URL = "session_server_url"
 private const val KEY_USER_ID = "session_user_id"
 private const val KEY_USERNAME = "session_username"
@@ -26,7 +21,7 @@ private const val KEY_ACCESS_TOKEN = "session_access_token"
 private val allKeys = listOf(KEY_SERVER_URL, KEY_USER_ID, KEY_USERNAME, KEY_ACCESS_TOKEN)
 
 /** 把会话编码成存储用的键值对（唯一编码来源，便于往返校验）。 */
-fun SavedSession.toStoreMap(): Map<String, String> = mapOf(
+fun Session.toStoreMap(): Map<String, String> = mapOf(
     KEY_SERVER_URL to serverUrl,
     KEY_USER_ID to userId,
     KEY_USERNAME to username,
@@ -34,23 +29,23 @@ fun SavedSession.toStoreMap(): Map<String, String> = mapOf(
 )
 
 /** 从存储键值对还原会话；缺字段或值为空白时返回 null。 */
-fun savedSessionFromStoreMap(map: Map<String, String>): SavedSession? {
+fun sessionFromStoreMap(map: Map<String, String>): Session? {
     val serverUrl = map[KEY_SERVER_URL]?.takeIf { it.isNotBlank() } ?: return null
     val userId = map[KEY_USER_ID]?.takeIf { it.isNotBlank() } ?: return null
     val username = map[KEY_USERNAME]?.takeIf { it.isNotBlank() } ?: return null
     val accessToken = map[KEY_ACCESS_TOKEN]?.takeIf { it.isNotBlank() } ?: return null
-    return SavedSession(serverUrl, userId, username, accessToken)
+    return Session(serverUrl, userId, username, accessToken)
 }
 
 /** 用 DataStore 保存/读取/清除登录会话。 */
 class SessionStore(private val dataStore: DataStore<Preferences>) : SessionRepository {
-    override suspend fun load(): SavedSession? {
+    override suspend fun load(): Session? {
         val preferences = dataStore.data.first()
         val map = allKeys.associateWith { key -> preferences[stringPreferencesKey(key)].orEmpty() }
-        return savedSessionFromStoreMap(map)
+        return sessionFromStoreMap(map)
     }
 
-    override suspend fun save(session: SavedSession) {
+    override suspend fun save(session: Session) {
         dataStore.edit { preferences ->
             session.toStoreMap().forEach { (key, value) ->
                 preferences[stringPreferencesKey(key)] = value

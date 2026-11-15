@@ -1,6 +1,6 @@
 # SessionScope 重构执行计划
 
-> 状态：**进行中（#20 / #21 / #22 已落地，待真机确认）**。#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
+> 状态：**已落地（#20 / #21 / #22 / #23），待真机确认**。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。决策记录见 `docs/adr/0011-session-credentials-owned-by-session-manager.md`。
 > 相关：`docs/download-library-refactor.md`（AccountScope）、`docs/library-state-refactor.md`（SessionState）。
 > 安全红线（CLAUDE.md）：**token 绝不出现在 URL、日志或 UI**；请求头用 MediaBrowser 格式；退出登录/会话过期时清库缓存与播放队列。
 
@@ -211,6 +211,21 @@ fun interface SessionScopedJellyfinApiFactory {
 
 ### Step 4 — 会话作用域 API + 签名收窄
 
+> **已完成 2026-11-15（#23）**：`JellyfinApi` 删除，拆成 `SessionScopedJellyfinApi`（数据方法只收
+> 领域参数）与 `JellyfinLoginApi`（登录返回完整 `Session`）；`JellyfinApiFactory` 用
+> `createLoginApi(serverUrl)` / `create(session)` 两步建。`JellyfinDataSource` 在构造时绑定
+> `Session`，`JellyfinLoginDataSource` 负责登录。`SavedSession` / `JellyfinSession` 删除，
+> `SessionRepository` / `SessionStore` 直接读写 `Session`，DataStore 键名保持不变。
+> 鉴权头收成 `mediaBrowserAuthorization(deviceId, accessToken?)` 一处实现，URL 构建器 /
+> 数据源 / 登录共用。`LibraryCache.Connection` 只保留会话作用域 API，其余调用点与 Fake 同步收窄。
+> 与原文的差异：
+> - 登录 API 与数据 API 是两个小接口，而不是让同一个对象在「无会话 / 有会话」之间切换；
+>   工厂因此有 `createLoginApi` 与 `create(session)` 两个方法。
+> - `JellyfinUrlBuilder.serverUrl` 返回**用户输入原样**，只用于会话存储 / 账号作用域；
+>   URL 拼接仍用内部规范化地址，避免升级后下载名单的 serverUrl 对不上。
+> - 新增 6 条测试：鉴权头格式、数据源与构建器头一致、会话绑定 userId/token、DataStore
+>   键名稳定、serverUrl 保留输入。全量 934 例与 `assembleDebug` 通过；真机清单见 §8。
+
 1. 新增 `SessionScopedJellyfinDataSource`（或让 `JellyfinDataSource` 实现新接口）。
 2. `JellyfinApiFactory.create(serverUrl, session)` 返回新接口。
 3. 把 12 个方法的 `(userId, accessToken)` 参数删掉；更新所有调用点与 Fake。
@@ -220,6 +235,10 @@ fun interface SessionScopedJellyfinApiFactory {
 **验收**：`JellyfinApi` 不再有 `userId/accessToken` 参数；`PlaybackReporter` 的 Fake 只有 2 个方法；测试全绿。
 
 ### Step 5 — 清理 + 文档
+
+> **已完成 2026-11-15（#23）**：旧 `JellyfinApi` 与两个旧会话模型已删除；`CLAUDE.md` 鉴权章节
+> 与 `CONTEXT.md` 的「会话作用域」术语已更新；删除全局鉴权头缓存的决策补成
+> ADR-0011。真机清单（§8）仍需用户确认。
 
 1. 删除旧的 `JellyfinApi` 或标 `@Deprecated`（如果 QQ 下载/其他模块还用）。
 2. 更新 `CLAUDE.md` 的会话/鉴权章节：加 `SessionManager` 的唯一来源地位。

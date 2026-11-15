@@ -1,14 +1,13 @@
 package com.example.pulsar.session
 
-import com.example.pulsar.SavedSession
 import com.example.pulsar.SessionRepository
-import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinError
+import com.example.pulsar.data.jellyfin.JellyfinLoginApi
 import com.example.pulsar.data.jellyfin.JellyfinRequest
-import com.example.pulsar.data.jellyfin.JellyfinSession
 import com.example.pulsar.data.jellyfin.JellyfinUrlBuilder
 import com.example.pulsar.data.jellyfin.Lyrics
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -29,7 +28,7 @@ import java.io.IOException
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionManagerTest {
 
-    private val saved = SavedSession(
+    private val saved = Session(
         serverUrl = "https://media.example.com",
         userId = "user-1",
         username = "alice",
@@ -54,8 +53,9 @@ class SessionManagerTest {
         assertSame(api, manager.currentConnection()?.api)
         assertEquals(manager.current.value, manager.currentConnection()?.session)
         assertEquals("MediaBrowser Token=\"token-1\"", manager.authorizationHeader)
-        assertEquals(listOf("https://media.example.com"), factory.requestedServerUrls)
-        assertFalse(factory.requestedServerUrls.single().contains("token-1"))
+        assertEquals(listOf(saved), factory.requestedSessions)
+        // 恢复会话时只把已保存的会话交给工厂，令牌不经过 URL / 日志。
+        assertFalse(factory.requestedSessions.single().toString().contains("token-1"))
     }
 
     @Test
@@ -69,7 +69,7 @@ class SessionManagerTest {
         assertNull(manager.current.value)
         assertNull(manager.api.value)
         assertNull(manager.authorizationHeader)
-        assertTrue("没有会话时不该创建 API", factory.requestedServerUrls.isEmpty())
+        assertTrue("没有会话时不该创建 API", factory.requestedSessions.isEmpty())
     }
 
     @Test
@@ -83,14 +83,15 @@ class SessionManagerTest {
         assertNull(manager.current.value)
         assertNull(manager.api.value)
         assertNull(manager.authorizationHeader)
-        assertTrue("读失败时不该继续创建 API", factory.requestedServerUrls.isEmpty())
+        assertTrue("读失败时不该继续创建 API", factory.requestedSessions.isEmpty())
     }
 
     @Test
     fun `login saves the session and publishes it as current`() = runTest {
         val store = FakeSessionRepository(null)
-        val api = FakeJellyfinApi(loginResult = Result.success(JellyfinSession("user-9", "token-9")))
-        val manager = SessionManager(store, FakeJellyfinApiFactory(api), this)
+        val api = FakeJellyfinApi(loginResult = Result.success(Session("https://media.example.com", "user-9", "bob", "token-9")))
+        val factory = FakeJellyfinApiFactory(api)
+        val manager = SessionManager(store, factory, this)
 
         val result = manager.login("https://media.example.com", "bob", "s3cret")
 
@@ -99,10 +100,13 @@ class SessionManagerTest {
             Session("https://media.example.com", "user-9", "bob", "token-9"),
             session
         )
+        // 登录先建无会话的登录接口，拿到会话后再建会话作用域 API；凭据不经过方法参数。
+        assertEquals(listOf("https://media.example.com"), factory.requestedServerUrls)
+        assertEquals(listOf(session), factory.requestedSessions)
         assertEquals(session, manager.current.value)
         assertSame(api, manager.api.value)
         assertEquals(
-            SavedSession("https://media.example.com", "user-9", "bob", "token-9"),
+            Session("https://media.example.com", "user-9", "bob", "token-9"),
             store.session
         )
         assertEquals("MediaBrowser Token=\"token-9\"", manager.authorizationHeader)
@@ -180,7 +184,7 @@ class SessionManagerTest {
     @Test
     fun `login returns failure when the session cannot be saved`() = runTest {
         val store = FakeSessionRepository(null).apply { saveError = IOException("disk full") }
-        val api = FakeJellyfinApi(loginResult = Result.success(JellyfinSession("user-9", "token-9")))
+        val api = FakeJellyfinApi(loginResult = Result.success(Session("https://media.example.com", "user-9", "bob", "token-9")))
         val manager = SessionManager(store, FakeJellyfinApiFactory(api), this)
 
         assertTrue(manager.login("https://media.example.com", "bob", "pw").isFailure)
@@ -234,7 +238,7 @@ class SessionManagerTest {
         advanceUntilIdle()
 
         assertEquals(
-            SavedSession("https://media.example.com", "user-1", "bob", "token-1"),
+            Session("https://media.example.com", "user-1", "bob", "token-1"),
             store.session
         )
         assertNotNull(manager.current.value)
@@ -262,7 +266,7 @@ class SessionManagerTest {
         manager.login("https://media.example.com", "alice", "pw").getOrThrow()
         assertEquals("MediaBrowser Token=\"token-1\"", manager.authorizationHeader)
 
-        api.loginResult = Result.success(JellyfinSession("user-2", "token-2"))
+        api.loginResult = Result.success(Session("https://media.example.com", "user-2", "bob", "token-2"))
         manager.login("https://media.example.com", "bob", "pw").getOrThrow()
         assertEquals("MediaBrowser Token=\"token-2\"", manager.authorizationHeader)
 
@@ -307,7 +311,7 @@ class SessionManagerTest {
     }
 
     private class FakeSessionRepository(
-        var session: SavedSession?,
+        var session: Session?,
         var loadError: Throwable? = null
     ) : SessionRepository {
         var saveError: Throwable? = null
@@ -315,12 +319,12 @@ class SessionManagerTest {
         var saveCalls = 0
         var clearCalls = 0
 
-        override suspend fun load(): SavedSession? {
+        override suspend fun load(): Session? {
             loadError?.let { throw it }
             return session
         }
 
-        override suspend fun save(session: SavedSession) {
+        override suspend fun save(session: Session) {
             saveError?.let { throw it }
             saveCalls++
             this.session = session
@@ -334,13 +338,13 @@ class SessionManagerTest {
     }
 
     /** save 写完但还没 publish 时挂住，用来复现 expire 与登录的竞态。 */
-    private class GatedSaveRepository(var session: SavedSession?) : SessionRepository {
+    private class GatedSaveRepository(var session: Session?) : SessionRepository {
         val saveStarted = CompletableDeferred<Unit>()
         val releaseSave = CompletableDeferred<Unit>()
 
-        override suspend fun load(): SavedSession? = session
+        override suspend fun load(): Session? = session
 
-        override suspend fun save(session: SavedSession) {
+        override suspend fun save(session: Session) {
             this.session = session
             saveStarted.complete(Unit)
             releaseSave.await()
@@ -352,39 +356,50 @@ class SessionManagerTest {
     }
 
     private class FakeJellyfinApiFactory(
-        private val api: JellyfinApi = FakeJellyfinApi()
+        private val api: FakeJellyfinApi = FakeJellyfinApi()
     ) : JellyfinApiFactory {
         val requestedServerUrls = mutableListOf<String>()
+        val requestedSessions = mutableListOf<Session>()
 
-        override suspend fun create(serverUrl: String): JellyfinApi {
+        override suspend fun createLoginApi(serverUrl: String): JellyfinLoginApi {
             requestedServerUrls += serverUrl
+            return api
+        }
+
+        override suspend fun create(session: Session): SessionScopedJellyfinApi {
+            requestedSessions += session
             return api
         }
     }
 
-    /** SessionManager 只用到 login 与 authorizationHeader，其余方法仅为满足旧接口。 */
+    /** SessionManager 只用到 login 与 authorizationHeader，其余方法仅为满足新接口。 */
     private class FakeJellyfinApi(
-        var loginResult: Result<JellyfinSession> = Result.success(JellyfinSession("user-1", "token-1"))
-    ) : JellyfinApi {
-        override suspend fun login(username: String, password: String): Result<JellyfinSession> = loginResult
+        var loginResult: Result<Session> = Result.success(
+            Session("https://media.example.com", "user-1", "alice", "token-1")
+        )
+    ) : SessionScopedJellyfinApi, JellyfinLoginApi {
+        private var token = "token-1"
 
-        override fun authorizationHeader(accessToken: String): String = "MediaBrowser Token=\"$accessToken\""
+        override suspend fun login(username: String, password: String): Result<Session> =
+            loginResult.map { it.copy(username = username) }.onSuccess { token = it.accessToken }
 
-        override suspend fun getMusicItems(userId: String, accessToken: String) = unsupported<List<Track>>()
-        override suspend fun getAlbums(userId: String, accessToken: String) = unsupported<List<Album>>()
-        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int) = unsupported<List<Album>>()
-        override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int) = unsupported<List<Track>>()
-        override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int) = unsupported<List<Track>>()
-        override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int) = unsupported<List<Album>>()
-        override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = unsupported<List<Track>>()
-        override suspend fun getPlaylists(userId: String, accessToken: String) = unsupported<List<Playlist>>()
-        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) = unsupported<List<Track>>()
-        override suspend fun search(userId: String, accessToken: String, query: String) = unsupported<SearchResults>()
-        override suspend fun getLyrics(accessToken: String, trackId: String) = unsupported<Lyrics>()
-        override fun streamUrl(mediaId: String, accessToken: String): String = unsupportedValue()
-        override suspend fun reportPlaybackStarted(accessToken: String, itemId: String, positionTicks: Long) = unsupported<Unit>()
-        override suspend fun reportPlaybackStopped(accessToken: String, itemId: String, positionTicks: Long) = unsupported<Unit>()
-        override fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest =
+        override fun authorizationHeader(): String = "MediaBrowser Token=\"$token\""
+
+        override suspend fun getMusicItems() = unsupported<List<Track>>()
+        override suspend fun getAlbums() = unsupported<List<Album>>()
+        override suspend fun getRandomAlbums(limit: Int) = unsupported<List<Album>>()
+        override suspend fun getRecentlyPlayed(limit: Int) = unsupported<List<Track>>()
+        override suspend fun getMostPlayed(limit: Int) = unsupported<List<Track>>()
+        override suspend fun getRecentlyAdded(limit: Int) = unsupported<List<Album>>()
+        override suspend fun getAlbumTracks(albumId: String) = unsupported<List<Track>>()
+        override suspend fun getPlaylists() = unsupported<List<Playlist>>()
+        override suspend fun getPlaylistTracks(playlistId: String) = unsupported<List<Track>>()
+        override suspend fun search(query: String) = unsupported<SearchResults>()
+        override suspend fun getLyrics(trackId: String) = unsupported<Lyrics>()
+        override fun streamUrl(mediaId: String): String = unsupportedValue()
+        override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long) = unsupported<Unit>()
+        override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long) = unsupported<Unit>()
+        override fun imageRequest(itemId: String, imageTag: String?): JellyfinRequest =
             unsupportedValue()
 
         private fun <T> unsupported(): Result<T> =

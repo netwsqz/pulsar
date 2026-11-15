@@ -1,6 +1,6 @@
 package com.example.pulsar.session
 
-import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 
 /**
  * 当前会话与它对应 API 的原子快照（#22）。
@@ -10,6 +10,6 @@ import com.example.pulsar.data.jellyfin.JellyfinApi
  * 一律取这个快照，不要自己拼。
  */
 data class SessionConnection(
-    val api: JellyfinApi,
+    val api: SessionScopedJellyfinApi,
     val session: Session,
 )

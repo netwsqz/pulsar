@@ -6,8 +6,10 @@ import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
-import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.JellyfinLoginApi
+import com.example.pulsar.data.jellyfin.JellyfinLoginDataSource
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.data.libraryfiles.LibraryFilesApi
 import com.example.pulsar.data.libraryfiles.LibraryFilesDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadApi
@@ -15,6 +17,7 @@ import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
@@ -65,13 +68,22 @@ class PulsarApplication : Application() {
         }
     }
 
-    suspend fun jellyfinDataSource(serverUrl: String): JellyfinDataSource {
-        return JellyfinDataSource(
+    /** 登录前用：只带服务器地址，不带任何凭据。 */
+    suspend fun jellyfinLoginDataSource(serverUrl: String): JellyfinLoginDataSource =
+        JellyfinLoginDataSource(
             client = jellyfinClient,
             urlBuilder = com.example.pulsar.data.jellyfin.JellyfinUrlBuilder(serverUrl),
             deviceId = InstallationIdStore(pulsarPreferencesDataStore).getOrCreate()
         )
-    }
+
+    /** 登录 / 恢复成功后用：userId 与令牌在创建时绑定，方法不再搬凭据（#23）。 */
+    suspend fun jellyfinDataSource(session: Session): JellyfinDataSource =
+        JellyfinDataSource(
+            client = jellyfinClient,
+            urlBuilder = com.example.pulsar.data.jellyfin.JellyfinUrlBuilder(session.serverUrl),
+            deviceId = InstallationIdStore(pulsarPreferencesDataStore).getOrCreate(),
+            session = session,
+        )
 
     fun sessionRepository(): SessionRepository = SessionStore(pulsarPreferencesDataStore)
 
@@ -96,7 +108,11 @@ class PulsarApplication : Application() {
     fun serverUrlHistory(): ServerUrlHistory = DataStoreServerUrlHistory(pulsarPreferencesDataStore)
 
     fun jellyfinApiFactory(): JellyfinApiFactory = object : JellyfinApiFactory {
-        override suspend fun create(serverUrl: String): JellyfinApi = jellyfinDataSource(serverUrl)
+        override suspend fun createLoginApi(serverUrl: String): JellyfinLoginApi =
+            jellyfinLoginDataSource(serverUrl)
+
+        override suspend fun create(session: Session): SessionScopedJellyfinApi =
+            jellyfinDataSource(session)
     }
 
     fun qqDownloadSettings(): QQDownloadSettings = QQDownloadPreferences(pulsarPreferencesDataStore)

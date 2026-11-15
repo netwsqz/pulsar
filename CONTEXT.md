@@ -197,6 +197,21 @@ _Avoid_: 播放器控制器（界面侧旧叫法）——界面不再直接拿 `
 
 _Avoid_: 把 remote 当成全局控制器或单例——它是会话专用的端口。
 
+## 会话与鉴权
+
+### 会话作用域（SessionScope）
+
+`SessionManager` + `SessionScopedJellyfinApi` 表达的范围：**一次登录换一个 API 实例**。`Session`（`serverUrl / userId / username / accessToken`）在创建 API 时绑定，数据方法只收领域参数（`getAlbums()`、`search(query)`、`streamUrl(mediaId)`），不再逐次传 `userId` / 令牌。
+
+- `SessionManager` 是凭据的**唯一持有者**：登录 / 恢复 / 登出 / 过期都走它；播放服务与下载上游只读 `authorizationHeader`，界面不碰令牌。
+- 登录前没有会话，只有 `JellyfinLoginApi.login()`；成功后返回完整 `Session`。
+- **令牌只进 `Authorization` 头**，绝不进 URL、日志或 UI。
+- 存储仍只存令牌，DataStore 键名不变（升级不丢会话）。
+
+_Avoid_: 全局鉴权头、`activeAuthorization`（#22 已删除）、`SavedSession` / `JellyfinSession`（#23 已合并为 `Session`）。
+
+**别和下载的账号作用域（AccountScope）搞混**：AccountScope 只管「哪些下载条目属于哪个服务器 + 用户」，是下载名单的过滤键；SessionScope 管的是网络请求用哪份凭据，两者不是同一个东西。
+
 ## 状态与数据流
 
 ### 界面状态（JellyfinUiState）

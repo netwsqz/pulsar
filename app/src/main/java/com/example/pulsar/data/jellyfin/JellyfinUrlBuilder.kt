@@ -6,7 +6,14 @@ import java.net.URI
 
 /** Builds Jellyfin request URLs while keeping credentials out of URLs. */
 class JellyfinUrlBuilder(baseUrl: String) {
+    private val originalBaseUrl: String = baseUrl
     private val normalizedBaseUrl: String = normalizeBaseUrl(baseUrl)
+
+    /**
+     * 创建时的服务器地址**原样**返回。会话存储与账号作用域沿用用户输入，
+     * 与升级前的行为一致（URL 拼接仍走规范化地址）。
+     */
+    val serverUrl: String get() = originalBaseUrl
 
     fun loginUrl(): String {
         return appendPath("Users", "AuthenticateByName")
@@ -56,9 +63,7 @@ class JellyfinUrlBuilder(baseUrl: String) {
     fun playbackStoppedUrl(): String = appendPath("Sessions", "Playing", "Stopped")
 
     private fun headersWithToken(deviceId: String, token: String): Map<String, String> = mapOf(
-        "Authorization" to
-            "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", " +
-            "Version=\"0.1.0\", Token=\"$token\""
+        "Authorization" to mediaBrowserAuthorization(deviceId, token)
     )
 
     private fun appendPath(vararg segments: String): String {
@@ -139,3 +144,13 @@ data class JellyfinRequest(
     val url: String,
     val headers: Map<String, String>
 )
+
+/**
+ * MediaBrowser 鉴权头的**唯一拼装实现**（#23）。URL 构建器、数据源、登录请求都走这里，
+ * 改 Client / Device / Version 时只需要改一处。
+ *
+ * `accessToken = null` 只用于登录请求（还没有令牌）；其余场景令牌必须存在。
+ */
+internal fun mediaBrowserAuthorization(deviceId: String, accessToken: String? = null): String =
+    "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", Version=\"0.1.0\"" +
+        accessToken?.let { ", Token=\"$it\"" }.orEmpty()

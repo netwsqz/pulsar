@@ -2,9 +2,8 @@ package com.example.pulsar.library
 
 import com.example.pulsar.JellyfinUiState
 import com.example.pulsar.LibrarySection
-import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinError
-import com.example.pulsar.data.jellyfin.JellyfinSession
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -52,8 +51,8 @@ internal class LibraryCache(
     private val describeError: (Throwable) -> String,
     private val host: Host,
 ) {
-    /** 一次加载需要的两样东西：API 与当前会话；null 表示会话还没就绪。 */
-    data class Connection(val api: JellyfinApi, val session: JellyfinSession)
+    /** 一次加载只需要会话作用域 API（凭据已绑定）；null 表示会话还没就绪。 */
+    data class Connection(val api: SessionScopedJellyfinApi)
 
     /** 宿主接缝：状态、会话、离线态与快照都归 `JellyfinViewModel`，module 只做加载编排。 */
     interface Host {
@@ -217,7 +216,7 @@ internal class LibraryCache(
         if (!force && library.albums != null) return
         loadLibrary(
             slot = LibrarySlot.Albums,
-            request = { it.api.getAlbums(it.session.userId, it.session.accessToken) },
+            request = { it.api.getAlbums() },
             apply = { lib, albums -> lib.copy(albums = albums) },
         )
     }
@@ -227,7 +226,7 @@ internal class LibraryCache(
         if (!force && library.discoverAlbums != null) return
         loadLibrary(
             slot = LibrarySlot.DiscoverAlbums,
-            request = { it.api.getRandomAlbums(it.session.userId, it.session.accessToken) },
+            request = { it.api.getRandomAlbums() },
             apply = { lib, albums -> lib.copy(discoverAlbums = albums) },
         )
     }
@@ -238,7 +237,7 @@ internal class LibraryCache(
         loadHistory(
             slot = LibrarySlot.RecentlyPlayed,
             section = LibrarySectionKey.RecentlyPlayed,
-            request = { it.api.getRecentlyPlayed(it.session.userId, it.session.accessToken) },
+            request = { it.api.getRecentlyPlayed() },
             apply = { lib, tracks ->
                 recentlyPlayedEpoch = epoch
                 lib.copy(recentlyPlayed = tracks)
@@ -252,7 +251,7 @@ internal class LibraryCache(
         loadHistory(
             slot = LibrarySlot.MostPlayed,
             section = LibrarySectionKey.MostPlayed,
-            request = { it.api.getMostPlayed(it.session.userId, it.session.accessToken) },
+            request = { it.api.getMostPlayed() },
             apply = { lib, tracks ->
                 mostPlayedEpoch = epoch
                 lib.copy(mostPlayed = tracks)
@@ -266,7 +265,7 @@ internal class LibraryCache(
         loadHistory(
             slot = LibrarySlot.RecentlyAdded,
             section = LibrarySectionKey.RecentlyAdded,
-            request = { it.api.getRecentlyAdded(it.session.userId, it.session.accessToken) },
+            request = { it.api.getRecentlyAdded() },
             apply = { lib, albums ->
                 recentlyAddedEpoch = epoch
                 lib.copy(recentlyAdded = albums)
@@ -285,7 +284,7 @@ internal class LibraryCache(
                 currentAlbum = album
                 it.copy(albumTracks = null)
             },
-            request = { it.api.getAlbumTracks(it.session.userId, it.session.accessToken, album.id) },
+            request = { it.api.getAlbumTracks(album.id) },
             apply = { lib, tracks -> lib.copy(albumTracks = tracks) },
         )
     }
@@ -301,7 +300,7 @@ internal class LibraryCache(
         loadLibrary(
             slot = LibrarySlot.Playlists,
             needsNetwork = true,
-            request = { it.api.getPlaylists(it.session.userId, it.session.accessToken) },
+            request = { it.api.getPlaylists() },
             apply = { lib, playlists -> lib.copy(playlists = playlists) },
         )
     }
@@ -322,7 +321,7 @@ internal class LibraryCache(
                 currentPlaylist = playlist
                 it.copy(playlistTracks = null)
             },
-            request = { it.api.getPlaylistTracks(it.session.userId, it.session.accessToken, playlist.id) },
+            request = { it.api.getPlaylistTracks(playlist.id) },
             apply = { lib, tracks -> lib.copy(playlistTracks = tracks) },
             // 在线拿到曲目表 = 顺手把「已下载列表清单」刷新一份（列表名 + 曲目表）。
             afterSuccess = { tracks -> host.rememberPlaylistTracks(playlist, tracks) },
@@ -372,8 +371,7 @@ internal class LibraryCache(
                 return@launch
             }
             try {
-                val results = connection.api
-                    .search(connection.session.userId, connection.session.accessToken, trimmed)
+                val results = connection.api.search(trimmed)
                     .getOrThrow()
                 if (isActive && generation == slot.generation) {
                     applySearch(generation, results, offline = false)

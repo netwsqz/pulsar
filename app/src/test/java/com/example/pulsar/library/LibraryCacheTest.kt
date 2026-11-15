@@ -2,10 +2,9 @@ package com.example.pulsar.library
 
 import com.example.pulsar.JellyfinUiState
 import com.example.pulsar.LibrarySection
-import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
-import com.example.pulsar.data.jellyfin.JellyfinSession
 import com.example.pulsar.data.jellyfin.Lyrics
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
@@ -638,8 +637,8 @@ class LibraryCacheTest {
         return cache
     }
 
-    private fun connection(api: JellyfinApi) =
-        LibraryCache.Connection(api, JellyfinSession("user-1", "token-1"))
+    private fun connection(api: SessionScopedJellyfinApi) =
+        LibraryCache.Connection(api)
 
     /** 与 `JellyfinViewModel` 接缝行为一致的 Fake 宿主：状态放真实的 `JellyfinUiState` 里。 */
     private class FakeHost(var connection: LibraryCache.Connection?) : LibraryCache.Host {
@@ -723,7 +722,7 @@ class LibraryCacheTest {
     }
 
     /** 每个方法都能挂起（gate）与排队结果，用来复现「响应还没回来就换了页面」。 */
-    private class FakeApi : JellyfinApi {
+    private class FakeApi : SessionScopedJellyfinApi {
         val albumResults = ArrayDeque<Result<List<Album>>>()
         val albumGates = ArrayDeque<CompletableDeferred<Unit>>()
         var albumCalls = 0
@@ -744,7 +743,7 @@ class LibraryCacheTest {
         var mostPlayedResult: Result<List<Track>> = Result.success(emptyList())
         var recentlyAddedResult: Result<List<Album>> = Result.success(emptyList())
 
-        override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> {
+        override suspend fun getAlbums(): Result<List<Album>> {
             albumCalls++
             // 先取走自己那份结果再挂起：被取消的请求也消费掉它，别让下一次请求拿到旧结果
             val result = albumResults.removeFirstOrNull() ?: Result.success(emptyList())
@@ -754,63 +753,60 @@ class LibraryCacheTest {
 
         var randomAlbumsGate: CompletableDeferred<Unit>? = null
 
-        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+        override suspend fun getRandomAlbums(limit: Int): Result<List<Album>> {
             randomAlbumsCalls++
             randomAlbumsGate?.await()
             return Result.success(emptyList())
         }
 
-        override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) =
+        override suspend fun getAlbumTracks(albumId: String) =
             albumTracksResult.also { albumTracksCalls++ }
 
         var playlistsGate: CompletableDeferred<Unit>? = null
 
-        override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> {
+        override suspend fun getPlaylists(): Result<List<Playlist>> {
             playlistsCalls++
             playlistsGate?.await()
             return playlistsResult
         }
 
-        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) =
+        override suspend fun getPlaylistTracks(playlistId: String) =
             playlistTracksResult.also { playlistTracksCalls++ }
 
-        override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+        override suspend fun getRecentlyPlayed(limit: Int): Result<List<Track>> {
             recentlyPlayedCalls++
             historyGate?.await()
             return recentlyPlayedResult
         }
 
-        override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+        override suspend fun getMostPlayed(limit: Int): Result<List<Track>> {
             mostPlayedCalls++
             historyGate?.await()
             return mostPlayedResult
         }
 
-        override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+        override suspend fun getRecentlyAdded(limit: Int): Result<List<Album>> {
             recentlyAddedCalls++
             historyGate?.await()
             return recentlyAddedResult
         }
 
-        override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> {
+        override suspend fun search(query: String): Result<SearchResults> {
             searchQueries += query
             return Result.success(SearchResults())
         }
 
-        override suspend fun login(username: String, password: String) =
-            Result.failure<JellyfinSession>(IllegalStateException())
-
-        override suspend fun getMusicItems(userId: String, accessToken: String) =
+        override suspend fun getMusicItems() =
             Result.success(emptyList<Track>())
 
-        override suspend fun getLyrics(accessToken: String, trackId: String) = Result.success(Lyrics.NONE)
-        override fun streamUrl(mediaId: String, accessToken: String) = "stream/$mediaId"
-        override suspend fun reportPlaybackStarted(accessToken: String, itemId: String, positionTicks: Long) =
+        override suspend fun getLyrics(trackId: String) = Result.success(Lyrics.NONE)
+        override fun streamUrl(mediaId: String) = "stream/$mediaId"
+        override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long) =
             Result.success(Unit)
-        override suspend fun reportPlaybackStopped(accessToken: String, itemId: String, positionTicks: Long) =
+        override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long) =
             Result.success(Unit)
-        override fun imageRequest(itemId: String, imageTag: String?, accessToken: String) =
+        override fun imageRequest(itemId: String, imageTag: String?) =
             JellyfinRequest("image", emptyMap())
-        override fun authorizationHeader(accessToken: String) = "auth-header"
+        override fun authorizationHeader() = "auth-header"
     }
 }

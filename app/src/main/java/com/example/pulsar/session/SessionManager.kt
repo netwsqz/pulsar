@@ -1,8 +1,8 @@
 package com.example.pulsar.session
 
 import com.example.pulsar.SessionRepository
-import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,12 +16,13 @@ import kotlinx.coroutines.sync.withLock
  * 会话凭据的唯一来源（候选 6 / 工单 #20、#21、#22）。
  *
  * **#21 起已接线**：`JellyfinViewModel` 只从这个 module 取 `current` / `api`，
- * 登录 / 恢复 / 退出 / 过期都由它执行；内部暂时委托旧的 [SessionRepository] /
- * [JellyfinApiFactory]，Step 4 再把数据接口收成会话作用域接口并删掉旧模型。
+ * 登录 / 恢复 / 退出 / 过期都由它执行。**#23 起**数据接口收成会话作用域接口
+ * （`SessionScopedJellyfinApi`）：`serverUrl / userId / token` 在创建 API 时绑定，
+ * 方法调用不再搬凭据；登录前用无会话的 `createLoginApi`。
  *
  * 三条约定：
  * - [current] 是会话真相；[api] 随它一起换，旧 API 不会留给在途协程之外的人。
- * - [authorizationHeader] 是全局鉴权头的**唯一来源**，只给播放服务 / 下载上游用；
+ * - [authorizationHeader] 是**会话鉴权头的唯一来源**，只给播放服务 / 下载上游用；
  *   **不要进 UI、不要打日志**。
  * - 登出只清会话；下载字节与名单不归这里管（ADR-0007）。
  *
@@ -35,8 +36,8 @@ class SessionManager(
     private val _current = MutableStateFlow<Session?>(null)
     val current: StateFlow<Session?> = _current.asStateFlow()
 
-    private val _api = MutableStateFlow<JellyfinApi?>(null)
-    val api: StateFlow<JellyfinApi?> = _api.asStateFlow()
+    private val _api = MutableStateFlow<SessionScopedJellyfinApi?>(null)
+    val api: StateFlow<SessionScopedJellyfinApi?> = _api.asStateFlow()
 
     private val _loginHint = MutableStateFlow<LoginHint?>(null)
 
@@ -80,13 +81,13 @@ class SessionManager(
             return@withLock false
         } ?: return@withLock false
         val api = try {
-            apiFactory.create(saved.serverUrl)
+            apiFactory.create(saved)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             return@withLock false
         }
-        publish(saved.toSession(), api)
+        publish(saved, api)
         true
     }
 
@@ -94,18 +95,25 @@ class SessionManager(
     suspend fun login(serverUrl: String, username: String, password: String): Result<Session> {
         // 与现有 ViewModel 一致：发起新登录立刻摘掉旧会话，失败也不回滚（旧存储保持原样）。
         clearSession()
-        val api = try {
-            apiFactory.create(serverUrl)
+        val loginApi = try {
+            apiFactory.createLoginApi(serverUrl)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Exception) {
             return Result.failure(error)
         }
-        val signedIn = api.login(username, password).getOrElse { return Result.failure(it) }
-        val session = Session(serverUrl, signedIn.userId, username, signedIn.accessToken)
+        // 登录接口返回完整会话（地址 / 用户名 / userId / 令牌），后续所有请求都绑定它。
+        val session = loginApi.login(username, password).getOrElse { return Result.failure(it) }
+        val api = try {
+            apiFactory.create(session)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            return Result.failure(error)
+        }
         return storeMutex.withLock {
             try {
-                store.save(session.toSavedSession())
+                store.save(session)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -154,8 +162,8 @@ class SessionManager(
         }
     }
 
-    private fun publish(session: Session, api: JellyfinApi) {
-        header = api.authorizationHeader(session.accessToken)
+    private fun publish(session: Session, api: SessionScopedJellyfinApi) {
+        header = api.authorizationHeader()
         // 快照一次写入：读方不会在换会话时拼出旧会话 + 新 API。
         connection = SessionConnection(api, session)
         // 再放 API / 会话：观察 current 的一侧拿到的 api 一定属于这个会话。

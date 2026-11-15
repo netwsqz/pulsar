@@ -3,6 +3,7 @@ package com.example.pulsar
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
+import com.example.pulsar.session.Session
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -11,7 +12,7 @@ import java.io.File
 
 class SessionStoreTest {
 
-    private val session = SavedSession(
+    private val session = Session(
         serverUrl = "https://jellyfin.example.com",
         userId = "user-1",
         username = "alice",
@@ -46,21 +47,35 @@ class SessionStoreTest {
 
     @Test
     fun `toStoreMap round-trips all fields`() {
-        assertEquals(session, savedSessionFromStoreMap(session.toStoreMap()))
+        assertEquals(session, sessionFromStoreMap(session.toStoreMap()))
     }
 
     @Test
-    fun `savedSessionFromStoreMap returns null when a field is missing`() {
+    fun `store keys stay stable so upgrades keep the session`() {
+        // 升级不丢会话的底线：DataStore 键名与序列化字段名一个都不能改。
+        assertEquals(
+            mapOf(
+                "session_server_url" to "https://jellyfin.example.com",
+                "session_user_id" to "user-1",
+                "session_username" to "alice",
+                "session_access_token" to "token-abc",
+            ),
+            session.toStoreMap()
+        )
+    }
+
+    @Test
+    fun `sessionFromStoreMap returns null when a field is missing`() {
         val map = session.toStoreMap() - "session_user_id"
 
-        assertNull(savedSessionFromStoreMap(map))
+        assertNull(sessionFromStoreMap(map))
     }
 
     @Test
-    fun `savedSessionFromStoreMap returns null when values are blank`() {
+    fun `sessionFromStoreMap returns null when values are blank`() {
         val map = session.toStoreMap().mapValues { "  " }
 
-        assertNull(savedSessionFromStoreMap(map))
+        assertNull(sessionFromStoreMap(map))
     }
 
     private fun tempDataStore(): DataStore<Preferences> {

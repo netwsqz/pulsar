@@ -1,16 +1,17 @@
 package com.example.pulsar.playback
 
-import com.example.pulsar.SavedSession
 import com.example.pulsar.SessionRepository
-import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
+import com.example.pulsar.data.jellyfin.JellyfinError
+import com.example.pulsar.data.jellyfin.JellyfinLoginApi
 import com.example.pulsar.data.jellyfin.JellyfinRequest
-import com.example.pulsar.data.jellyfin.JellyfinSession
 import com.example.pulsar.data.jellyfin.Lyrics
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
@@ -27,7 +28,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionPlaybackReportSourceTest {
 
-    private val saved = SavedSession(
+    private val saved = Session(
         serverUrl = "https://media.example.com",
         userId = "user-1",
         username = "alice",
@@ -43,8 +44,8 @@ class SessionPlaybackReportSourceTest {
 
     @Test
     fun `restored session reports through the API created at restore time`() = runTest {
-        val api = RecordingApi()
-        val factory = CountingFactory(api)
+        val calls = mutableListOf<String>()
+        val factory = CountingFactory(calls)
         val manager = managerFor(FakeSessionRepository(saved), factory)
         manager.restore()
         val source = SessionPlaybackReportSource(manager)
@@ -60,9 +61,9 @@ class SessionPlaybackReportSourceTest {
                 "start token-1 track-1 10000",
                 "stop token-1 track-1 20000"
             ),
-            api.calls
+            calls
         )
-        assertEquals(1, factory.requestedServerUrls.size)
+        assertEquals(1, factory.requestedSessions.size)
     }
 
     @Test
@@ -79,13 +80,16 @@ class SessionPlaybackReportSourceTest {
 
     @Test
     fun `switching sessions binds reports to the new token`() = runTest {
-        val api = RecordingApi()
-        val manager = managerFor(FakeSessionRepository(null), CountingFactory(api))
+        val calls = mutableListOf<String>()
+        val factory = CountingFactory(calls)
+        val manager = managerFor(FakeSessionRepository(null), factory)
 
         manager.login("https://media.example.com", "alice", "pw").getOrThrow()
         SessionPlaybackReportSource(manager).currentChannel()!!.reportPlaybackStarted("track-1", 1_000)
 
-        api.loginResult = Result.success(JellyfinSession("user-2", "token-2"))
+        factory.loginResult = Result.success(
+            Session("https://media.example.com", "user-2", "bob", "token-2")
+        )
         manager.login("https://media.example.com", "bob", "pw").getOrThrow()
         SessionPlaybackReportSource(manager).currentChannel()!!.reportPlaybackStarted("track-2", 2_000)
 
@@ -94,18 +98,18 @@ class SessionPlaybackReportSourceTest {
                 "start token-1 track-1 1000",
                 "start token-2 track-2 2000"
             ),
-            api.calls
+            calls
         )
     }
 
     private fun TestScope.managerFor(
         store: FakeSessionRepository,
-        factory: JellyfinApiFactory = CountingFactory(RecordingApi())
+        factory: JellyfinApiFactory = CountingFactory()
     ): SessionManager = SessionManager(store, factory, this)
 
-    private class FakeSessionRepository(var session: SavedSession?) : SessionRepository {
-        override suspend fun load(): SavedSession? = session
-        override suspend fun save(session: SavedSession) {
+    private class FakeSessionRepository(var session: Session?) : SessionRepository {
+        override suspend fun load(): Session? = session
+        override suspend fun save(session: Session) {
             this.session = session
         }
         override suspend fun clear() {
@@ -113,54 +117,58 @@ class SessionPlaybackReportSourceTest {
         }
     }
 
-    private class CountingFactory(private val api: JellyfinApi) : JellyfinApiFactory {
-        val requestedServerUrls = mutableListOf<String>()
-        override suspend fun create(serverUrl: String): JellyfinApi {
-            requestedServerUrls += serverUrl
-            return api
+    /** 每次登录 / 恢复都按会话建一个会记录调用的 API；[requestedSessions] 用来数重建次数。 */
+    private class CountingFactory(
+        private val calls: MutableList<String> = mutableListOf()
+    ) : JellyfinApiFactory {
+        val requestedSessions = mutableListOf<Session>()
+        var loginResult: Result<Session> = Result.success(
+            Session("https://media.example.com", "user-1", "alice", "token-1")
+        )
+
+        override suspend fun createLoginApi(serverUrl: String): JellyfinLoginApi =
+            object : JellyfinLoginApi {
+                override suspend fun login(username: String, password: String): Result<Session> =
+                    loginResult.map { it.copy(serverUrl = serverUrl, username = username) }
+            }
+
+        override suspend fun create(session: Session): SessionScopedJellyfinApi {
+            requestedSessions += session
+            return RecordingApi(session, calls)
         }
     }
 
-    /** 只实现上报与登录；其余方法不该被这个适配层碰到。 */
-    private class RecordingApi : JellyfinApi {
-        val calls = mutableListOf<String>()
-        var loginResult: Result<JellyfinSession> = Result.success(JellyfinSession("user-1", "token-1"))
+    /** 只实现上报与鉴权头；其余方法不该被这个适配层碰到。 */
+    private class RecordingApi(
+        private val session: Session,
+        private val calls: MutableList<String>,
+    ) : SessionScopedJellyfinApi {
 
-        override suspend fun login(username: String, password: String): Result<JellyfinSession> = loginResult
-
-        override fun authorizationHeader(accessToken: String): String = "MediaBrowser Token=\"$accessToken\""
-
-        override suspend fun reportPlaybackStarted(
-            accessToken: String,
-            itemId: String,
-            positionTicks: Long
-        ): Result<Unit> {
-            calls += "start $accessToken $itemId $positionTicks"
+        override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long): Result<Unit> {
+            calls += "start ${session.accessToken} $itemId $positionTicks"
             return Result.success(Unit)
         }
 
-        override suspend fun reportPlaybackStopped(
-            accessToken: String,
-            itemId: String,
-            positionTicks: Long
-        ): Result<Unit> {
-            calls += "stop $accessToken $itemId $positionTicks"
+        override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long): Result<Unit> {
+            calls += "stop ${session.accessToken} $itemId $positionTicks"
             return Result.success(Unit)
         }
 
-        override suspend fun getMusicItems(userId: String, accessToken: String) = unsupported<List<Track>>()
-        override suspend fun getAlbums(userId: String, accessToken: String) = unsupported<List<Album>>()
-        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int) = unsupported<List<Album>>()
-        override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int) = unsupported<List<Track>>()
-        override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int) = unsupported<List<Track>>()
-        override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int) = unsupported<List<Album>>()
-        override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = unsupported<List<Track>>()
-        override suspend fun getPlaylists(userId: String, accessToken: String) = unsupported<List<Playlist>>()
-        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) = unsupported<List<Track>>()
-        override suspend fun search(userId: String, accessToken: String, query: String) = unsupported<SearchResults>()
-        override suspend fun getLyrics(accessToken: String, trackId: String) = unsupported<Lyrics>()
-        override fun streamUrl(mediaId: String, accessToken: String): String = unsupportedValue()
-        override fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest = unsupportedValue()
+        override fun authorizationHeader(): String = "MediaBrowser Token=\"${session.accessToken}\""
+
+        override suspend fun getMusicItems() = unsupported<List<Track>>()
+        override suspend fun getAlbums() = unsupported<List<Album>>()
+        override suspend fun getRandomAlbums(limit: Int) = unsupported<List<Album>>()
+        override suspend fun getRecentlyPlayed(limit: Int) = unsupported<List<Track>>()
+        override suspend fun getMostPlayed(limit: Int) = unsupported<List<Track>>()
+        override suspend fun getRecentlyAdded(limit: Int) = unsupported<List<Album>>()
+        override suspend fun getAlbumTracks(albumId: String) = unsupported<List<Track>>()
+        override suspend fun getPlaylists() = unsupported<List<Playlist>>()
+        override suspend fun getPlaylistTracks(playlistId: String) = unsupported<List<Track>>()
+        override suspend fun search(query: String) = unsupported<SearchResults>()
+        override suspend fun getLyrics(trackId: String) = unsupported<Lyrics>()
+        override fun streamUrl(mediaId: String): String = unsupportedValue()
+        override fun imageRequest(itemId: String, imageTag: String?): JellyfinRequest = unsupportedValue()
 
         private fun <T> unsupported(): Result<T> =
             Result.failure(UnsupportedOperationException("上报适配层不应调用这个接口"))

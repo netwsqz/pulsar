@@ -23,7 +23,6 @@ import com.example.pulsar.offline.offlineUnplayableReason
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionConnection
 import com.example.pulsar.session.SessionManager
-import com.example.pulsar.session.toJellyfinSession
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.FileOpsState
 import com.example.pulsar.state.LibraryState
@@ -124,10 +123,7 @@ class JellyfinViewModel(
                 // 「会话未就绪」处理（改前要等 getMusicItems 成功，别让各节抢跑）。
                 if (_state.value.session.isRestoring) return null
                 val connection = activeConnection() ?: return null
-                return LibraryCache.Connection(
-                    connection.api,
-                    connection.session.toJellyfinSession()
-                )
+                return LibraryCache.Connection(connection.api)
             }
 
             override fun expireSession() { this@JellyfinViewModel.expireSession() }
@@ -253,7 +249,7 @@ class JellyfinViewModel(
                 val signedIn = sessionManager.login(form.serverUrl, username, password).getOrThrow()
                 val connection = activeConnection() ?: error("会话已建立但没有可用接口")
                 val tracks = connection.api
-                    .getMusicItems(signedIn.userId, signedIn.accessToken)
+                    .getMusicItems()
                     .getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     // 登录成功：下载可见性按新账号作用域算（字节仍共享）。
@@ -316,7 +312,7 @@ class JellyfinViewModel(
                 }
                 val connection = activeConnection() ?: error("会话已恢复但没有可用接口")
                 val tracks = connection.api
-                    .getMusicItems(restored.userId, restored.accessToken)
+                    .getMusicItems()
                     .getOrThrow()
                 if (coroutineContext.isActive && generation == loginGeneration) {
                     // 恢复登录：下载可见性按这个账号作用域算（字节仍共享）。
@@ -432,8 +428,8 @@ class JellyfinViewModel(
     }
 
     fun streamUrl(track: Track): String? {
-        val (src, currentSession) = activeConnection() ?: return null
-        return src.streamUrl(track.id, currentSession.accessToken)
+        val src = activeConnection()?.api ?: return null
+        return src.streamUrl(track.id)
     }
 
     /**
@@ -464,14 +460,14 @@ class JellyfinViewModel(
 
     fun trackCover(track: Track): JellyfinRequest? {
         if (track.id.isBlank()) return null
-        val (src, currentSession) = activeConnection() ?: return null
-        return src.imageRequest(track.id, track.imageTag, currentSession.accessToken)
+        val src = activeConnection()?.api ?: return null
+        return src.imageRequest(track.id, track.imageTag)
     }
 
     private fun coverRequest(itemId: String, imageTag: String?): JellyfinRequest? {
         val tag = imageTag ?: return null
-        val (src, currentSession) = activeConnection() ?: return null
-        return src.imageRequest(itemId, tag, currentSession.accessToken)
+        val src = activeConnection()?.api ?: return null
+        return src.imageRequest(itemId, tag)
     }
 
     fun setPlaybackQueue(tracks: List<Track>, startTrackId: String) {
@@ -500,12 +496,12 @@ class JellyfinViewModel(
      */
     fun loadLyricsForCurrentTrack() {
         val track = _currentTrack.value ?: return
-        val (src, currentSession) = activeConnection() ?: return
+        val src = activeConnection()?.api ?: return
         val generation = ++lyricsGeneration
         _lyrics.value = Lyrics.NONE
         lyricsJob?.cancel()
         lyricsJob = viewModelScope.launch(dispatcher) {
-            val result = src.getLyrics(currentSession.accessToken, track.id)
+            val result = src.getLyrics(track.id)
             if (generation == lyricsGeneration) {
                 _lyrics.value = result.getOrElse { Lyrics.NONE }
             }
@@ -1219,13 +1215,13 @@ class JellyfinViewModel(
      */
     private fun startOfflineRetry() {
         if (offlineRetryJob?.isActive == true) return
-        val (src, currentSession) = activeConnection() ?: return
+        val src = activeConnection()?.api ?: return
         offlineRetryJob = viewModelScope.launch(dispatcher) {
             repeat(kOfflineRetryMaxAttempts) {
                 if (!isActive || !_state.value.library.isOffline) return@launch
                 delay(OFFLINE_RETRY_INTERVAL_MS)
                 val result = try {
-                    src.getMusicItems(currentSession.userId, currentSession.accessToken)
+                    src.getMusicItems()
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {

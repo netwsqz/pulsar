@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.example.pulsar.session.Session
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -144,7 +145,7 @@ class DownloadLedgerTest {
         val dataStore = tempDataStore()
         val sessions = SessionStore(dataStore)
         val ledger = DataStoreDownloadLedgerStore(dataStore)
-        sessions.save(SavedSession("https://server.test", "user-1", "alice", "token-abc"))
+        sessions.save(Session("https://server.test", "user-1", "alice", "token-abc"))
         ledger.replaceAll(listOf(albumEntry))
 
         // 模拟 JellyfinViewModel.signOut() 里的会话清理

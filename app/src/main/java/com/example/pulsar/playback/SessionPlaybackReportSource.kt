@@ -14,14 +14,14 @@ class SessionPlaybackReportSource(
 ) : PlaybackReportSource {
 
     override fun currentChannel(): PlaybackReportChannel? {
-        // 快照一次取出，不会拼出「旧令牌 + 新 API」。
-        val (api, session) = sessionManager.currentConnection() ?: return null
+        // 快照一次取出，不会拼出「旧令牌 + 新 API」；会话作用域 API 自带凭据。
+        val api = sessionManager.currentConnection()?.api ?: return null
         return object : PlaybackReportChannel {
             override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long): Result<Unit> =
-                api.reportPlaybackStarted(session.accessToken, itemId, positionTicks)
+                api.reportPlaybackStarted(itemId, positionTicks)
 
             override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long): Result<Unit> =
-                api.reportPlaybackStopped(session.accessToken, itemId, positionTicks)
+                api.reportPlaybackStopped(itemId, positionTicks)
         }
     }
 }

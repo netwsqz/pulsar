@@ -3,7 +3,8 @@ package com.example.pulsar
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
 import com.example.pulsar.data.jellyfin.JellyfinError
-import com.example.pulsar.data.jellyfin.JellyfinApi
+import com.example.pulsar.data.jellyfin.JellyfinLoginApi
+import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
@@ -21,6 +22,7 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.LibrarySectionKey
@@ -49,7 +51,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `restores saved session and loads tracks`() = runTest {
-        val session = SavedSession("https://server.test", "user-1", "user", "secret")
+        val session = Session("https://server.test", "user-1", "user", "secret")
         val sessions = FakeSessionRepository(session)
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(sessions, api)
@@ -73,7 +75,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `启动恢复期间标记恢复中，界面进主页面骨架而非空登录表单`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val viewModel = createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)))
 
         // 还没推进调度器：恢复协程尚未跑完。此时 UI 必须知道"正在恢复"，才能
@@ -84,7 +86,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `恢复成功清除恢复中标记并落到曲库`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val viewModel = createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)))
 
         advanceUntilIdle()
@@ -105,7 +107,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `恢复失败也要清除恢复中标记，不得停在骨架屏`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
         val viewModel = createViewModel(sessions, api)
 
@@ -117,7 +119,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `恢复失败时用已保存的地址与用户名预填登录表单`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
         val viewModel = createViewModel(sessions, api)
 
@@ -130,7 +132,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `unauthorized restore clears session and memory authorization`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Unauthorized())
         val viewModel = createViewModel(sessions, api)
 
@@ -143,7 +145,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `unauthorized library request expires current session`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(albumsError = JellyfinError.Unauthorized())
         val viewModel = createViewModel(sessions, api)
 
@@ -158,7 +160,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `network failure keeps saved session`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
         val viewModel = createViewModel(sessions, api)
 
@@ -172,7 +174,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `expired session clears cached library and playback state`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(sessions, api)
 
@@ -201,7 +203,7 @@ class JellyfinViewModelTest {
     fun `debounced search requests only latest query`() = runTest {
         val api = FakeJellyfinApi(searchResults = SearchResults(tracks = listOf(track)))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -221,7 +223,7 @@ class JellyfinViewModelTest {
     fun `clearing search cancels request and clears results`() = runTest {
         val api = FakeJellyfinApi(searchResults = SearchResults(tracks = listOf(track)))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.updateSearchQuery("query")
@@ -237,7 +239,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `loadLyricsForCurrentTrack 请求当前曲目并更新歌词状态`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val synced = Lyrics(
             isSynced = true,
             lines = listOf(com.example.pulsar.data.jellyfin.LyricLine(0L, "第一行"))
@@ -256,7 +258,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `切歌后再次加载歌词 最终状态只反映最后一次请求`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi()
         val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
@@ -289,7 +291,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `歌词请求失败静默回退到无歌词`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(lyricsResult = Result.failure(JellyfinError.Network(IOException())))
         val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
@@ -303,7 +305,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `clearLyrics 清空状态且后续旧响应不写入`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val synced = Lyrics(isSynced = false, lines = emptyList())
         val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
         val viewModel = createViewModel(sessions, api)
@@ -320,7 +322,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `会话过期清空歌词`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val synced = Lyrics(isSynced = false, lines = emptyList())
         val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
         val viewModel = createViewModel(sessions, api)
@@ -610,7 +612,7 @@ class JellyfinViewModelTest {
     fun `在线请求成功覆写曲库快照`() = runTest {
         val snapshotRepo = FakeSnapshotRepository()
         createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
             snapshotRepository = snapshotRepo
         )
@@ -622,7 +624,7 @@ class JellyfinViewModelTest {
     @Test
     fun `在线成功后快照保留之前拉过的专辑列表（没拉到的屏不丢）`() = runTest {
         val snapshotRepo = FakeSnapshotRepository()
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         snapshotRepo.stored = LibrarySnapshot(albums = listOf(Album("a1", "旧专辑", "手", 1, null)))
         createViewModel(sessions, FakeJellyfinApi(tracks = listOf(track)), snapshotRepository = snapshotRepo)
         advanceUntilIdle()
@@ -637,7 +639,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -653,7 +655,7 @@ class JellyfinViewModelTest {
         val api = FakeJellyfinApi()
         api.musicItemsError = JellyfinError.Network(IOException("no network"))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api
         )
         advanceUntilIdle()
@@ -668,7 +670,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -696,7 +698,7 @@ class JellyfinViewModelTest {
         // 缓存键 = streamUrl(mediaId)；Fake 按 id 生成 "stream/{id}"
         mediaDownloads.completeKeys += "stream/cached-1"
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -713,7 +715,7 @@ class JellyfinViewModelTest {
     @Test
     fun `在线时一律可播（不需要知道缓存状态）`() = runTest {
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track))
         )
         advanceUntilIdle()
@@ -730,7 +732,7 @@ class JellyfinViewModelTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.failAll = true
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -746,7 +748,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -768,7 +770,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -788,7 +790,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
             mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
@@ -811,7 +813,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo
         )
         // 401 → 过期分支（无网络失败，没有常驻探活协程），可以安全推到底
@@ -850,7 +852,7 @@ class JellyfinViewModelTest {
             entries = listOf(downloadedEntry(listOf("in-ledger")))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -868,7 +870,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository().apply { stored = LibrarySnapshot(tracks = listOf(half)) }
         val ledger = FakeDownloadLedgerStore().apply { entries = listOf(downloadedEntry(listOf("half"))) }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -895,7 +897,7 @@ class JellyfinViewModelTest {
             entries = listOf(downloadedEntry(listOf("kept")))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -923,7 +925,7 @@ class JellyfinViewModelTest {
             stored = LibrarySnapshot(tracks = listOf(track))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceBounded()
@@ -952,7 +954,7 @@ class JellyfinViewModelTest {
             entries = listOf(downloadedEntry(listOf("track-1"), userId = "user-1"))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-2", "user2", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -981,7 +983,7 @@ class JellyfinViewModelTest {
         }
         val library = downloadLibraryFor(mediaDownloads, ledger)
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger, downloadLibrary = library
         )
@@ -1007,7 +1009,7 @@ class JellyfinViewModelTest {
         }
         val library = downloadLibraryFor(mediaDownloads, ledger)
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-2", "user2", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger, downloadLibrary = library
         )
@@ -1023,14 +1025,14 @@ class JellyfinViewModelTest {
     @Test
     fun `退出登录后重新登录，下载还在且离线能放`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        api.loginResult = Result.success(Session("https://server.test", "user-1", "user", "token-1"))
         val mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" }
         val ledger = FakeDownloadLedgerStore().apply {
             entries = listOf(downloadedEntry(listOf("track-1")))
         }
         val snapshotRepo = FakeSnapshotRepository()
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads, snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -1092,7 +1094,7 @@ class JellyfinViewModelTest {
             )
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = FakeMediaDownloads().apply { completeKeys += "stream/track-1" },
             snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist() },
             downloadLedgerStore = ledger
@@ -1121,7 +1123,7 @@ class JellyfinViewModelTest {
             )
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = FakeMediaDownloads(),
             snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist() },
             downloadLedgerStore = ledger
@@ -1147,7 +1149,7 @@ class JellyfinViewModelTest {
             )
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-2", "user2", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-2", "user2", "secret")),
             api, mediaDownloads = FakeMediaDownloads(),
             snapshotRepository = FakeSnapshotRepository().apply { stored = snapshotWithDownloadedPlaylist(userId = "user-1") },
             downloadLedgerStore = ledger
@@ -1173,7 +1175,7 @@ class JellyfinViewModelTest {
         }
         val snapshotRepo = FakeSnapshotRepository()
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
             downloadLedgerStore = ledger
         )
@@ -1194,7 +1196,7 @@ class JellyfinViewModelTest {
         api.playlistTracksResult = Result.success(listOf(track))
         val snapshotRepo = FakeSnapshotRepository()
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = FakeMediaDownloads(), snapshotRepository = snapshotRepo,
             downloadLedgerStore = FakeDownloadLedgerStore()
         )
@@ -1215,9 +1217,9 @@ class JellyfinViewModelTest {
             tracks = listOf(track),
             albums = listOf(Album("old-account-album", "别人的专辑", "别人", 9, null))
         )
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        api.loginResult = Result.success(Session("https://server.test", "user-2", "user-2", "token-2"))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, snapshotRepository = snapshotRepo
         )
         advanceUntilIdle()
@@ -1237,7 +1239,7 @@ class JellyfinViewModelTest {
     @Test
     fun `登录成功把地址记进历史并刷新状态`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        api.loginResult = Result.success(Session("https://server.test", "user-1", "user", "token-1"))
         val history = FakeServerUrlHistory()
         val viewModel = createViewModel(
             FakeSessionRepository(null), api, serverUrlHistory = history
@@ -1273,7 +1275,7 @@ class JellyfinViewModelTest {
     fun `登录成功后曲库拉取失败不留半截会话`() = runTest {
         val sessions = FakeSessionRepository(null)
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IOException("no network")))
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        api.loginResult = Result.success(Session("https://server.test", "user-1", "user", "token-1"))
         val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
         viewModel.updateServerUrl("https://server.test")
@@ -1320,7 +1322,7 @@ class JellyfinViewModelTest {
         history.record("https://old.test")
         val historyGate = kotlinx.coroutines.CompletableDeferred<Unit>()
         history.loadGate = historyGate
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         // 会话读盘也卡住：这样才能让两个协程真正交错，复现真 DataStore 下的挂起点。
         val sessionGate = kotlinx.coroutines.CompletableDeferred<Unit>()
         sessions.loadGate = sessionGate
@@ -1348,7 +1350,7 @@ class JellyfinViewModelTest {
     @Test
     fun `退出登录保留地址历史（本地数据，与账号无关）`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        api.loginResult = Result.success(Session("https://server.test", "user-1", "user", "token-1"))
         val history = FakeServerUrlHistory()
         val viewModel = createViewModel(
             FakeSessionRepository(null), api, serverUrlHistory = history
@@ -1373,7 +1375,7 @@ class JellyfinViewModelTest {
         api.musicItemsError = JellyfinError.Network(IOException("no network"))
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val viewModel = createViewModel(sessions, api, snapshotRepository = snapshotRepo)
         advanceBounded()
         assertTrue(viewModel.state.value.library.isOffline)
@@ -1401,7 +1403,7 @@ class JellyfinViewModelTest {
         mediaDownloads.completeKeys += "stream/t1"
         mediaDownloads.completeKeys += "stream/t3"
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t2, t3), albums = listOf(albumA, albumB)),
             mediaDownloads = mediaDownloads
         )
@@ -1428,7 +1430,7 @@ class JellyfinViewModelTest {
         val mediaDownloads = FakeMediaDownloads()
         mediaDownloads.completeKeys += "stream/t1"
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1), albums = listOf(albumA)),
             mediaDownloads = mediaDownloads
         )
@@ -1457,7 +1459,7 @@ class JellyfinViewModelTest {
         // 统计来自 module 快照（#7）：ViewModel 不再自己查字节层。
         val library = downloadLibraryFor(mediaDownloads, ledger)
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(t1, t2), albums = listOf(albumA)),
             mediaDownloads = mediaDownloads, downloadLedgerStore = ledger, downloadLibrary = library
         )
@@ -1689,7 +1691,7 @@ class JellyfinViewModelTest {
         mediaDownloads.completeKeys += "stream/track-1"
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api, mediaDownloads = mediaDownloads
         )
         advanceUntilIdle()
@@ -1699,7 +1701,7 @@ class JellyfinViewModelTest {
         // （见 groupCachedByAlbum），所以这里不是空列表——本用例只关心「切换后清空」。
         assertEquals(1, viewModel.state.value.downloads.cachedAlbums?.size)
 
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        api.loginResult = Result.success(Session("https://server.test", "user-2", "user-2", "token-2"))
         viewModel.updateServerUrl("https://server.test")
         viewModel.updateUsername("user-2")
         viewModel.updatePassword("pass-2")
@@ -1751,7 +1753,7 @@ class JellyfinViewModelTest {
         // 统计的唯一出口是 module 快照（#7）：设置页读 library.state.stats。
         val library = downloadLibraryFor(mediaDownloads, ledger)
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = listOf(track)),
             mediaDownloads = mediaDownloads, downloadLedgerStore = ledger, downloadLibrary = library
         )
@@ -1775,7 +1777,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(frequent))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1800,7 +1802,7 @@ class JellyfinViewModelTest {
             recentlyAddedResult = Result.success(listOf(album))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1818,7 +1820,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(frequent))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1839,7 +1841,7 @@ class JellyfinViewModelTest {
             recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1862,7 +1864,7 @@ class JellyfinViewModelTest {
             recentlyPlayedResult = Result.failure(JellyfinError.Network(IOException("no network")))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1881,7 +1883,7 @@ class JellyfinViewModelTest {
             recentlyAddedResult = Result.failure(JellyfinError.Http(500))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -1900,7 +1902,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `播放历史查询撞上 401 走会话过期`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
             recentlyPlayedResult = Result.failure(JellyfinError.Unauthorized())
         }
@@ -1917,7 +1919,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `播放历史过期响应不写入新会话状态`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
         val stale = Track("stale-1", "上个账号的", "歌手", "专辑", 1L, null)
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
@@ -1946,7 +1948,7 @@ class JellyfinViewModelTest {
             recentlyAddedResult = Result.success(listOf(Album("album-1", "新专辑", "歌手", 10, null)))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -1955,7 +1957,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
         assertTrue(viewModel.state.value.library.recentlyPlayed != null)
 
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2"))
+        api.loginResult = Result.success(Session("https://server.test", "user-2", "user-2", "token-2"))
         viewModel.updateServerUrl("https://server.test")
         viewModel.updateUsername("user-2")
         viewModel.updatePassword("pass-2")
@@ -1978,7 +1980,7 @@ class JellyfinViewModelTest {
             recentlyAddedResult = Result.success(listOf(added))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadDiscoverAlbums()
@@ -2011,7 +2013,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(frequent))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -2030,7 +2032,7 @@ class JellyfinViewModelTest {
             recentlyPlayedResult = Result.failure(JellyfinError.Http(500))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -2055,7 +2057,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(track))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -2094,7 +2096,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(old))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -2125,7 +2127,7 @@ class JellyfinViewModelTest {
             mostPlayedResult = Result.success(listOf(old))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -2152,7 +2154,7 @@ class JellyfinViewModelTest {
     fun `下拉刷新期间刷新标记为真，全部落地后复位`() = runTest {
         val api = FakeJellyfinApi(tracks = listOf(track))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -2170,7 +2172,7 @@ class JellyfinViewModelTest {
             recentlyPlayedResult = Result.success(listOf(recent))
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.loadRecentlyPlayed()
@@ -2185,7 +2187,7 @@ class JellyfinViewModelTest {
 
     @Test
     fun `会话过期清空播放历史`() = runTest {
-        val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
             recentlyPlayedResult = Result.success(listOf(track))
             albumsError = JellyfinError.Unauthorized()
@@ -2212,7 +2214,7 @@ class JellyfinViewModelTest {
         val albums = listOf(Album("album-1", "专辑", "歌手", 1, null))
         val gate = CompletableDeferred<Unit>()
         val sessions = FakeSessionRepository(
-            SavedSession("https://server.test", "user-1", "user", "secret")
+            Session("https://server.test", "user-1", "user", "secret")
         ).apply { loadGate = gate }
         val api = FakeJellyfinApi(albums = albums)
         val viewModel = createViewModel(sessions, api)
@@ -2236,7 +2238,7 @@ class JellyfinViewModelTest {
         val albums = listOf(Album("album-1", "专辑", "歌手", 1, null))
         val gate = CompletableDeferred<Unit>()
         val sessions = FakeSessionRepository(
-            SavedSession("https://server.test", "user-1", "user", "secret")
+            Session("https://server.test", "user-1", "user", "secret")
         )
         val api = FakeJellyfinApi(albums = albums).apply { musicItemsGate = gate }
         val viewModel = createViewModel(sessions, api)
@@ -2261,7 +2263,7 @@ class JellyfinViewModelTest {
         val album = Album("album-1", "专辑", "歌手", 1, null)
         val api = FakeJellyfinApi(albums = listOf(album))
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
         viewModel.onSectionEntered(LibrarySection.AlbumDetail(album))
@@ -2275,7 +2277,7 @@ class JellyfinViewModelTest {
         // 重新登录：登录页与主页面是二选一组合，主页面重建时界面会重新上报分区。
         // 上一个会话的详情页**不能**被重放（旧专辑 id 的请求 + 旧数据写进新会话）。
         api.loginResult = Result.success(
-            com.example.pulsar.data.jellyfin.JellyfinSession("user-2", "token-2")
+            Session("https://server.test", "user-2", "user-2", "token-2")
         )
         viewModel.updateServerUrl("https://server.test")
         viewModel.updateUsername("user-2")
@@ -2292,7 +2294,7 @@ class JellyfinViewModelTest {
         val gate = CompletableDeferred<Unit>()
         val api = FakeJellyfinApi(albums = listOf(album)).apply { albumsGate = gate }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")), api
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")), api
         )
         advanceUntilIdle()
 
@@ -2320,7 +2322,7 @@ class JellyfinViewModelTest {
         val history = FakeServerUrlHistory()
         val viewModel = createViewModel(FakeSessionRepository(null), api, serverUrlHistory = history)
         advanceUntilIdle()
-        api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
+        api.loginResult = Result.success(Session("https://server.test", "user-1", "user", "token-1"))
         viewModel.updateServerUrl("https://server.test")
         viewModel.updateUsername("user")
         viewModel.updatePassword("pass")
@@ -2355,7 +2357,7 @@ class JellyfinViewModelTest {
             albumsError = JellyfinError.Unauthorized()
         }
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             api,
             libraryFilesFactory = { fileOps }
         )
@@ -2387,7 +2389,7 @@ class JellyfinViewModelTest {
         mediaDownloads: FakeMediaDownloads? = null
     ): JellyfinViewModel {
         val viewModel = createViewModel(
-            FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+            FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
             FakeJellyfinApi(tracks = tracks),
             libraryFilesFactory = { fileOps },
             mediaDownloads = mediaDownloads
@@ -2414,7 +2416,7 @@ class JellyfinViewModelTest {
         mediaDownloads: FakeMediaDownloads,
         ledger: FakeDownloadLedgerStore
     ): JellyfinViewModel = createViewModel(
-        FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret")),
+        FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret")),
         api,
         mediaDownloads = mediaDownloads,
         downloadLedgerStore = ledger,
@@ -2548,20 +2550,21 @@ class JellyfinViewModelTest {
         override suspend fun clear() { cleared = true; stored = null }
     }
 
-    private class FakeSessionRepository(private var session: SavedSession?) : SessionRepository {
+    private class FakeSessionRepository(private var session: Session?) : SessionRepository {
         var cleared = false
         /** 非空时 [load] 真的挂起：复现「会话恢复还没写完，别的协程已经在读状态」。 */
         var loadGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-        override suspend fun load(): SavedSession? {
+        override suspend fun load(): Session? {
             loadGate?.await()
             return session
         }
-        override suspend fun save(session: SavedSession) { this.session = session }
+        override suspend fun save(session: Session) { this.session = session }
         override suspend fun clear() { cleared = true; session = null }
     }
 
-    private class FakeApiFactory(private val api: JellyfinApi) : JellyfinApiFactory {
-        override suspend fun create(serverUrl: String): JellyfinApi = api
+    private class FakeApiFactory(private val api: FakeJellyfinApi) : JellyfinApiFactory {
+        override suspend fun createLoginApi(serverUrl: String): JellyfinLoginApi = api
+        override suspend fun create(session: Session): SessionScopedJellyfinApi = api
     }
 
     private class FakeJellyfinApi(
@@ -2571,7 +2574,7 @@ class JellyfinViewModelTest {
         var albumsError: Throwable? = null,
         private val searchResults: SearchResults = SearchResults(),
         var lyricsResult: Result<Lyrics>? = null
-    ) : JellyfinApi {
+    ) : SessionScopedJellyfinApi, JellyfinLoginApi {
         var musicItemsCalls = 0
         /** 非空时 getMusicItems 会挂起到测试放行：复现「会话已发布但曲库还没校验完」。 */
         var musicItemsGate: CompletableDeferred<Unit>? = null
@@ -2588,26 +2591,27 @@ class JellyfinViewModelTest {
         var recentlyAddedCalls = 0
         /** 挂起播放历史请求，模拟「响应回来前会话已切换」。 */
         var historyGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-        override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+        override suspend fun getRecentlyPlayed(limit: Int): Result<List<Track>> {
             recentlyPlayedCalls++
             historyGate?.await()
             return recentlyPlayedResult
         }
-        override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> {
+        override suspend fun getMostPlayed(limit: Int): Result<List<Track>> {
             mostPlayedCalls++
             historyGate?.await()
             return mostPlayedResult
         }
-        override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+        override suspend fun getRecentlyAdded(limit: Int): Result<List<Album>> {
             recentlyAddedCalls++
             historyGate?.await()
             return recentlyAddedResult
         }
         /** 登录结果：默认失败；测「换账号重登」时注入成功。 */
-        var loginResult: Result<com.example.pulsar.data.jellyfin.JellyfinSession>? = null
-        override suspend fun login(username: String, password: String) =
-            loginResult ?: Result.failure<com.example.pulsar.data.jellyfin.JellyfinSession>(IllegalStateException())
-        override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> {
+        var loginResult: Result<Session>? = null
+        override suspend fun login(username: String, password: String): Result<Session> =
+            loginResult?.map { it.copy(username = username) }
+                ?: Result.failure(IllegalStateException())
+        override suspend fun getMusicItems(): Result<List<Track>> {
             musicItemsCalls++
             musicItemsGate?.await()
             return musicItemsError?.let { Result.failure(it) } ?: Result.success(tracks)
@@ -2615,39 +2619,39 @@ class JellyfinViewModelTest {
         var albumsCalls = 0
         /** 非空时 getAlbums 会挂起到测试放行：复现「专辑请求在途时用户切了页」。 */
         var albumsGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
-        override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> {
+        override suspend fun getAlbums(): Result<List<Album>> {
             albumsCalls++
             albumsGate?.await()
             return albumsError?.let { Result.failure(it) } ?: Result.success(albums)
         }
         var randomAlbumsCalls = 0
-        override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> {
+        override suspend fun getRandomAlbums(limit: Int): Result<List<Album>> {
             randomAlbumsCalls++
             return Result.success(emptyList())
         }
-        override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String) = Result.success(emptyList<Track>())
+        override suspend fun getAlbumTracks(albumId: String) = Result.success(emptyList<Track>())
         var playlistsError: Throwable? = null
         /** 播放列表详情返回的曲目（工单 08：在线打开列表详情会写已下载列表清单）。 */
         var playlistTracksResult: Result<List<Track>> = Result.success(emptyList())
-        override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =
+        override suspend fun getPlaylists(): Result<List<Playlist>> =
             playlistsError?.let { Result.failure(it) } ?: Result.success(emptyList())
-        override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String) =
+        override suspend fun getPlaylistTracks(playlistId: String) =
             playlistTracksResult
-        override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> {
+        override suspend fun search(query: String): Result<SearchResults> {
             searchQueries += query
             return searchError?.let { Result.failure(it) } ?: Result.success(searchResults)
         }
-        override suspend fun getLyrics(accessToken: String, trackId: String): Result<Lyrics> {
+        override suspend fun getLyrics(trackId: String): Result<Lyrics> {
             lyricsCalls++
             lyricsTrackIds += trackId
             return lyricsResult ?: Result.success(Lyrics.NONE)
         }
         // 缓存键 = streamUrl，Fake 按 id 生成唯一 URL，两首歌才是两个不同的键
-        override fun streamUrl(mediaId: String, accessToken: String) = "stream/$mediaId"
-        override suspend fun reportPlaybackStarted(accessToken: String, itemId: String, positionTicks: Long) = Result.success(Unit)
-        override suspend fun reportPlaybackStopped(accessToken: String, itemId: String, positionTicks: Long) = Result.success(Unit)
-        override fun imageRequest(itemId: String, imageTag: String?, accessToken: String) = JellyfinRequest("image", emptyMap())
-        override fun authorizationHeader(accessToken: String) = "auth-header"
+        override fun streamUrl(mediaId: String) = "stream/$mediaId"
+        override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long) = Result.success(Unit)
+        override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long) = Result.success(Unit)
+        override fun imageRequest(itemId: String, imageTag: String?) = JellyfinRequest("image", emptyMap())
+        override fun authorizationHeader() = "auth-header"
     }
 
     private class FakeLibraryFilesApi(

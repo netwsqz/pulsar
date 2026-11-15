@@ -4,6 +4,7 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.session.Session
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.request.accept
@@ -21,40 +22,32 @@ import kotlinx.coroutines.CancellationException
 import io.ktor.client.request.setBody
 import java.io.IOException
 
+/**
+ * 会话作用域数据源（#23）：创建时绑定 [session]，所有请求的 userId / 令牌都从这里取，
+ * 方法签名不再搬凭据。换账号时由 `SessionManager` 换一个新实例。
+ */
 class JellyfinDataSource(
     private val client: HttpClient,
     private val urlBuilder: JellyfinUrlBuilder,
     val deviceId: String,
+    private val session: Session,
     private val json: Json = Json { ignoreUnknownKeys = true }
-) : JellyfinApi {
-    override suspend fun login(username: String, password: String): Result<JellyfinSession> =
-        execute {
-            require(username.isNotBlank()) { "Username must not be blank" }
-            require(password.isNotBlank()) { "Password must not be blank" }
-            val response = client.post(urlBuilder.loginUrl()) {
-                header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId))
-                contentType(ContentType.Application.Json)
-                accept(ContentType.Application.Json)
-                setBody(json.encodeToString(JellyfinLoginRequest(username, password)))
-            }
-            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
-                throw JellyfinError.InvalidCredentials()
-            }
-            ensureSuccess(response.status)
-            val body = json.decodeFromString<JellyfinLoginResponse>(response.body())
-            if (body.accessToken.isBlank() || body.user?.id.isNullOrBlank()) {
-                throw JellyfinError.InvalidResponse(IllegalStateException("Missing session fields"))
-            }
-            JellyfinSession(body.user.id, body.accessToken)
-        }
+) : SessionScopedJellyfinApi {
 
-    override suspend fun getMusicItems(userId: String, accessToken: String): Result<List<Track>> =
+    init {
+        // 会话作用域 API 的底线：URL 构建器与会话必须指向同一台服务器，
+        // 否则会把 A 账号的令牌发到 B 服务器（生产只有 PulsarApplication 一个入口，
+        // 这里再把不变量钉死，测试 Fake 也不会踩）。
+        require(urlBuilder.serverUrl == session.serverUrl) {
+            "URL builder must use the session's server URL"
+        }
+        require(session.userId.isNotBlank()) { "User ID must not be blank" }
+        require(session.accessToken.isNotBlank()) { "Access token must not be blank" }
+    }
+
+    override suspend fun getMusicItems(): Result<List<Track>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "IncludeItemTypes" to "Audio",
                     "Recursive" to "true",
@@ -64,13 +57,9 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toTrack)
         }
 
-    override suspend fun getAlbums(userId: String, accessToken: String): Result<List<Album>> =
+    override suspend fun getAlbums(): Result<List<Album>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "IncludeItemTypes" to "MusicAlbum",
                     "Recursive" to "true",
@@ -83,13 +72,9 @@ class JellyfinDataSource(
         }
 
     /** 拉取随机专辑（发现页用）：与 [getAlbums] 复用同一接口，仅排序方式换成 Random 并限制返回数量。 */
-    override suspend fun getRandomAlbums(userId: String, accessToken: String, limit: Int): Result<List<Album>> =
+    override suspend fun getRandomAlbums(limit: Int): Result<List<Album>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "IncludeItemTypes" to "MusicAlbum",
                     "Recursive" to "true",
@@ -104,25 +89,16 @@ class JellyfinDataSource(
      * 最近播放：服务端播放历史，按最后播放时间倒序。
      * `Filters=IsPlayed` 是必需的——没播过的歌 DatePlayed 为空，不加过滤会混进来。
      */
-    override suspend fun getRecentlyPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> =
-        playedTracks(userId, accessToken, "DatePlayed", limit)
+    override suspend fun getRecentlyPlayed(limit: Int): Result<List<Track>> =
+        playedTracks("DatePlayed", limit)
 
     /** 最常播放：服务端播放次数倒序（同样只看播过的）。 */
-    override suspend fun getMostPlayed(userId: String, accessToken: String, limit: Int): Result<List<Track>> =
-        playedTracks(userId, accessToken, "PlayCount", limit)
+    override suspend fun getMostPlayed(limit: Int): Result<List<Track>> =
+        playedTracks("PlayCount", limit)
 
     /** 播过的曲目按 [sortBy] 倒序取前 [limit] 首。 */
-    private suspend fun playedTracks(
-        userId: String,
-        accessToken: String,
-        sortBy: String,
-        limit: Int
-    ): Result<List<Track>> = execute {
-        require(userId.isNotBlank()) { "User ID must not be blank" }
-        require(accessToken.isNotBlank()) { "Access token must not be blank" }
+    private suspend fun playedTracks(sortBy: String, limit: Int): Result<List<Track>> = execute {
         fetchItems(
-            userId,
-            accessToken,
             mapOf(
                 "IncludeItemTypes" to "Audio",
                 "Recursive" to "true",
@@ -136,13 +112,9 @@ class JellyfinDataSource(
     }
 
     /** 最近添加：按入库时间倒序的专辑。 */
-    override suspend fun getRecentlyAdded(userId: String, accessToken: String, limit: Int): Result<List<Album>> =
+    override suspend fun getRecentlyAdded(limit: Int): Result<List<Album>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "IncludeItemTypes" to "MusicAlbum",
                     "Recursive" to "true",
@@ -154,21 +126,15 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toAlbum)
         }
 
-    override suspend fun getAlbumTracks(userId: String, accessToken: String, albumId: String): Result<List<Track>> =
+    override suspend fun getAlbumTracks(albumId: String): Result<List<Track>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             require(albumId.isNotBlank()) { "Album ID must not be blank" }
-            fetchChildTracks(userId, accessToken, albumId)
+            fetchChildTracks(albumId)
         }
 
-    override suspend fun getPlaylists(userId: String, accessToken: String): Result<List<Playlist>> =
+    override suspend fun getPlaylists(): Result<List<Playlist>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "IncludeItemTypes" to "Playlist",
                     "Recursive" to "true",
@@ -179,12 +145,10 @@ class JellyfinDataSource(
             ).map(JellyfinItemDto::toPlaylist)
         }
 
-    override suspend fun getPlaylistTracks(userId: String, accessToken: String, playlistId: String): Result<List<Track>> =
+    override suspend fun getPlaylistTracks(playlistId: String): Result<List<Track>> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             require(playlistId.isNotBlank()) { "Playlist ID must not be blank" }
-            fetchChildTracks(userId, accessToken, playlistId)
+            fetchChildTracks(playlistId)
         }
 
     /**
@@ -192,14 +156,10 @@ class JellyfinDataSource(
      * 走标准 /Users/{userId}/Items 接口 + SearchTerm 参数，token 只进 header 不进 URL。
      * Limit=50 限制返回量，避免结果过多拖慢响应。
      */
-    override suspend fun search(userId: String, accessToken: String, query: String): Result<SearchResults> =
+    override suspend fun search(query: String): Result<SearchResults> =
         execute {
-            require(userId.isNotBlank()) { "User ID must not be blank" }
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             require(query.isNotBlank()) { "Search query must not be blank" }
             val items = fetchItems(
-                userId,
-                accessToken,
                 mapOf(
                     "SearchTerm" to query,
                     "IncludeItemTypes" to "Audio,MusicAlbum,Playlist",
@@ -223,11 +183,10 @@ class JellyfinDataSource(
      * 404 归一化为成功 + [Lyrics.NONE]（UI 显示空态，不当错误弹窗）；
      * 401/403 照常映射 Unauthorized 走会话过期流程。
      */
-    override suspend fun getLyrics(accessToken: String, trackId: String): Result<Lyrics> =
+    override suspend fun getLyrics(trackId: String): Result<Lyrics> =
         execute {
-            require(accessToken.isNotBlank()) { "Access token must not be blank" }
             require(trackId.isNotBlank()) { "Track ID must not be blank" }
-            val request = urlBuilder.lyricsRequest(trackId, accessToken, deviceId)
+            val request = urlBuilder.lyricsRequest(trackId, session.accessToken, deviceId)
             val response = client.get(request.url) {
                 header(HttpHeaders.Authorization, request.headers["Authorization"].orEmpty())
                 accept(ContentType.Application.Json)
@@ -248,27 +207,23 @@ class JellyfinDataSource(
      * 错误映射成 Result，不抛给调用方。
      */
     override suspend fun reportPlaybackStarted(
-        accessToken: String,
         itemId: String,
         positionTicks: Long
-    ): Result<Unit> = reportPlayback(urlBuilder.playbackStartUrl(), accessToken, itemId, positionTicks)
+    ): Result<Unit> = reportPlayback(urlBuilder.playbackStartUrl(), itemId, positionTicks)
 
     override suspend fun reportPlaybackStopped(
-        accessToken: String,
         itemId: String,
         positionTicks: Long
-    ): Result<Unit> = reportPlayback(urlBuilder.playbackStoppedUrl(), accessToken, itemId, positionTicks)
+    ): Result<Unit> = reportPlayback(urlBuilder.playbackStoppedUrl(), itemId, positionTicks)
 
     private suspend fun reportPlayback(
         url: String,
-        accessToken: String,
         itemId: String,
         positionTicks: Long
     ): Result<Unit> = execute {
-        require(accessToken.isNotBlank()) { "Access token must not be blank" }
         require(itemId.isNotBlank()) { "Item ID must not be blank" }
         val response = client.post(url) {
-            header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId, accessToken))
+            header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId, session.accessToken))
             contentType(ContentType.Application.Json)
             accept(ContentType.Application.Json)
             setBody(json.encodeToString(JellyfinPlaybackReport(itemId, positionTicks)))
@@ -279,31 +234,19 @@ class JellyfinDataSource(
         ensureSuccess(response.status)
     }
 
-    override fun streamUrl(mediaId: String, accessToken: String): String {
-        require(accessToken.isNotBlank()) { "Access token must not be blank" }
-        return urlBuilder.mediaStreamRequest(mediaId, accessToken, deviceId).url
-    }
+    override fun streamUrl(mediaId: String): String =
+        urlBuilder.mediaStreamRequest(mediaId, session.accessToken, deviceId).url
 
     /** 构建专辑封面请求：token 只进 header，不进 URL。imageTag 为空时省略 ?tag 参数。 */
-    override fun imageRequest(itemId: String, imageTag: String?, accessToken: String): JellyfinRequest {
+    override fun imageRequest(itemId: String, imageTag: String?): JellyfinRequest {
         require(itemId.isNotBlank()) { "Item ID must not be blank" }
-        require(accessToken.isNotBlank()) { "Access token must not be blank" }
-        return urlBuilder.imageRequest(itemId, imageTag, accessToken, deviceId)
+        return urlBuilder.imageRequest(itemId, imageTag, session.accessToken, deviceId)
     }
 
-    override fun authorizationHeader(accessToken: String): String {
-        require(accessToken.isNotBlank()) { "Access token must not be blank" }
-        return mediaBrowserAuthorization(deviceId, accessToken)
-    }
+    override fun authorizationHeader(): String = mediaBrowserAuthorization(deviceId, session.accessToken)
 
     /** 拉取某容器（专辑 / 播放列表）下的歌曲：同一接口，用 ParentId 定位容器。 */
-    private suspend fun fetchChildTracks(
-        userId: String,
-        accessToken: String,
-        parentId: String
-    ): List<Track> = fetchItems(
-        userId,
-        accessToken,
+    private suspend fun fetchChildTracks(parentId: String): List<Track> = fetchItems(
         mapOf(
             "ParentId" to parentId,
             "IncludeItemTypes" to "Audio",
@@ -314,13 +257,9 @@ class JellyfinDataSource(
     ).map(JellyfinItemDto::toTrack)
 
     /** 拉取 Items 列表：带鉴权头，按 [params] 传查询参数。仅防御性过滤纯文件夹类型（Folder），专辑等容器项不受影响。 */
-    private suspend fun fetchItems(
-        userId: String,
-        accessToken: String,
-        params: Map<String, String>
-    ): List<JellyfinItemDto> {
-        val response = client.get(urlBuilder.itemsUrl(userId)) {
-            header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId, accessToken))
+    private suspend fun fetchItems(params: Map<String, String>): List<JellyfinItemDto> {
+        val response = client.get(urlBuilder.itemsUrl(session.userId)) {
+            header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId, session.accessToken))
             accept(ContentType.Application.Json)
             params.forEach { (key, value) -> parameter(key, value) }
         }
@@ -332,28 +271,62 @@ class JellyfinDataSource(
             .items
             .filterNot { it.type?.equals("Folder", ignoreCase = true) == true }
     }
-
-    private suspend fun <T> execute(block: suspend () -> T): Result<T> = try {
-        Result.success(block())
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: JellyfinError) {
-        Result.failure(error)
-    } catch (error: IllegalArgumentException) {
-        Result.failure(error)
-    } catch (error: IOException) {
-        Result.failure(JellyfinError.Network(error))
-    } catch (error: Exception) {
-        Result.failure(JellyfinError.InvalidResponse(error))
-    }
-
-    private fun ensureSuccess(status: HttpStatusCode) {
-        if (status.value !in 200..299) throw JellyfinError.Http(status.value)
-    }
-
-    private fun mediaBrowserAuthorization(deviceId: String, accessToken: String? = null): String =
-        "MediaBrowser Client=\"Pulsar\", Device=\"Android\", DeviceId=\"$deviceId\", Version=\"0.1.0\"" +
-            accessToken?.let { ", Token=\"$it\"" }.orEmpty()
 }
 
-data class JellyfinSession(val userId: String, val accessToken: String)
+/**
+ * 登录数据源（#23）：还没有会话时唯一可用的实现。
+ *
+ * 登录请求只带无令牌的 MediaBrowser 头；成功后把服务器地址、用户名与响应里的
+ * userId / accessToken 合成一个 [Session]，会话模型从此只有这一种。
+ */
+class JellyfinLoginDataSource(
+    private val client: HttpClient,
+    private val urlBuilder: JellyfinUrlBuilder,
+    private val deviceId: String,
+    private val json: Json = Json { ignoreUnknownKeys = true }
+) : JellyfinLoginApi {
+
+    override suspend fun login(username: String, password: String): Result<Session> =
+        execute {
+            require(username.isNotBlank()) { "Username must not be blank" }
+            require(password.isNotBlank()) { "Password must not be blank" }
+            val response = client.post(urlBuilder.loginUrl()) {
+                header(HttpHeaders.Authorization, mediaBrowserAuthorization(deviceId))
+                contentType(ContentType.Application.Json)
+                accept(ContentType.Application.Json)
+                setBody(json.encodeToString(JellyfinLoginRequest(username, password)))
+            }
+            if (response.status == HttpStatusCode.Unauthorized || response.status == HttpStatusCode.Forbidden) {
+                throw JellyfinError.InvalidCredentials()
+            }
+            ensureSuccess(response.status)
+            val body = json.decodeFromString<JellyfinLoginResponse>(response.body())
+            if (body.accessToken.isBlank() || body.user?.id.isNullOrBlank()) {
+                throw JellyfinError.InvalidResponse(IllegalStateException("Missing session fields"))
+            }
+            Session(
+                serverUrl = urlBuilder.serverUrl,
+                userId = body.user.id,
+                username = username,
+                accessToken = body.accessToken,
+            )
+        }
+}
+
+private suspend fun <T> execute(block: suspend () -> T): Result<T> = try {
+    Result.success(block())
+} catch (error: CancellationException) {
+    throw error
+} catch (error: JellyfinError) {
+    Result.failure(error)
+} catch (error: IllegalArgumentException) {
+    Result.failure(error)
+} catch (error: IOException) {
+    Result.failure(JellyfinError.Network(error))
+} catch (error: Exception) {
+    Result.failure(JellyfinError.InvalidResponse(error))
+}
+
+private fun ensureSuccess(status: HttpStatusCode) {
+    if (status.value !in 200..299) throw JellyfinError.Http(status.value)
+}

@@ -223,4 +223,14 @@ class JellyfinUrlBuilderTest {
     fun `rejects blank image request device ID`() {
         JellyfinUrlBuilder("https://media.example.com").imageRequest("album-1", "tag", "token", "  ")
     }
+
+    @Test
+    fun `serverUrl keeps the user input so existing downloads stay visible`() {
+        // 会话里的 serverUrl 参与下载名单的账号作用域；升级后不能把用户输入规范化成另一种字符串，
+        // 否则老名单（带尾部斜杠）会匹配不上，已下载内容「凭空消失」。
+        assertEquals(
+            "https://media.example.com/",
+            JellyfinUrlBuilder("https://media.example.com/").serverUrl
+        )
+    }
 }

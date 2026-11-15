@@ -1,6 +1,6 @@
 # SessionScope 重构执行计划
 
-> 状态：**进行中（#20 / #21 已落地，待真机确认）**。#22–#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
+> 状态：**进行中（#20 / #21 / #22 已落地，待真机确认）**。#23 未开始。本文是 candidate 6（会话凭据收成一个 SessionScope）的执行规格，不是 ADR。
 > 相关：`docs/download-library-refactor.md`（AccountScope）、`docs/library-state-refactor.md`（SessionState）。
 > 安全红线（CLAUDE.md）：**token 绝不出现在 URL、日志或 UI**；请求头用 MediaBrowser 格式；退出登录/会话过期时清库缓存与播放队列。
 
@@ -50,7 +50,7 @@
 | D1 | module 形态 | `SessionManager` 有状态 class；`SessionScopedJellyfinApi` 是接口 |
 | D2 | 会话模型 | 统一成 `Session(serverUrl, userId, username, accessToken)`；`SavedSession` / `JellyfinSession` 合并 |
 | D3 | API 作用域 | `JellyfinApiFactory.create(serverUrl, session)` 返回会话作用域 API；方法只收领域参数 |
-| D4 | 鉴权头 | `SessionManager.authorizationHeader` 是唯一来源；`AuthorizationSink` 保留为播放服务的适配接口 |
+| D4 | 鉴权头 | `SessionManager.authorizationHeader` 是唯一来源；`AuthorizationSink` 保留为播放服务的适配接口（**#22 已删**：播放 / 下载改为直读 manager，`AuthHttpDataSourceFactory` 的 provider 就是只读适配） |
 | D5 | 播放上报 | `PlaybackReporter` 注入 `SessionManager` + `SessionScopedJellyfinApi`，不再每次建 DataSource |
 | D6 | 过期 | 401 → `SessionManager.expire()`；VM 只负责显示「登录已失效」并清界面状态 |
 | D7 | 存储 | 仍只存 token；不存密码；DataStore 键不变，升级不丢会话 |
@@ -185,13 +185,29 @@ fun interface SessionScopedJellyfinApiFactory {
 
 ### Step 3 — 播放服务 / 下载 / 上报走同一来源
 
+> **已完成 2026-11-15（#22）**：播放流与下载上游改读 `SessionManager.authorizationHeader`；
+> `AuthorizationSink` 与 `PulsarApplication.activeAuthorization` 已删除，全局鉴权头不再有第二份缓存。
+> `PlaybackReporter` 不再持有 `SessionRepository` / `JellyfinApiFactory`，改依赖窄接口
+> `PlaybackReportSource`（生产实现 `SessionPlaybackReportSource` 现读 manager 的原子快照
+> `SessionConnection`），每次上报复用登录/恢复时建好的同一个 API，不再重建 DataSource / 重读安装 ID。
+> 与原文的差异：
+> - 没有直接注入 `SessionScopedJellyfinApi`（Step 4 才引入）；这里先收成只含两条上报的窄接口，
+>   让 `PlaybackReporterTest` 的 Fake 从 18 个方法缩到 3 个，Step 4 再把接口扩成完整会话作用域 API。
+> - 播放服务/下载的「只读适配」仍是 `AuthHttpDataSourceFactory` 的 provider lambda，跨线程现读
+>   `SessionManager` 的 `@Volatile` 头；没有额外的 Sink 接口。
+> - `SessionManager` 增加 `SessionConnection` 原子快照（会话 + API 一次发布），ViewModel 与上报共用，
+>   避免分别读 `current` / `api` 时拼出「旧令牌 + 新 API」。
+> - 新增 `SessionPlaybackReportSourceTest` 钉住：未登录无通道、登出立即失效、换账号换令牌、
+>   连续上报只创建一次 API。全量 928 例与 `assembleDebug` 通过；真机播放/下载/上报待确认。
+> - 删除全局鉴权头缓存后的 ADR 按 Step 5 约定留给 #23。
+
 1. `AuthHttpDataSourceFactory` 改成读 `SessionManager.authorizationHeader`（通过 `AuthorizationSink` 适配或直接注入 provider）。
 2. `PulsarApplication.mediaDownloads()` 的上游源改读同一个 provider。
 3. `PlaybackReporter` 注入 `SessionManager` + `SessionScopedJellyfinApi`；删除每次 `apiFactory.create`。
 4. `PlaybackReporterTest` 的 Fake 从 18 个方法缩到 reporter 真正用的 2 个。
 5. 删除 `activeAuthorization` 的全局写点（如果 `AuthorizationSink` 还需要，保留只读适配）。
 
-**验收**：`grep activeAuthorization` 只剩 `SessionManager` 与 `AuthorizationSink` 适配；播放/下载/上报正常。
+**验收**（#22 后实际口径）：`grep -r activeAuthorization app/src` 无结果；播放/下载/上报正常。
 
 ### Step 4 — 会话作用域 API + 签名收窄
 
@@ -243,7 +259,7 @@ fun interface SessionScopedJellyfinApiFactory {
 
 **待确认**
 1. `SessionManager` 是否拥有登录流程，还是只拥有凭据？推荐拥有凭据 + 登录 API，表单状态留 VM。
-2. `activeAuthorization` 是删除还是保留为 `SessionManager` 的派生缓存？推荐保留 `AuthorizationSink` 适配，删掉其他写点。
+2. ~~`activeAuthorization` 是删除还是保留为 `SessionManager` 的派生缓存？~~ **#22 已定**：删除 `AuthorizationSink` / 全局缓存，播放与下载直读 `SessionManager.authorizationHeader`；ADR 留给 Step 5。
 3. `JellyfinApi` 是改名还是新增接口？推荐新增 `SessionScopedJellyfinApi`，旧接口逐步废弃。
 4. 是否把 `SessionRepository` 也并进 `SessionManager`？推荐 manager 组合它，不合并存储接口。
 

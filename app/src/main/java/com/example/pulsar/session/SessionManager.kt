@@ -1,6 +1,5 @@
 package com.example.pulsar.session
 
-import com.example.pulsar.AuthorizationSink
 import com.example.pulsar.SessionRepository
 import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
@@ -14,7 +13,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * 会话凭据的唯一来源（候选 6 / 工单 #20、#21）。
+ * 会话凭据的唯一来源（候选 6 / 工单 #20、#21、#22）。
  *
  * **#21 起已接线**：`JellyfinViewModel` 只从这个 module 取 `current` / `api`，
  * 登录 / 恢复 / 退出 / 过期都由它执行；内部暂时委托旧的 [SessionRepository] /
@@ -22,17 +21,16 @@ import kotlinx.coroutines.sync.withLock
  *
  * 三条约定：
  * - [current] 是会话真相；[api] 随它一起换，旧 API 不会留给在途协程之外的人。
- * - [authorizationHeader] 只给播放服务 / 下载上游用；**不要进 UI、不要打日志**。
+ * - [authorizationHeader] 是全局鉴权头的**唯一来源**，只给播放服务 / 下载上游用；
+ *   **不要进 UI、不要打日志**。
  * - 登出只清会话；下载字节与名单不归这里管（ADR-0007）。
  *
- * [authorizationSink]（生产上是 `PulsarApplication`）也由本类统一写：
- * ViewModel 不再有第二个写 `activeAuthorization` 的地方；Step 3 再让播放服务直接读本类。
+ * #22 起播放服务、下载上游、播放上报都直接读本类，不再有第二份全局鉴权头缓存。
  */
 class SessionManager(
     private val store: SessionRepository,
     private val apiFactory: JellyfinApiFactory,
     private val scope: CoroutineScope,
-    private val authorizationSink: AuthorizationSink? = null,
 ) {
     private val _current = MutableStateFlow<Session?>(null)
     val current: StateFlow<Session?> = _current.asStateFlow()
@@ -51,13 +49,23 @@ class SessionManager(
     /** 会话过期后保留给登录页的地址 / 用户名；登出时清空。 */
     val loginHint: StateFlow<LoginHint?> = _loginHint.asStateFlow()
 
-    /** 播放服务在别的线程读它，按旧 `activeAuthorization` 的口径用 `@Volatile`。 */
+    /** 播放服务在别的线程（Media3 数据源 / 上报协程）读它，所以用 `@Volatile`。 */
     @Volatile
     private var header: String? = null
+
+    /**
+     * 会话与 API 的原子快照：内部读方不要分别读 [current] / [api] 再拼，
+     * 否则换会话的瞬间可能拿到「旧令牌 + 新 API」。
+     */
+    @Volatile
+    private var connection: SessionConnection? = null
 
     /** 只给播放服务 / 下载上游用；不要进 UI、不要打日志。 */
     val authorizationHeader: String?
         get() = header
+
+    /** 当前会话与 API 的原子快照；未登录时为 null。 */
+    fun currentConnection(): SessionConnection? = connection
 
     /**
      * 恢复上次保存的会话。读失败、没有会话或建不出 API 时返回 false 且不发布任何状态；
@@ -147,19 +155,19 @@ class SessionManager(
     }
 
     private fun publish(session: Session, api: JellyfinApi) {
-        // 先放 API 再放会话：观察 current 的一侧拿到的 api 一定属于这个会话。
+        header = api.authorizationHeader(session.accessToken)
+        // 快照一次写入：读方不会在换会话时拼出旧会话 + 新 API。
+        connection = SessionConnection(api, session)
+        // 再放 API / 会话：观察 current 的一侧拿到的 api 一定属于这个会话。
         _api.value = api
-        val value = api.authorizationHeader(session.accessToken)
-        header = value
-        authorizationSink?.activeAuthorization = value
         _current.value = session
     }
 
     private fun clearSession() {
-        // 与 publish 相反：先撤鉴权头与 API，最后撤会话，读方不会在 current 还有值时
-        // 拿到空 header。
+        // 与 publish 相反：先撤鉴权头、快照与 API，最后撤会话，读方不会在 current
+        // 还有值时拿到空 header。
         header = null
-        authorizationSink?.activeAuthorization = null
+        connection = null
         _api.value = null
         _current.value = null
     }

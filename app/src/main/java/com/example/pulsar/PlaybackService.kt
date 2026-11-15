@@ -40,6 +40,7 @@ import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackReporter
 import com.example.pulsar.playback.PlayerRebuildState
 import com.example.pulsar.playback.RemoteVolumePlayer
+import com.example.pulsar.playback.SessionPlaybackReportSource
 import com.example.pulsar.playback.SilenceLevelMonitor
 import com.example.pulsar.playback.SilenceSkipConfig
 import com.example.pulsar.playback.SilenceSkipDetector
@@ -130,8 +131,8 @@ class PlaybackService : MediaSessionService() {
     private val playbackReporter by lazy {
         val app = application as PulsarApplication
         PlaybackReporter(
-            sessions = app.sessionRepository(),
-            apiFactory = app.jellyfinApiFactory(),
+            // 上报与播放流共用 SessionManager 的当前会话 / API（#22）：不再每次重建数据源。
+            reports = SessionPlaybackReportSource(app.sessionManager),
             scope = app.playbackReportScope,
         )
     }
@@ -586,7 +587,7 @@ class PlaybackService : MediaSessionService() {
     private fun cacheDataSourceFactory(): DataSource.Factory = CacheDataSource.Factory()
         .setCache((application as PulsarApplication).mediaCacheStore)
         .setUpstreamDataSourceFactory(
-            AuthHttpDataSourceFactory { (application as PulsarApplication).activeAuthorization }
+            AuthHttpDataSourceFactory { (application as PulsarApplication).sessionManager.authorizationHeader }
         )
         .setCacheWriteDataSinkFactory(null)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)

@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
-import com.example.pulsar.data.jellyfin.JellyfinApi
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
@@ -22,6 +21,7 @@ import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
 import com.example.pulsar.session.Session
+import com.example.pulsar.session.SessionConnection
 import com.example.pulsar.session.SessionManager
 import com.example.pulsar.session.toJellyfinSession
 import com.example.pulsar.state.DownloadsState
@@ -99,14 +99,8 @@ class JellyfinViewModel(
     private var loginGeneration = 0
     private var offlineRetryJob: Job? = null
 
-    /** 会话与 API 都从 [SessionManager] 现读，ViewModel 不再留第二份凭据。 */
-    private data class ActiveConnection(val api: JellyfinApi, val session: Session)
-
-    private fun activeConnection(): ActiveConnection? {
-        val api = sessionManager.api.value ?: return null
-        val session = sessionManager.current.value ?: return null
-        return ActiveConnection(api, session)
-    }
+    /** 会话与 API 都从 [SessionManager] 现读；快照保证两者属于同一次登录。 */
+    private fun activeConnection(): SessionConnection? = sessionManager.currentConnection()
 
     private fun activeSession(): Session? = sessionManager.current.value
 

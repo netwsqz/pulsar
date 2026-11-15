@@ -31,11 +31,7 @@ private const val kMediaDownloadsDirName = "media_cache"
 
 private const val kLibrarySnapshotFileName = "library-snapshot.json"
 
-class PulsarApplication : Application(), AuthorizationSink {
-    /** 当前登录会话的 Jellyfin Authorization 头（仅内存，不持久化）。 */
-    @Volatile
-    override var activeAuthorization: String? = null
-
+class PulsarApplication : Application() {
     /**
      * 播放上报专用的进程级作用域。播放服务销毁时最后一条「停止」上报还得发出去，
      * 所以不能用服务的 serviceScope（会被 cancel）；放这里也避免每次建服务漏一个作用域。
@@ -80,7 +76,7 @@ class PulsarApplication : Application(), AuthorizationSink {
     fun sessionRepository(): SessionRepository = SessionStore(pulsarPreferencesDataStore)
 
     /**
-     * 会话与鉴权头的唯一来源（#21）。**进程级单例**：播放服务 / 下载上游 / 界面
+     * 会话与鉴权头的唯一来源（#21、#22）。**进程级单例**：播放服务 / 下载上游 / 界面
      * 必须看到同一份会话；ViewModel 重建不能把登录态重来一遍。
      */
     val sessionManager: SessionManager by lazy {
@@ -88,7 +84,6 @@ class PulsarApplication : Application(), AuthorizationSink {
             store = sessionRepository(),
             apiFactory = jellyfinApiFactory(),
             scope = sessionScope,
-            authorizationSink = this,
         )
     }
 
@@ -123,10 +118,10 @@ class PulsarApplication : Application(), AuthorizationSink {
         )
     }
 
-    /** 下载库。上游（网络）源复用播放那条鉴权工厂：token 只进 header，绝不进 URL。 */
+    /** 下载库。上游（网络）源与播放共用 [SessionManager] 的鉴权头：token 只进 header，绝不进 URL。 */
     fun mediaDownloads(): MediaDownloads = SimpleCacheMediaDownloads(
         cache = mediaCacheStore,
-        upstreamFactory = AuthHttpDataSourceFactory { activeAuthorization },
+        upstreamFactory = AuthHttpDataSourceFactory { sessionManager.authorizationHeader },
     )
 
     /** 曲库快照：一份 JSON 落在 App 私有目录，断网时顶上。 */

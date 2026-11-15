@@ -21,6 +21,7 @@ import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.session.SessionManager
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.LibrarySectionKey
 import com.example.pulsar.state.LibraryState
@@ -43,18 +44,20 @@ import java.io.IOException
 class JellyfinViewModelTest {
     private val track = Track("track-1", "Song", "Artist", "Album", 1000L, null)
 
+    /** createViewModel 建出的真 SessionManager（#22：鉴权头已没有第二份全局缓存）。 */
+    private lateinit var lastSessionManager: SessionManager
+
     @Test
     fun `restores saved session and loads tracks`() = runTest {
         val session = SavedSession("https://server.test", "user-1", "user", "secret")
         val sessions = FakeSessionRepository(session)
         val api = FakeJellyfinApi(tracks = listOf(track))
-        val authorization = FakeAuthorizationSink()
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
 
         advanceUntilIdle()
 
         assertEquals(listOf(track), viewModel.state.value.library.tracks)
-        assertEquals("auth-header", authorization.value)
+        assertEquals("auth-header", lastSessionManager.authorizationHeader)
     }
 
     @Test
@@ -129,13 +132,12 @@ class JellyfinViewModelTest {
     fun `unauthorized restore clears session and memory authorization`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Unauthorized())
-        val authorization = FakeAuthorizationSink("old-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
 
         advanceUntilIdle()
 
         assertTrue(sessions.cleared)
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(viewModel.state.value.session.errorMessage!!.contains("失效"))
     }
 
@@ -143,14 +145,13 @@ class JellyfinViewModelTest {
     fun `unauthorized library request expires current session`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(albumsError = JellyfinError.Unauthorized())
-        val authorization = FakeAuthorizationSink("active-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
 
         advanceUntilIdle()
         viewModel.loadAlbums()
         advanceUntilIdle()
 
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(sessions.cleared)
         assertNull(viewModel.state.value.library.tracks)
     }
@@ -159,14 +160,13 @@ class JellyfinViewModelTest {
     fun `network failure keeps saved session`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IllegalStateException()))
-        val authorization = FakeAuthorizationSink("stale-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
 
         advanceUntilIdle()
 
         assertTrue(!sessions.cleared)
         // 界面已回登录表单：内存里的鉴权头不能还挂着（存储保留，下次启动再恢复）。
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(viewModel.state.value.session.errorMessage!!.contains("连接"))
     }
 
@@ -174,8 +174,7 @@ class JellyfinViewModelTest {
     fun `expired session clears cached library and playback state`() = runTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val api = FakeJellyfinApi(tracks = listOf(track))
-        val authorization = FakeAuthorizationSink("active-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
 
         advanceUntilIdle()
         viewModel.loadAlbums()
@@ -189,7 +188,7 @@ class JellyfinViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(sessions.cleared)
         assertNull(viewModel.state.value.library.albums)
         assertNull(viewModel.state.value.library.tracks)
@@ -324,8 +323,7 @@ class JellyfinViewModelTest {
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
         val synced = Lyrics(isSynced = false, lines = emptyList())
         val api = FakeJellyfinApi(lyricsResult = Result.success(synced))
-        val authorization = FakeAuthorizationSink("active-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
 
         viewModel.setPlaybackQueue(listOf(track), track.id)
@@ -339,7 +337,7 @@ class JellyfinViewModelTest {
         advanceUntilIdle()
 
         assertEquals(Lyrics.NONE, viewModel.lyrics.value)
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(sessions.cleared)
     }
 
@@ -1276,8 +1274,7 @@ class JellyfinViewModelTest {
         val sessions = FakeSessionRepository(null)
         val api = FakeJellyfinApi(musicItemsError = JellyfinError.Network(IOException("no network")))
         api.loginResult = Result.success(com.example.pulsar.data.jellyfin.JellyfinSession("user-1", "token-1"))
-        val authorization = FakeAuthorizationSink()
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
         viewModel.updateServerUrl("https://server.test")
         viewModel.updateUsername("user")
@@ -1287,7 +1284,7 @@ class JellyfinViewModelTest {
 
         // 凭据先由 SessionManager 落盘，曲库失败后必须撤销，别让下次启动恢复到半登录态。
         assertTrue(sessions.cleared)
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(viewModel.state.value.session.errorMessage!!.contains("连接"))
     }
 
@@ -1377,8 +1374,7 @@ class JellyfinViewModelTest {
         val snapshotRepo = FakeSnapshotRepository()
         snapshotRepo.stored = LibrarySnapshot(tracks = listOf(track))
         val sessions = FakeSessionRepository(SavedSession("https://server.test", "user-1", "user", "secret"))
-        val authorization = FakeAuthorizationSink()
-        val viewModel = createViewModel(sessions, api, authorization, snapshotRepository = snapshotRepo)
+        val viewModel = createViewModel(sessions, api, snapshotRepository = snapshotRepo)
         advanceBounded()
         assertTrue(viewModel.state.value.library.isOffline)
 
@@ -1388,7 +1384,7 @@ class JellyfinViewModelTest {
         advanceBounded()
 
         assertTrue(sessions.cleared)
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertTrue(!viewModel.state.value.library.isOffline)
         assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
         viewModel.stopOfflineForTest()
@@ -1908,15 +1904,14 @@ class JellyfinViewModelTest {
         val api = FakeJellyfinApi(tracks = listOf(track)).apply {
             recentlyPlayedResult = Result.failure(JellyfinError.Unauthorized())
         }
-        val authorization = FakeAuthorizationSink("active-auth")
-        val viewModel = createViewModel(sessions, api, authorization)
+        val viewModel = createViewModel(sessions, api)
         advanceUntilIdle()
 
         viewModel.loadRecentlyPlayed()
         advanceUntilIdle()
 
         assertTrue(sessions.cleared)
-        assertNull(authorization.value)
+        assertNull(lastSessionManager.authorizationHeader)
         assertEquals("登录已失效，请重新登录", viewModel.state.value.session.errorMessage)
     }
 
@@ -2429,7 +2424,6 @@ class JellyfinViewModelTest {
     private fun TestScope.createViewModel(
         sessions: FakeSessionRepository,
         api: FakeJellyfinApi,
-        authorization: FakeAuthorizationSink = FakeAuthorizationSink(),
         libraryFilesFactory: (suspend () -> LibraryFilesApi)? = null,
         mediaDownloads: FakeMediaDownloads? = null,
         snapshotRepository: FakeSnapshotRepository? = null,
@@ -2440,13 +2434,13 @@ class JellyfinViewModelTest {
         // 生产路径只有一条：有下载能力就一定接真 module（旧 ViewModel 派生已在 #7 删除）。
         val library = downloadLibrary
             ?: mediaDownloads?.let { downloadLibraryFor(it, downloadLedgerStore) }
-        // 会话统一走真 SessionManager，只替换存储 / API / 鉴权头的 Fake（#21）。
-        val sessionManager = com.example.pulsar.session.SessionManager(
+        // 会话统一走真 SessionManager，只替换存储 / API 的 Fake（#21）。
+        val sessionManager = SessionManager(
             sessions,
             FakeApiFactory(api),
             this,
-            authorization
         )
+        lastSessionManager = sessionManager
         return JellyfinViewModel(
             sessionManager = sessionManager,
             dispatcher = StandardTestDispatcher(testScheduler),
@@ -2568,13 +2562,6 @@ class JellyfinViewModelTest {
 
     private class FakeApiFactory(private val api: JellyfinApi) : JellyfinApiFactory {
         override suspend fun create(serverUrl: String): JellyfinApi = api
-    }
-
-    private class FakeAuthorizationSink(initial: String? = null) : AuthorizationSink {
-        var value: String? = initial
-        override var activeAuthorization: String?
-            get() = value
-            set(value) { this.value = value }
     }
 
     private class FakeJellyfinApi(

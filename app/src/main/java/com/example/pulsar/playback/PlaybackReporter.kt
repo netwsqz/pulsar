@@ -1,14 +1,27 @@
 package com.example.pulsar.playback
 
 import android.util.Log
-import com.example.pulsar.SessionRepository
-import com.example.pulsar.data.jellyfin.JellyfinApi
-import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/**
+ * 上报通道的会话作用域出口（#22）：未登录或 API 未就绪时 [currentChannel] 返回 null。
+ *
+ * 生产实现是 [SessionPlaybackReportSource]（读 `SessionManager`）；测试只需要实现
+ * 这一个入口，不用再为了两条上报实现整套 Jellyfin API。
+ */
+interface PlaybackReportSource {
+    fun currentChannel(): PlaybackReportChannel?
+}
+
+/** 绑定当前会话的两条上报。令牌由实现内部按会话取，不经过调用方。 */
+interface PlaybackReportChannel {
+    suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long): Result<Unit>
+    suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long): Result<Unit>
+}
 
 /**
  * 把播放行为上报给 Jellyfin，让服务端的 `UserData` 真正记录播过什么。
@@ -19,12 +32,11 @@ import kotlinx.coroutines.sync.withLock
  * 2. **失败静默**：未登录、断网、会话过期都只记日志，不影响播放、不触发 goOffline。
  * 3. **不重复**：同一首歌只报一次开始；没报过开始的歌不报停止。
  *
- * 会话每次现读 [SessionRepository]（不缓存 token）：换账号/退出登录后自然失效。
+ * [reports] 每次现读会话通道（不缓存 token）：换账号/退出登录后自然失效。
  * 上报串行执行（[mutex]）：切歌时「停上一首」必须排在「开始下一首」之前。
  */
 class PlaybackReporter(
-    private val sessions: SessionRepository,
-    private val apiFactory: JellyfinApiFactory,
+    private val reports: PlaybackReportSource,
     private val scope: CoroutineScope,
 ) {
     private val mutex = Mutex()
@@ -38,11 +50,11 @@ class PlaybackReporter(
         scope.launch {
             mutex.withLock {
                 if (itemId == reportedItemId) return@withLock
-                val session = loadSession() ?: return@withLock
+                val channel = currentChannel() ?: return@withLock
                 // 只有确实拿得到会话才记为「已开始」：未登录期间播的歌不该在登录后补发停止。
                 reportedItemId = itemId
-                request("开始", itemId, positionMs, session) {
-                    it.reportPlaybackStarted(session.accessToken, itemId, positionTicks(positionMs))
+                request("开始", itemId, positionMs) {
+                    channel.reportPlaybackStarted(itemId, positionTicks(positionMs))
                 }
             }
         }
@@ -57,20 +69,19 @@ class PlaybackReporter(
             mutex.withLock {
                 val itemId = reportedItemId ?: return@withLock
                 reportedItemId = null
-                val session = loadSession() ?: return@withLock
-                request("停止", itemId, positionMs, session) {
-                    it.reportPlaybackStopped(session.accessToken, itemId, positionTicks(positionMs))
+                val channel = currentChannel() ?: return@withLock
+                request("停止", itemId, positionMs) {
+                    channel.reportPlaybackStopped(itemId, positionTicks(positionMs))
                 }
             }
         }
     }
 
-    private suspend fun loadSession(): com.example.pulsar.SavedSession? = try {
-        sessions.load()
-    } catch (error: CancellationException) {
-        throw error
+    /** 取当前会话的上报通道；读通道本身出意外也只记日志（铁律 2）。 */
+    private fun currentChannel(): PlaybackReportChannel? = try {
+        reports.currentChannel()
     } catch (error: Exception) {
-        Log.w(TAG, "读取会话失败，跳过上报（静默）", error)
+        Log.w(TAG, "读取上报通道失败，跳过上报（静默）", error)
         null
     }
 
@@ -78,11 +89,10 @@ class PlaybackReporter(
         action: String,
         itemId: String,
         positionMs: Long,
-        session: com.example.pulsar.SavedSession,
-        call: suspend (JellyfinApi) -> Result<Unit>
+        call: suspend () -> Result<Unit>
     ) {
         try {
-            val result = call(apiFactory.create(session.serverUrl))
+            val result = call()
             result.exceptionOrNull()?.let { error ->
                 Log.w(TAG, "上报${action}失败（静默）: item=$itemId pos=${positionMs}ms", error)
             }

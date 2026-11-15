@@ -38,7 +38,8 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 ### 鉴权与会话
 
 - **Token 只进 `Authorization` header**（`JellyfinUrlBuilder` 生成 MediaBrowser 格式），**绝不进 URL、日志或 UI**。该 builder 还负责 baseUrl 校验（HTTPS 或私网 HTTP）与路径段编码，返回 `JellyfinRequest(url, headers)`。
-- `PulsarApplication.activeAuthorization`（`@Volatile`，仅内存）是播放流与封面图共用的鉴权来源；`AuthHttpDataSourceFactory` 每次建数据源现读，重新登录不用重建播放器。
+- `SessionManager.authorizationHeader`（`@Volatile`，仅内存）是播放流与下载上游共用的鉴权来源；`AuthHttpDataSourceFactory` 每次建数据源现读，重新登录不用重建播放器。**没有第二份全局 `activeAuthorization` 缓存**（#22 已删）。
+- 同时要用会话与 API 的内部读方取 `SessionManager.currentConnection()` 的原子快照，**别分别读 `current` / `api` 再拼**（换会话的瞬间会拼出旧令牌 + 新 API）。
 - `SessionRepository`（DataStore）只存 token，**不存密码**；网络错误统一映射 `JellyfinError`；`execute {}` 把异常转 `Result.failure`，**`CancellationException` 一律重抛**。
 - **登录/会话过期必须清空曲库缓存与播放队列**（`JellyfinUiState.cleared()`），代次挡住过期协程。
 
@@ -62,7 +63,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 
 - **`PlaybackSession` 是播放 UI 的唯一门面**：界面只读 `PlaybackUiState`、只发 `PlaybackIntent`，不直接持有 `MediaController`。`PlaybackRemote` 是控制器接缝（生产 `MediaControllerPlaybackRemote`，测试 `FakePlaybackRemote`）。
 - 播放模式真相在 `PlaybackUiState.mode`，由 `PlaybackModeStore` 落盘。
-- `PlaybackReporter` 负责 `/Sessions/Playing` + `/Stopped`——**发现页的「最近/最常播放」完全依赖它**。铁律：异步不拖慢播放；失败静默且**不触发 `goOffline()`**；同一首只报一次开始、没报开始的不报停止（`Mutex` 串行）。
+- `PlaybackReporter` 负责 `/Sessions/Playing` + `/Stopped`——**发现页的「最近/最常播放」完全依赖它**。铁律：异步不拖慢播放；失败静默且**不触发 `goOffline()`**；同一首只报一次开始、没报开始的不报停止（`Mutex` 串行）。上报**不自己建数据源**：`PlaybackReporter` 只依赖窄接口 `PlaybackReportSource`，生产实现 `SessionPlaybackReportSource` 读 `SessionManager` 的当前会话 / API。
 - `LoudnessGainAudioSink`（回放增益，**只衰减不提升**）是拷贝型包装 sink，四个坑：①不能改 Media3 交来的 buffer；②`setAudioProcessors` 在 float 输出下会被静默丢掉；③交给 `DefaultAudioSink` 的缓冲必须声明**小端**；④每帧交**同一个**缓冲对象。
 - USB 独占在 `playback/usb/`，调研见 `docs/usb-exclusive-research.md`。等时泵跑专用线程；格式协商失败回退系统输出、不抛异常；暂停用**静音门**而非 stopStream（避免 EBUSY）。
 - USB 独占下系统音量无效，音量真源是 `UsbExclusivePreferences.volumePercent`；**前台音量键那条路才干活**（`MainActivity.dispatchKeyEvent` → `ADJUST_VOLUME`，传 ±1 档），MIUI 上 `VolumeProvider` 失效。接管条件是「USB 泵正在输出」不是独占开关；**音量算术只在服务一处**；DOWN 与 UP 同进同退（`lastDownConsumed`）。见 `docs/usb-volume-key-interception.md`。

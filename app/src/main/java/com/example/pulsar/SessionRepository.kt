@@ -5,7 +5,3 @@ interface SessionRepository {
     suspend fun save(session: SavedSession)
     suspend fun clear()
 }
-
-interface AuthorizationSink {
-    var activeAuthorization: String?
-}

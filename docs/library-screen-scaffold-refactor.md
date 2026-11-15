@@ -160,6 +160,17 @@ data class DetailActions(
 
 **验收**：歌曲页错误分支出现；其余行为不变。
 
+> **已完成 2026-11-16（#25）**：两页都改用 `LibraryScreenScaffold`，三态判断统一走 `libraryLoadState`。
+> 歌曲页错误态的重试接新增的 `JellyfinViewModel.loadTracks()`（`LibraryCache` 新增 `Tracks` 槽，
+> 进歌曲分区时幂等补拉；失败保持 `tracks == null` 并给错误文案）。`LibraryScreenScaffold` 增加可选
+> `actions` 槽：歌曲页的「选择手机里的音频」不属于三态，空库 / 加载失败时仍要能点。
+> **布局变化**：歌曲页头部（标题 / 离线提示 / 本地音频按钮）从滚动列表项变成固定头（与专辑 /
+> 播放列表 / 艺术家页一致），按钮移入 `actions` 槽常驻；标题上移、间距按 scaffold 统一。真机看是否可接受。
+> **已知落差**：主页面门槛是「`tracks == null` 且不在恢复会话 → 登录页」，所以歌曲页真正渲染时
+> `library.tracks` 几乎总是非 null——错误分支在结构上补齐了，但按现在的流程真机触发不到；
+> 要让它在真机上出现，得改「恢复失败回登录页」的产品决策（另开工单，不在 #25）。
+> 全量 947 项 0 失败；`assembleDebug` 通过；真机验收待用户确认。
+
 ### Step 3 — 拆详情头，迁详情页
 
 1. `MediaDetailScaffold` 的 header 部分抽成 `DetailHeader`；`showActions` 改成 `actions: DetailActions?`。

@@ -26,6 +26,8 @@ import com.example.pulsar.ui.theme.Dimens
  * 页面差异留在参数里：
  * - [loading] 是骨架槽：专辑页是网格骨架、播放列表页是行骨架，形状本就不同；
  * - [contentAlignment] 保持改前两页的对齐差异（专辑页居顶、播放列表页居中）；
+ * - [actions] 是标题下的页面级操作区，**不参与三态**——歌曲页的「选择手机里的音频」
+ *   在曲库为空 / 加载失败时也要能点（本地文件不依赖服务器）；
  * - [content] 是内容槽：网格 / 列表仍由调用方自己摆，本骨架只管外框。
  *
  * 不包含顶部玻璃岛与底部播放条——那些由 `MusicLibraryScreen` 悬浮在页面之上。
@@ -36,6 +38,7 @@ internal fun LibraryScreenScaffold(
     loadState: LoadState,
     modifier: Modifier = Modifier,
     offlineNotice: String? = null,
+    actions: (@Composable () -> Unit)? = null,
     contentAlignment: Alignment = Alignment.TopStart,
     loading: @Composable () -> Unit,
     content: @Composable () -> Unit
@@ -55,6 +58,7 @@ internal fun LibraryScreenScaffold(
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }
+        actions?.invoke()
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = contentAlignment) {
             when (loadState) {
                 LoadState.Loading -> loading()

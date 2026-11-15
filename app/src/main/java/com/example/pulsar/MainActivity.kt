@@ -442,42 +442,39 @@ private fun LibraryGroupsContent(
     modifier: Modifier = Modifier
 ) {
     val groups = remember(albums) { libraryGroups(albums.orEmpty()) }
-    Column(
-        modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars)
-            .padding(horizontal = Dimens.SpaceMedium),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
+    LibraryScreenScaffold(
+        title = title,
+        loadState = libraryLoadState(
+            // 分组由专辑现算：没拿到专辑 = null（骨架 / 错误），拿到了但分不出组 = 空态。
+            items = if (albums == null) null else groups,
+            isLoading = session.isLoading,
+            errorMessage = session.errorMessage,
+            emptyMessage = if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无艺术家",
+            onRetry = onRetry
+        ),
+        offlineNotice = offlineNotice,
+        // 改前这一页的空态 / 错误态是竖直居中的，保持一致。
+        contentAlignment = Alignment.Center,
+        modifier = modifier,
+        loading = {
+            // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
+            TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
+        }
     ) {
-        Text(
-            title,
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
-        )
-        offlineNotice?.let { notice -> OfflineNoticeText(notice) }
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                // 骨架要撑满：外层 Box 是居中对齐，wrap-content 的骨架会竖直居中，加载完从顶部开始就跳了。
-                albums == null && session.isLoading -> TrackListSkeleton(count = 8, modifier = Modifier.fillMaxSize())
-                albums == null && session.errorMessage != null -> ErrorState(session.errorMessage, onRetry = onRetry)
-                groups.isEmpty() -> EmptyState(
-                    if (offlineNotice != null) OfflineEmpty.Albums.message() else "暂无艺术家"
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+        ) {
+            itemsIndexed(groups, key = { _, g -> g.name }) { index, group ->
+                SearchResultRow(
+                    cover = group.albums.firstOrNull()?.let(coverFor),
+                    title = group.name,
+                    subtitle = "${group.albums.size} 张专辑",
+                    onClick = { onOpenGroup(group.name) },
+                    showDivider = index != groups.lastIndex,
+                    modifier = Modifier.fillMaxWidth()
                 )
-                else -> LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
-                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
-                ) {
-                    itemsIndexed(groups, key = { _, g -> g.name }) { index, group ->
-                        SearchResultRow(
-                            cover = group.albums.firstOrNull()?.let(coverFor),
-                            title = group.name,
-                            subtitle = "${group.albums.size} 张专辑",
-                            onClick = { onOpenGroup(group.name) },
-                            showDivider = index != groups.lastIndex,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    }
-                }
             }
         }
     }
@@ -1085,6 +1082,7 @@ private fun MusicLibraryScreen(
                     )
                     LibrarySection.Tracks -> TracksContent(
                         library = library,
+                        session = session,
                         tracks = tracks,
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
@@ -1094,6 +1092,7 @@ private fun MusicLibraryScreen(
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         currentTrackId = currentTrack?.id,
+                        onRetry = viewModel::loadTracks,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Albums -> AlbumsContent(
@@ -1671,18 +1670,19 @@ private fun glassChipBorder() = BorderStroke(
 )
 
 /**
- * 歌曲列表页：标题 + 「选择手机里的音频」入口 + 三态（骨架 / 空 / 内容）。
+ * 歌曲列表页：标题 + 「选择手机里的音频」入口 + 三态（骨架 / 错误 / 空 / 内容）。
  *
- * 只收自己需要的 slice（#14）：[library] 只用来判断「曲库拉到了没有」（骨架 vs 空态），
+ * 只收自己需要的 slice（#14）：[library] 判断「曲库拉到了没有」（骨架 / 错误 vs 空态），
  * [tracks] 是调用方按离线策略滤好后的可见列表——两者缺一不可：离线且一首都没下载时
  * `library.tracks` 非 null 但 `tracks` 为空，要给空态而不是骨架。
  *
- * 本页**没有错误分支**是已知缺口（`TracksContent` 漏了 error，spec §3），由页面骨架收口
- * 的工单（#25）补；这次只换 slice，不改行为。
+ * 三态判断交给 [libraryLoadState]（#25）：错误分支以前是漏的——拉失败时曲目表一直是 null，
+ * 界面永远停在骨架 / 空态上，看起来像「你真的没有歌」。[onRetry] 走 [JellyfinViewModel.loadTracks]。
  */
 @Composable
 private fun TracksContent(
     library: LibraryState,
+    session: SessionState,
     tracks: List<Track>,
     title: String,
     offlineNotice: String?,
@@ -1692,53 +1692,53 @@ private fun TracksContent(
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     currentTrackId: String?,
+    onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    LazyColumn(
-        // 顶部让出状态栏 + 玻璃岛，底部让出悬浮播放条；状态栏随设备动态，玻璃岛用固定占位。
-        Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.statusBars),
-        contentPadding = PaddingValues(
-            start = Dimens.SpaceMedium,
-            end = Dimens.SpaceMedium,
-            top = Dimens.GlassIslandTopSpacing,
-            bottom = Dimens.BottomContentInset
+    LibraryScreenScaffold(
+        title = title,
+        loadState = libraryLoadState(
+            // 先把「曲库拉到没有」和「可见列表空不空」分开：前者决定骨架/错误，后者决定空态
+            // （离线过滤后可能一首都不剩，但曲库本身是拉到了的）。
+            items = if (library.tracks == null) null else tracks,
+            // 恢复会话的极短窗口里 isLoading 还没置上：按「正在恢复」也画骨架，别闪一下空态。
+            isLoading = session.isLoading || session.isRestoring,
+            errorMessage = session.errorMessage,
+            // 离线空态与在线空态不能互相顶替：用户要能分清「曲库空了」和「离线只能看下载」。
+            emptyMessage = if (offlineNotice != null) OfflineEmpty.Tracks.message() else "暂无音乐",
+            onRetry = onRetry
         ),
-        verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
-    ) {
-        // 标题和顶部页签同一出处（TopLevelSections），不再写「你的音乐」（spec §11）。
-        item { Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = Dimens.SpaceSmall)) }
-        offlineNotice?.let { notice ->
-            item { OfflineNoticeText(notice) }
-        }
-        item {
+        offlineNotice = offlineNotice,
+        modifier = modifier,
+        // 「选择手机里的音频」是页面级入口，不属于三态：加载中 / 失败 / 空库时都要能点。
+        actions = {
             Button(
                 onClick = onLocalAudio,
                 Modifier.fillMaxWidth().padding(top = Dimens.SpaceTiny, bottom = Dimens.SpaceSmall),
                 enabled = playback.isConnected
             ) { Text("选择手机里的音频") }
+        },
+        loading = {
+            TrackListSkeleton(count = 7, trailingSpace = true, modifier = Modifier.fillMaxSize())
         }
-        // 会话还没恢复完用灰色波浪；已连上但曲库为空才是"暂无音乐"。
-        // 离线且一首都没下载：专用空态（「曲库空了」和「离线只能看下载」是两回事）。
-        if (library.tracks == null) item { TrackListSkeleton(count = 7, trailingSpace = true) } else if (tracks.isEmpty()) {
-            item {
-                EmptyState(
-                    if (offlineNotice != null) OfflineEmpty.Tracks.message() else "暂无音乐"
+    ) {
+        LazyColumn(
+            Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
+        ) {
+            itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
+                TrackRow(
+                    track = track,
+                    cover = coverFor(track),
+                    onClick = { onPlayTrack(tracks, track.id) },
+                    onAddToQueue = { onAddToQueue(track) },
+                    showDivider = index != tracks.lastIndex,
+                    isCurrent = currentTrackId == track.id,
+                    isPlaying = playback.isPlaying,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
-        }
-        itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
-            TrackRow(
-                track = track,
-                cover = coverFor(track),
-                onClick = { onPlayTrack(tracks, track.id) },
-                onAddToQueue = { onAddToQueue(track) },
-                showDivider = index != tracks.lastIndex,
-                isCurrent = currentTrackId == track.id,
-                isPlaying = playback.isPlaying,
-                modifier = Modifier.fillMaxWidth()
-            )
         }
     }
 }

@@ -100,6 +100,7 @@ internal class LibraryCache(
     }
 
     private enum class LibrarySlot {
+        Tracks,
         Albums,
         DiscoverAlbums,
         RecentlyPlayed,
@@ -153,7 +154,8 @@ internal class LibraryCache(
 
     /**
      * 进入导航分区。界面不再知道加载方法名、幂等守卫与会话是否就绪（#12）。
-     * 歌曲页的曲目来自登录/恢复时拉的 `tracks`；搜索、设置、已下载、QQ 导入各有自己的入口。
+     * 歌曲页的曲目平时在登录/恢复时就已经拉好；[loadTracks] 是「没拿到时」的补拉入口
+     * （失败后的重试按钮也走它），幂等守卫保证已在时进页不再发请求。
      */
     fun onSectionEntered(section: LibrarySection) {
         when (section) {
@@ -169,8 +171,8 @@ internal class LibraryCache(
             LibrarySection.Playlists -> loadPlaylists()
             is LibrarySection.AlbumDetail -> loadAlbumTracks(section.album)
             is LibrarySection.PlaylistDetail -> loadPlaylistTracks(section.playlist)
+            LibrarySection.Tracks -> loadTracks()
             // 已下载页需要曲库 tracks + 专辑分组，由 ViewModel 在 enterSection 里拦截，到不了这里。
-            LibrarySection.Tracks,
             LibrarySection.Search,
             LibrarySection.Settings,
             LibrarySection.CachedCopies,
@@ -210,6 +212,21 @@ internal class LibraryCache(
     }
 
     // ── 各节加载 ────────────────────────────────────────────────
+
+    /**
+     * 全部音乐（#25）。平时登录 / 恢复会话时已经拉好，这里**幂等**：已有曲目就直接返回；
+     * `tracks == null`（曲目没拿到）时才发请求——歌曲页的错误态「重新加载」也走它。
+     *
+     * 失败语义同其他节：字段保持 null、给出错误文案，下次进页 / 点重试会再拉。
+     */
+    fun loadTracks() {
+        if (library.tracks != null) return
+        loadLibrary(
+            slot = LibrarySlot.Tracks,
+            request = { it.api.getMusicItems() },
+            apply = { lib, tracks -> lib.copy(tracks = tracks) },
+        )
+    }
 
     /** 专辑列表。**幂等**：已加载就不再请求；[force] 给发现页「换一批」用。 */
     fun loadAlbums(force: Boolean = false) {

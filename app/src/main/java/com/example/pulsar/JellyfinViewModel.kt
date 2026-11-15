@@ -551,6 +551,9 @@ class JellyfinViewModel(
 
     // ── 曲库加载：全部委托 LibraryCache（#12）；下面这些方法只给「失败重试」按钮用 ──
 
+    /** 歌曲页「重新加载」：曲目没拿到时补拉一次（已有曲目时是空操作）。 */
+    fun loadTracks() = libraryCache.loadTracks()
+
     fun loadAlbums() = libraryCache.loadAlbums()
 
     fun loadDiscoverAlbums() = libraryCache.loadDiscoverAlbums()

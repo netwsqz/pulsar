@@ -598,6 +598,59 @@ class LibraryCacheTest {
         assertEquals(emptyList<String>(), api.searchQueries)
     }
 
+    // ── 歌曲页：曲目表自己的重载入口（#25） ──────────────────────
+
+    @Test
+    fun `歌曲分区没曲目时会拉曲目表`() = runTest {
+        val api = FakeApi()
+        api.musicItemsResult = Result.success(listOf(track))
+        val host = FakeHost(connection(api))
+        val cache = newCache(host)
+
+        cache.onSectionEntered(LibrarySection.Tracks)
+        advanceUntilIdle()
+
+        assertEquals(listOf(track), host.state().library.tracks)
+        assertEquals(1, api.musicItemsCalls)
+    }
+
+    @Test
+    fun `曲目已在时进歌曲分区不重复请求`() = runTest {
+        val api = FakeApi()
+        api.musicItemsResult = Result.success(listOf(track))
+        val host = FakeHost(connection(api))
+        val cache = newCache(host)
+
+        cache.onSectionEntered(LibrarySection.Tracks)
+        advanceUntilIdle()
+        cache.onSectionEntered(LibrarySection.Tracks)
+        advanceUntilIdle()
+
+        assertEquals(1, api.musicItemsCalls)
+    }
+
+    @Test
+    fun `歌曲页重载失败保持 null 并给错误，重试能成功`() = runTest {
+        val api = FakeApi()
+        api.musicItemsResult = Result.failure(JellyfinError.Http(500))
+        val host = FakeHost(connection(api))
+        val cache = newCache(host)
+
+        // 界面上的「重新加载」按钮直接调它，不依赖「再进一次分区」。
+        cache.loadTracks()
+        advanceUntilIdle()
+        assertNull(host.state().library.tracks)
+        assertEquals("服务器请求失败（500）", host.state().session.errorMessage)
+
+        api.musicItemsResult = Result.success(listOf(track))
+        cache.loadTracks()
+        advanceUntilIdle()
+
+        assertEquals(listOf(track), host.state().library.tracks)
+        assertNull(host.state().session.errorMessage)
+        assertEquals(2, api.musicItemsCalls)
+    }
+
     // ── 会话切换 ───────────────────────────────────────────────
 
     @Test
@@ -742,6 +795,8 @@ class LibraryCacheTest {
         var recentlyPlayedResult: Result<List<Track>> = Result.success(emptyList())
         var mostPlayedResult: Result<List<Track>> = Result.success(emptyList())
         var recentlyAddedResult: Result<List<Album>> = Result.success(emptyList())
+        var musicItemsResult: Result<List<Track>> = Result.success(emptyList())
+        var musicItemsCalls = 0
 
         override suspend fun getAlbums(): Result<List<Album>> {
             albumCalls++
@@ -797,7 +852,7 @@ class LibraryCacheTest {
         }
 
         override suspend fun getMusicItems() =
-            Result.success(emptyList<Track>())
+            musicItemsResult.also { musicItemsCalls++ }
 
         override suspend fun getLyrics(trackId: String) = Result.success(Lyrics.NONE)
         override fun streamUrl(mediaId: String) = "stream/$mediaId"

@@ -51,8 +51,13 @@ internal sealed interface PlaybackIntent {
     /** 打开手机里的本地音频（SAF `content://`）：单曲 set + prepare + play。 */
     data class PlayLocalFile(val uri: Uri) : PlaybackIntent
 
-    /** 点播放队列里的某一行：跳到该索引并开始播放。 */
-    data class PlayQueueItem(val index: Int) : PlaybackIntent
+    /**
+     * 点播放队列里的某一行：跳到该曲目并开始播放。
+     *
+     * 收 **媒体 id** 而不是界面索引：拖拽暂态期间界面顺序可能领先播放器一轮，
+     * 索引会对不上（#28）。会话自己按快照里的队列解析位置。
+     */
+    data class PlayQueueItem(val mediaId: String) : PlaybackIntent
 
     /** 添加到播放队列：插在当前曲目之后；队列为空时直接开始播放。 */
     data class AddToQueue(val track: Track) : PlaybackIntent
@@ -227,7 +232,7 @@ internal class PlaybackSession(
         return when (intent) {
             is PlaybackIntent.Play -> play(intent.tracks, intent.startTrackId)
             is PlaybackIntent.PlayLocalFile -> playLocalFile(intent.uri)
-            is PlaybackIntent.PlayQueueItem -> playQueueItem(intent.index)
+            is PlaybackIntent.PlayQueueItem -> playQueueItem(intent.mediaId)
             is PlaybackIntent.AddToQueue -> addToQueue(intent.track)
             is PlaybackIntent.RemoveFromQueue -> removeFromQueue(intent.ids)
             is PlaybackIntent.Reorder -> reorder(intent.ordered)
@@ -387,8 +392,12 @@ internal class PlaybackSession(
         return true
     }
 
-    private fun playQueueItem(index: Int): Boolean {
-        if (!remote.snapshot().isConnected) return false
+    /** 点队列行：按媒体 id 找到播放器队列里的位置；曲目已不在队列里时不动作。 */
+    private fun playQueueItem(mediaId: String): Boolean {
+        val snapshot = remote.snapshot()
+        if (!snapshot.isConnected) return false
+        val index = snapshot.queue.indexOfFirst { it.id == mediaId }
+        if (index < 0) return false
         remote.seekToDefaultPosition(index)
         remote.play()
         return true

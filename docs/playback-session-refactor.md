@@ -1,7 +1,8 @@
 # PlaybackSession 重构执行计划
 
 > 状态：**已落地（2026-11-09），待真机确认**。对应 #1 / #2 / #3，三张票代码完成、单测全绿、
-> 已本地提交。本节保留决策历史；「队列单一真相」拆到了 #28。本文是 candidate 1 的执行规格，不是 ADR。
+> 已本地提交。本节保留决策历史；「队列单一真相」拆到了 #28（2026-11-17 代码完成，见 §7 后的
+> 「#28 落地说明」）。本文是 candidate 1 的执行规格，不是 ADR。
 > 默认决策取自架构评审的推荐答案；每一步开工前可以改，改了就更新本文。
 > `PlaybackSession` / `PlaybackRemote` 已写进 `CONTEXT.md`。
 
@@ -43,7 +44,7 @@
 
 > **2026-11-09 注**：本节是开工前的草图，**落地后与草图有出入，以代码为准**。已知差异：
 > - `dispatch(intent)` 实际返回 `Boolean`（界面用它判断这次点击有没有被接住），不是 `Unit`；
-> - `PlaybackIntent` 多了 `PlayLocalFile(uri)`、`PlayQueueItem(index)`、`AdjustVolume`、`SetUsbExclusive`、`SetUsbVolume`、`SetSilenceSkip`；
+> - `PlaybackIntent` 多了 `PlayLocalFile(uri)`、`PlayQueueItem(mediaId)`（#28 起按媒体 id，不再按索引）、`AdjustVolume`、`SetUsbExclusive`、`SetUsbVolume`、`SetSilenceSkip`；
 > - `PlaybackUiState` 多了 `currentMediaItem`（迷你条/全屏页要拿它画封面）；
 > - `PlaybackEvent` 有四个变体：`Message` / `Unplayable` / `PlaybackQueuePrepared` / `VolumeApplied`；
 > - `PlaybackModeStore` 是后加的第五个文件，负责播放模式落盘（DataStore 键 `playback_mode`）。
@@ -401,7 +402,7 @@ grep 确认 UI 不再直接写 MediaController，更新 CLAUDE.md 播放章节�
 | `PlaybackRemote` 包得太宽，变成另一个浅 interface | 提取后只是多一层转发 | 只暴露 session 真正需要的动作；`snapshot()` 一次拿状态，不逐个 getter |
 | 500ms 轮询迁进 module 后，state 更新频率仍让主界面重组 | 性能不回退但也没改善 | `StateFlow` + 局部收集；`playerDockHeight` 的 State 模式保留；后续可拆 `position` 单独 flow |
 | `playbackMode` 进 module 但仍随 composition 重建 | 转屏仍重置 | Step 4 评估 Activity 级/ViewModel 持有；若不做，明确写进文档 |
-| 队列本地副本（迷你条 / 全屏页）仍在 | 三方真相没有完全消除 | Step 3 先保留拖拽本地副本，只把回写统一到 `Reorder`；单一真相另开 ticket |
+| 队列本地副本（迷你条 / 全屏页）仍在 | 三方真相没有完全消除 | Step 3 先保留拖拽本地副本，只把回写统一到 `Reorder`；单一真相另开 ticket（#28 已解决，见下） |
 | 离线 gate 注入 module | 播放模块依赖 ViewModel 语义 | 用 `PlaybackGate` port，生产适配器只是两个方法引用；测试用 Fake |
 | `MediaController` 的 listener 线程 | state 更新线程不安全 | 所有 state 写入走 session 的 scope；adapter 只做转发 |
 
@@ -410,6 +411,22 @@ grep 确认 UI 不再直接写 MediaController，更新 CLAUDE.md 播放章节�
 2. `playbackMode` 是否要跨进程死亡保留（DataStore），还是只要求跨转屏？
 3. 队列单一真相是否要在 Step 3 一起做，还是另开 ticket？
 4. 是否接受 `PlaybackUiState` 里把 `UsbOutputState` 嵌套（推荐），还是继续平铺 17 个字段？
+
+### #28 落地说明（2026-11-17）
+
+队列真相仍是 `PlaybackUiState.queue`。两个队列面板不再各留一份 `var queue`：
+
+- 迷你条与全屏页**共用一个** `QueueDragState`（`app/src/main/java/com/example/pulsar/ui/components/QueueDragState.kt`），
+  由 `MusicLibraryScreen` 持有并下发。
+- 暂态只存 **id 顺序**；`applyQueueOrder`（`playback/PlaybackQueueOps.kt`）把会话快照按暂态顺序重排，
+  曲目对象（含 `isCurrent`）始终取会话快照——拖拽期间切歌，两处「正在播」同时动。
+- 松手发 `Reorder`；暂态保留到**会话队列顺序追上暂态**（`LaunchedEffect(playback.queue)` →
+  `onSessionQueueChanged`）才释放——中间切歌 / 增删引起的无关变化不会让它提前闪回旧顺序。
+  回写没被接住时立刻 `cancel()`；另有一道 1.6s 超时兜底（`QUEUE_DRAG_SETTLE_TIMEOUT_MS`），
+  防播放器一直不接受时面板永久停在没生效的顺序上。两个面板共用的松手入口是 `QueueDragState.drop`。
+- 队列行点击改按媒体 id（`PlayQueueItem(mediaId)`），删除本来就走 id；拖拽暂态期间不再拿界面索引去对播放器。
+- 纯逻辑测试：`PlaybackQueueOpsTest`（`applyQueueOrder`）、`QueueDragStateTest`；会话侧新增
+  `PlayQueueItem("c")` 与「曲目已不在队列里」两项。真机项：两个队列面板拖拽 / 点行 / 删除各走一遍。
 
 ## 8. 真机验收清单
 

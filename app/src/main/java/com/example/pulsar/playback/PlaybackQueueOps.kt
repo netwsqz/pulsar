@@ -1,5 +1,7 @@
 package com.example.pulsar.playback
 
+import com.example.pulsar.QueueTrack
+
 /**
  * 「添加到播放队列」的插入位置：当前曲目之后。
  *
@@ -54,4 +56,33 @@ internal fun applyOrderToPositions(
         moves += from to insertAt
     }
     return moves
+}
+
+/**
+ * 按 [order] 的 id 顺序排列 [queue]（队列单一真相，issue #28）。
+ *
+ * **曲目数据一律取自 [queue]**：拖拽暂态只决定顺序，标题、专辑、`isCurrent` 等字段永远是
+ * 会话快照的最新值——拖拽期间切歌，两处的「正在播」标记也会同时移动。
+ *
+ * - [order] 为 `null`（没有拖拽暂态）时原样返回 [queue]，不做任何拷贝；
+ * - [order] 里已不在队列中的 id（拖拽期间被删）跳过；
+ * - 队列里不在 [order] 中的曲目（拖拽期间新增）按会话顺序补在末尾，绝不丢行；
+ * - [order] 里的重复 id 只保留第一次。
+ */
+internal fun applyQueueOrder(queue: List<QueueTrack>, order: List<String>?): List<QueueTrack> {
+    if (order == null) return queue
+    val byId = queue.associateBy { it.id }
+    val seen = HashSet<String>(order.size)
+    val ordered = ArrayList<QueueTrack>(queue.size)
+    for (id in order) {
+        val track = byId[id] ?: continue
+        if (seen.add(id)) ordered += track
+    }
+    for (track in queue) {
+        if (track.id !in seen) {
+            seen += track.id
+            ordered += track
+        }
+    }
+    return ordered
 }

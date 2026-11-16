@@ -413,6 +413,7 @@ class PlaybackSessionTest {
     @Test
     fun `播放控制意图全部转发给播放器`() = runTest {
         remote.snapshot = connected(isPlaying = true)
+            .copy(queue = listOf(queueTrack("a"), queueTrack("b"), queueTrack("c")))
         val session = newSession(FakePlaybackGate())
         remote.connect()
 
@@ -420,7 +421,7 @@ class PlaybackSessionTest {
         session.dispatch(PlaybackIntent.SeekTo(12_000L))
         session.dispatch(PlaybackIntent.Next)
         session.dispatch(PlaybackIntent.Previous)
-        session.dispatch(PlaybackIntent.PlayQueueItem(2))
+        session.dispatch(PlaybackIntent.PlayQueueItem("c"))
 
         assertEquals(1, remote.pauseCalls)
         assertEquals(listOf(12_000L), remote.seekToCalls)
@@ -428,6 +429,19 @@ class PlaybackSessionTest {
         assertEquals(1, remote.previousCalls)
         assertEquals(listOf(2), remote.seekToDefaultPositionCalls)
         assertEquals(1, remote.playCalls)
+    }
+
+    @Test
+    fun `点队列行按媒体 id 定位 曲目已不在队列里就不动作`() = runTest {
+        remote.snapshot = connected().copy(queue = listOf(queueTrack("a"), queueTrack("b")))
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+
+        val accepted = session.dispatch(PlaybackIntent.PlayQueueItem("gone"))
+
+        assertFalse(accepted)
+        assertTrue(remote.seekToDefaultPositionCalls.isEmpty())
+        assertEquals(0, remote.playCalls)
     }
 
     // ── USB 命令 ────────────────────────────────────────────────────────────

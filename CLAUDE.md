@@ -64,6 +64,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 ### 播放
 
 - **`PlaybackSession` 是播放 UI 的唯一门面**：界面只读 `PlaybackUiState`、只发 `PlaybackIntent`，不直接持有 `MediaController`。`PlaybackRemote` 是控制器接缝（生产 `MediaControllerPlaybackRemote`，测试 `FakePlaybackRemote`）。
+- **队列只有一个真相：`PlaybackUiState.queue`**（#28）。迷你条队列面板与全屏页队列页**共用同一个 `QueueDragState`**（`ui/components`，由 `MusicLibraryScreen` 持有）：平时直接显示会话队列，拖拽中只暂存 id 顺序、曲目数据（含 `isCurrent`）永远取会话快照；松手发 `Reorder`，暂态保留到**会话队列顺序追上暂态**才释放（否则会先闪回旧顺序），另有 1.6s 超时兜底。别再加各面板自己的 `var queue` 副本。队列行点击 / 删除按**媒体 id**走 `PlayQueueItem(mediaId)` / `RemoveFromQueue(ids)`，拖拽暂态期间索引对不上播放器。
 - 播放模式真相在 `PlaybackUiState.mode`，由 `PlaybackModeStore` 落盘。
 - `PlaybackReporter` 负责 `/Sessions/Playing` + `/Stopped`——**发现页的「最近/最常播放」完全依赖它**。铁律：异步不拖慢播放；失败静默且**不触发 `goOffline()`**；同一首只报一次开始、没报开始的不报停止（`Mutex` 串行）。上报**不自己建数据源**：`PlaybackReporter` 只依赖窄接口 `PlaybackReportSource`，生产实现 `SessionPlaybackReportSource` 读 `SessionManager.currentConnection()` 的会话作用域 API。
 - `LoudnessGainAudioSink`（回放增益，**只衰减不提升**）是拷贝型包装 sink，四个坑：①不能改 Media3 交来的 buffer；②`setAudioProcessors` 在 float 输出下会被静默丢掉；③交给 `DefaultAudioSink` 的缓冲必须声明**小端**；④每帧交**同一个**缓冲对象。

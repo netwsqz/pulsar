@@ -15,6 +15,8 @@ import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
 import com.example.pulsar.ui.components.MediaRowText
 import com.example.pulsar.ui.components.OfflineNoticeText
+import com.example.pulsar.ui.components.QUEUE_DRAG_SETTLE_TIMEOUT_MS
+import com.example.pulsar.ui.components.QueueDragState
 import com.example.pulsar.ui.components.SectionHeader
 import com.example.pulsar.ui.components.SectionHeaderStyle
 import com.example.pulsar.ui.components.PlayingBarCount
@@ -777,6 +779,16 @@ private fun MusicLibraryScreen(
         controllerFuture, playbackMediaItems, playbackGate, volumeKeys, modeStore
     )
     val playback by playbackSession.state.collectAsStateWithLifecycle()
+    // 队列的拖拽暂态（#28）：迷你条与全屏页**共用同一个实例**，队列真相仍是会话状态。
+    // 会话队列一变（轮询 / 切歌 / 增删 / 回写生效）就释放暂态，界面回到唯一真相。
+    val queueDrag = remember { QueueDragState() }
+    LaunchedEffect(playback.queue) { queueDrag.onSessionQueueChanged(playback.queue) }
+    // 超时兜底：回写一直没被播放器接受时放开暂态，别让面板停在没生效的顺序上。
+    LaunchedEffect(queueDrag.isPending) {
+        if (!queueDrag.isPending) return@LaunchedEffect
+        delay(QUEUE_DRAG_SETTLE_TIMEOUT_MS)
+        queueDrag.cancel()
+    }
     // 本地音频也走会话：界面不再直接 setMediaItem / prepare / play。
     val localAudioLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
@@ -1256,6 +1268,7 @@ private fun MusicLibraryScreen(
         MiniPlayerBar(
             backdrop = backdrop,
             playback = playback,
+            queueDrag = queueDrag,
             onPlaybackIntent = playbackSession::dispatch,
             playbackEvents = playbackSession.events,
             currentTrack = currentTrack,
@@ -1299,6 +1312,7 @@ private fun MusicLibraryScreen(
             key(nowPlayingSession) {
                 NowPlayingScreen(
                     playback = playback,
+                    queueDrag = queueDrag,
                     onPlaybackIntent = playbackSession::dispatch,
                     playbackEvents = playbackSession.events,
                     currentTrack = currentTrack,
@@ -4239,6 +4253,8 @@ private fun MiniPlayerCover(
 private fun MiniPlayerBar(
     backdrop: Backdrop,
     playback: PlaybackUiState,
+    /** 队列拖拽暂态：迷你条与全屏页共用同一个实例，队列真相仍是 [playback] 的 queue（#28）。 */
+    queueDrag: QueueDragState,
     onPlaybackIntent: (PlaybackIntent) -> Boolean,
     playbackEvents: SharedFlow<PlaybackEvent>,
     currentTrack: Track?,
@@ -4287,19 +4303,15 @@ private fun MiniPlayerBar(
     // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
     val currentQueueId = playback.queue.firstOrNull { it.isCurrent }?.id
     LaunchedEffect(currentQueueId) { seekHoldSec = null }
-    // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器；默认折叠避免歌多时占满面板。
+    // 播放队列：显示顺序 = 会话队列（唯一真相）+ 两个面板共用的拖拽暂态。
+    // 默认折叠避免歌多时占满面板；拖拽中只改暂态 id 顺序，松手才发 Reorder 交还会话。
     val hapticFeedback = LocalHapticFeedback.current
     var queueExpanded by remember { mutableStateOf(false) }
-    var isQueueDragging by remember { mutableStateOf(false) }
-    var queue by remember { mutableStateOf(playback.queue) }
+    val queue = queueDrag.displayed(playback.queue)
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        queue = queue.toMutableList().apply { add(to.index, removeAt(from.index)) }
+        queueDrag.move(from.index, to.index, playback.queue)
         hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
-    }
-    // 播放器快照变化时刷新本地队列；拖拽进行中不覆盖本地顺序，避免排序时列表跳动。
-    LaunchedEffect(playback.queue) {
-        if (!isQueueDragging) queue = playback.queue
     }
     // 输出信息（设备 + 采样率 + 位深），由 PlaybackService 写入诊断单例。
     val outputInfo by PlaybackDiagnostics.info.collectAsStateWithLifecycle()
@@ -4576,17 +4588,17 @@ private fun MiniPlayerBar(
                                                     else Color.Transparent,
                                                     RoundedCornerShape(8.dp)
                                                 )
-                                                // 长按整行拖动排序；松手后把新顺序同步给播放器。
+                                                // 长按整行拖动排序；拖拽只改共用暂态，松手把新顺序交回会话。
                                                 .longPressDraggableHandle(
-                                                    onDragStarted = { isQueueDragging = true },
+                                                    onDragStarted = { queueDrag.start(playback.queue) },
                                                     onDragStopped = {
-                                                        isQueueDragging = false
-                                                        onPlaybackIntent(PlaybackIntent.Reorder(queue))
+                                                        queueDrag.drop(playback.queue) { ordered ->
+                                                            onPlaybackIntent(PlaybackIntent.Reorder(ordered))
+                                                        }
                                                     }
                                                 )
                                                 .clickable(enabled = playback.isConnected) {
-                                                    val index = queue.indexOfFirst { it.id == item.id }
-                                                    onPlaybackIntent(PlaybackIntent.PlayQueueItem(index))
+                                                    onPlaybackIntent(PlaybackIntent.PlayQueueItem(item.id))
                                                 }
                                                 .padding(vertical = Dimens.SpaceTiny),
                                             verticalAlignment = Alignment.CenterVertically

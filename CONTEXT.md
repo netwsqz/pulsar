@@ -187,7 +187,7 @@ _Avoid_: 缓存、离线缓存、自动缓存（这套机制已经取消，见 A
 
 `playback/PlaybackSession.kt`。播放 UI 与 `PlaybackService` 之间唯一的门面：界面只读 `PlaybackUiState`（连接 / 进度 / 队列 / USB / 静音 / 播放模式），只发 `PlaybackIntent`（点歌、入队、删除、重排、seek、切模式、USB 命令）；MediaController 连接与监听、500ms 轮询、自定义命令解析全在会话内部。
 
-**队列真相在会话，不在两份 UI 本地副本**——迷你条与全屏页为拖拽保留的列表只是视觉副本，松手必须发 `Reorder` 让会话回写播放器。
+**队列真相在会话，不在两份 UI 本地副本**——迷你条队列面板与全屏页队列页共用一个 `QueueDragState`（`ui/components`），平时直接显示 `PlaybackUiState.queue`；拖拽期间它只暂存一份 **id 顺序**，曲目数据（含「正在播」标记）仍从会话快照现取，松手发 `Reorder` 交还会话。暂态在会话队列顺序追上它时释放（另有超时兜底），两个面板不各自留长期副本（#28）。
 
 _Avoid_: 播放器控制器（界面侧旧叫法）——界面不再直接拿 `MediaController`。
 

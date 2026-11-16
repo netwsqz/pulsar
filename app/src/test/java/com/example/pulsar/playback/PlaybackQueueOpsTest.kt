@@ -1,10 +1,22 @@
 package com.example.pulsar.playback
 
+import com.example.pulsar.QueueTrack
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** 「添加到播放队列」的插入位置算术。 */
+/** 队列的纯算术：插入位置、删除索引、重排映射、拖拽顺序合并。 */
 class PlaybackQueueOpsTest {
+
+    private fun queueTrack(id: String, current: Boolean = false) = QueueTrack(
+        id = id,
+        title = "歌曲-$id",
+        artist = "歌手",
+        album = "专辑",
+        imageTag = null,
+        isCurrent = current
+    )
 
     @Test
     fun `insertAfterCurrentIndex 插在当前项之后，末项之后追加到队尾，无当前项时插到队首`() {
@@ -63,6 +75,43 @@ class PlaybackQueueOpsTest {
         assertEquals(
             listOf(0 to 1),
             applyOrderToPositions(listOf("a", "b"), listOf("x", "b", "a"))
+        )
+    }
+
+    @Test
+    fun `applyQueueOrder 没有暂态时原样返回 有暂态时按 id 顺序重排`() {
+        val queue = listOf(queueTrack("a"), queueTrack("b", current = true), queueTrack("c"))
+
+        assertSame(queue, applyQueueOrder(queue, null))
+
+        val ordered = applyQueueOrder(queue, listOf("c", "a", "b"))
+        assertEquals(listOf("c", "a", "b"), ordered.map { it.id })
+        // 曲目对象取自会话快照：当前标记跟着曲目走，不会因为重排丢失。
+        assertTrue(ordered.first { it.id == "b" }.isCurrent)
+    }
+
+    @Test
+    fun `applyQueueOrder 跳过已删除的 id 并把新曲目按会话顺序补在末尾`() {
+        val queue = listOf(queueTrack("a"), queueTrack("b"), queueTrack("c"))
+
+        assertEquals(
+            listOf("c", "a", "b"),
+            applyQueueOrder(queue, listOf("c", "x")).map { it.id }
+        )
+        // 暂态里只有队首：其余按会话顺序补齐，绝不丢行。
+        assertEquals(
+            listOf("b", "a", "c"),
+            applyQueueOrder(queue, listOf("b")).map { it.id }
+        )
+    }
+
+    @Test
+    fun `applyQueueOrder 顺序里的重复 id 只保留一次`() {
+        val queue = listOf(queueTrack("a"), queueTrack("b"))
+
+        assertEquals(
+            listOf("b", "a"),
+            applyQueueOrder(queue, listOf("b", "a", "b")).map { it.id }
         )
     }
 }

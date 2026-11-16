@@ -123,6 +123,7 @@ import com.example.pulsar.playback.SEEK_SETTLE_TIMEOUT_MS
 import com.example.pulsar.playback.formatPosition
 import com.example.pulsar.playback.positionReachedSeekTarget
 import com.example.pulsar.ui.components.LiquidGlassSlider
+import com.example.pulsar.ui.components.QueueDragState
 import com.example.pulsar.ui.components.immersiveSliderColors
 import com.example.pulsar.ui.components.liquidGlass
 import com.example.pulsar.ui.theme.CoverGradient
@@ -214,12 +215,15 @@ internal fun indicatorStretch(pageOffsetFraction: Float, maxStretch: Float = 0.5
  * AnimatedVisibility 的 exit 滑出从松手位置无缝接管（dragOffset 停在松手处不归零，
  * 避免「弹回 0 再滑出」的双重动画）；未超阈值弹回原位。
  * 横滑与下滑互不干扰：Pager 在中区消费横向拖动，根 Box 的下滑手势只从未被消费的区域起效。
- * 队列数据用 [PlaybackUiState.queue]（QueueTrack 快照，isCurrent 标记当前行）。
+ * 队列数据用 [PlaybackUiState.queue]（QueueTrack 快照，isCurrent 标记当前行）；拖拽期间的
+ * 暂态顺序来自与迷你条共用的 [QueueDragState]，两者合起来就是队列页显示的内容（#28）。
  */
 @OptIn(androidx.compose.animation.ExperimentalSharedTransitionApi::class)
 @Composable
 internal fun NowPlayingScreen(
     playback: PlaybackUiState,
+    /** 队列拖拽暂态：与迷你条共用同一个实例，队列真相仍是 [playback] 的 queue（#28）。 */
+    queueDrag: QueueDragState,
     onPlaybackIntent: (PlaybackIntent) -> Boolean,
     playbackEvents: SharedFlow<PlaybackEvent>,
     currentTrack: Track?,
@@ -284,18 +288,14 @@ internal fun NowPlayingScreen(
     // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
     val currentQueueId = playback.queue.firstOrNull { it.isCurrent }?.id
     LaunchedEffect(currentQueueId) { seekHoldSec = null }
-    // 播放队列：本地顺序（拖拽时优先），松手才同步回播放器。队列页在第 3 页整页展示。
+    // 播放队列：显示顺序 = 会话队列（唯一真相）+ 与迷你条共用的拖拽暂态。
+    // 拖拽中只改暂态的 id 顺序，曲目数据与「正在播」标记永远取会话快照；松手才发 Reorder。
     val hapticFeedback = LocalHapticFeedback.current
-    var isQueueDragging by remember { mutableStateOf(false) }
-    var queue by remember { mutableStateOf(playback.queue) }
+    val queue = queueDrag.displayed(playback.queue)
     val queueListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(queueListState) { from, to ->
-        queue = queue.toMutableList().apply { add(to.index, removeAt(from.index)) }
+        queueDrag.move(from.index, to.index, playback.queue)
         hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
-    }
-    // 播放器快照变化时刷新本地队列；拖拽进行中不覆盖本地顺序，避免排序时列表跳动。
-    LaunchedEffect(playback.queue) {
-        if (!isQueueDragging) queue = playback.queue
     }
     // 三页横滑：歌词 / 封面 / 队列，默认落在封面页（第 2 页，index 1）。
     val pagerState = rememberPagerState(initialPage = 1, pageCount = { NOW_PLAYING_PAGE_COUNT })
@@ -481,18 +481,17 @@ internal fun NowPlayingScreen(
                         lazyListState = queueListState,
                         reorderableState = reorderableState,
                         enabled = playback.isConnected,
-                        onDragStarted = { isQueueDragging = true },
+                        onDragStarted = { queueDrag.start(playback.queue) },
                         onDragStopped = {
-                            isQueueDragging = false
-                            onPlaybackIntent(PlaybackIntent.Reorder(queue))
-                        },
-                        onSeekTo = { index ->
-                            onPlaybackIntent(PlaybackIntent.PlayQueueItem(index))
-                        },
-                        onRemove = { index ->
-                            queue.getOrNull(index)?.let { item ->
-                                onPlaybackIntent(PlaybackIntent.RemoveFromQueue(setOf(item.id)))
+                            queueDrag.drop(playback.queue) { ordered ->
+                                onPlaybackIntent(PlaybackIntent.Reorder(ordered))
                             }
+                        },
+                        onSeekTo = { mediaId ->
+                            onPlaybackIntent(PlaybackIntent.PlayQueueItem(mediaId))
+                        },
+                        onRemove = { mediaId ->
+                            onPlaybackIntent(PlaybackIntent.RemoveFromQueue(setOf(mediaId)))
                         },
                         modifier = Modifier.fillMaxSize()
                     )
@@ -927,7 +926,8 @@ private fun LyricsPage(
 /**
  * 队列页（横滑第 3 页）：原折叠区列表整页化——拖拽排序、点行跳播、逐行移除。
  * 排序交互沿用 longPressDraggableHandle；列表内容超屏时列表自己滚动。
- * 拖拽状态由调用方持有（排序期间暂停外部队列覆盖），经 [onDragStarted]/[onDragStopped] 回报。
+ * 拖拽状态由调用方持有（两个队列面板共用同一份暂态），经 [onDragStarted]/[onDragStopped] 回报。
+ * 行点击 / 移除都按**媒体 id** 回报：拖拽暂态期间列表顺序可能领先播放器一轮，索引不可靠（#28）。
  */
 @Composable
 private fun QueuePage(
@@ -937,8 +937,8 @@ private fun QueuePage(
     enabled: Boolean,
     onDragStarted: () -> Unit,
     onDragStopped: () -> Unit,
-    onSeekTo: (Int) -> Unit,
-    onRemove: (Int) -> Unit,
+    onSeekTo: (String) -> Unit,
+    onRemove: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     if (queue.isEmpty()) {
@@ -985,7 +985,7 @@ private fun QueuePage(
                             onDragStopped = onDragStopped
                         )
                         .clickable(enabled = enabled) {
-                            onSeekTo(queue.indexOfFirst { it.id == item.id })
+                            onSeekTo(item.id)
                         }
                         .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -1017,7 +1017,7 @@ private fun QueuePage(
                         )
                     }
                     IconButton(
-                        onClick = { onRemove(queue.indexOfFirst { it.id == item.id }) },
+                        onClick = { onRemove(item.id) },
                         enabled = enabled,
                         modifier = Modifier.size(40.dp)
                     ) {

@@ -54,7 +54,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -64,6 +63,8 @@ import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.search.SearchActions
+import com.example.pulsar.ui.components.SectionHeader
+import com.example.pulsar.ui.components.SectionHeaderStyle
 import com.example.pulsar.ui.components.SurfaceCard
 import com.example.pulsar.ui.theme.Dimens
 
@@ -97,9 +98,9 @@ internal fun DownloadServiceScreen(
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
         item(key = "title") {
-            Text(
+            SectionHeader(
                 "QQ 音乐导入",
-                style = MaterialTheme.typography.titleLarge,
+                style = SectionHeaderStyle.Page,
                 modifier = Modifier.padding(bottom = Dimens.SpaceSmall)
             )
         }
@@ -184,7 +185,7 @@ internal fun DownloadServiceScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    QQSectionHeader("下载任务")
+                    SectionHeader("下载任务", SectionHeaderStyle.Section)
                     TextButton(onClick = onRefreshJobs) { Text("刷新") }
                 }
             }
@@ -230,7 +231,7 @@ internal fun LazyListScope.qqSearchSection(
             )
         }
     }
-    item(key = "qqHeader") { QQSectionHeader("QQ 音乐") }
+    item(key = "qqHeader") { SectionHeader("QQ 音乐", SectionHeaderStyle.Section) }
     // 搜索期失败的常驻小字（服务不可用 / 凭证过期）：只有这一格，不参与整页错误。
     if (statusText != null) {
         item(key = "qqError") {
@@ -257,7 +258,7 @@ internal fun LazyListScope.qqSearchSection(
         }
     }
     if (state.songs.isNotEmpty()) {
-        item(key = "qqSongsHeader") { QQSectionHeader("歌曲") }
+        item(key = "qqSongsHeader") { SectionHeader("歌曲", SectionHeaderStyle.Section) }
         items(state.songs, key = { song -> "qq-song-${song.songMid}-${song.title}" }) { song ->
             QQSongRow(
                 song = song,
@@ -270,7 +271,7 @@ internal fun LazyListScope.qqSearchSection(
         }
     }
     if (state.albums.isNotEmpty()) {
-        item(key = "qqAlbumsHeader") { QQSectionHeader("专辑") }
+        item(key = "qqAlbumsHeader") { SectionHeader("专辑", SectionHeaderStyle.Section) }
         items(state.albums, key = { "qq-album-${it.albumMid}" }) { album ->
             QQAlbumRow(
                 album = album,
@@ -456,17 +457,6 @@ private fun CredentialRefreshRow(
             )
         }
     }
-}
-
-@Composable
-private fun QQSectionHeader(title: String) {
-    Text(
-        title,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = Dimens.SpaceSmall, start = Dimens.SpaceTiny)
-    )
 }
 
 /** 列表行左端的方形图标位（Auxio 列表项里的「封面」位）：QQ 结果没有图，用图标占位。

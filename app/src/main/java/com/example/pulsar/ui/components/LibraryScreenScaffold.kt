@@ -3,6 +3,7 @@ package com.example.pulsar.ui.components
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,7 +15,50 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import com.example.pulsar.ui.theme.Dimens
+
+internal enum class SectionHeaderStyle { Page, Discover, Section, Search }
+
+@Composable
+internal fun SectionHeader(
+    title: String,
+    style: SectionHeaderStyle,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null
+) {
+    when (style) {
+        SectionHeaderStyle.Page -> Text(
+            title,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = modifier
+        )
+        SectionHeaderStyle.Discover -> Row(
+            modifier = modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            action?.invoke()
+        }
+        SectionHeaderStyle.Section, SectionHeaderStyle.Search -> Text(
+            title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier.padding(
+                top = Dimens.SpaceSmall,
+                bottom = if (style == SectionHeaderStyle.Search) Dimens.SpaceTiny else 0.dp,
+                start = Dimens.SpaceTiny
+            )
+        )
+    }
+}
 
 /**
  * 列表页的统一外框（#24）：标题 + 离线提示 + 三态 + 内容槽。
@@ -52,9 +96,9 @@ internal fun LibraryScreenScaffold(
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
         // 标题行：与发现页同款层级；列表页没有「换一批」语义，只放标题。
-        Text(
+        SectionHeader(
             title,
-            style = MaterialTheme.typography.titleLarge,
+            style = SectionHeaderStyle.Page,
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.GlassIslandTopSpacing - Dimens.SpaceSmall)
         )
         offlineNotice?.let { notice -> OfflineNoticeText(notice) }

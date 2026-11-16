@@ -15,6 +15,8 @@ import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
 import com.example.pulsar.ui.components.MediaRowText
 import com.example.pulsar.ui.components.OfflineNoticeText
+import com.example.pulsar.ui.components.SectionHeader
+import com.example.pulsar.ui.components.SectionHeaderStyle
 import com.example.pulsar.ui.components.PlayingBarCount
 import com.example.pulsar.ui.components.PlayingBarGap
 import com.example.pulsar.ui.components.PlayingBarMaxHeight
@@ -1720,19 +1722,33 @@ private fun TracksContent(
             contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
             verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
         ) {
-            itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
-                TrackRow(
-                    track = track,
-                    cover = coverFor(track),
-                    onClick = { onPlayTrack(tracks, track.id) },
-                    onAddToQueue = { onAddToQueue(track) },
-                    showDivider = index != tracks.lastIndex,
-                    isCurrent = currentTrackId == track.id,
-                    isPlaying = playback.isPlaying,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+            trackList(tracks, currentTrackId, playback.isPlaying, coverFor, onPlayTrack, onAddToQueue)
         }
+    }
+}
+
+private fun LazyListScope.trackList(
+    tracks: List<Track>,
+    currentTrackId: String?,
+    isPlaying: Boolean,
+    coverFor: (Track) -> JellyfinRequest?,
+    onPlayTrack: (List<Track>, String) -> Unit,
+    onAddToQueue: (Track) -> Unit,
+    leadingNumbers: Boolean = false,
+    keyPrefix: String = ""
+) {
+    itemsIndexed(tracks, key = { _, track -> "$keyPrefix${track.id}" }) { index, track ->
+        TrackRow(
+            track = track,
+            cover = coverFor(track),
+            onClick = { onPlayTrack(tracks, track.id) },
+            onAddToQueue = { onAddToQueue(track) },
+            showDivider = index != tracks.lastIndex,
+            isCurrent = currentTrackId == track.id,
+            isPlaying = isPlaying,
+            leadingNumber = if (leadingNumbers) index + 1 else null,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 
@@ -2424,9 +2440,10 @@ private fun DiscoverContent(
         // 「换一批」放标题右侧（不再独占一整行），一次刷新每日推荐 + 随机专辑 + 三节历史；
         // 离线时不发网络请求（必然失败），只换每日推荐（ADR-0008）。
         item(key = "dailyHeader") {
-            DiscoverSectionHeader(
+            SectionHeader(
                 "每日推荐",
-                Modifier.padding(top = Dimens.SpaceSmall),
+                style = SectionHeaderStyle.Discover,
+                modifier = Modifier.padding(top = Dimens.SpaceSmall),
                 action = {
                     TextButton(
                         onClick = {
@@ -2473,24 +2490,14 @@ private fun DiscoverContent(
                 )
             }
         }
-        itemsIndexed(dailyPicks, key = { _, t -> "daily-${t.id}" }) { index, track ->
-            TrackRow(
-                track = track,
-                cover = trackCoverFor(track),
-                onClick = { onPlayTrack(dailyPicks, track.id) },
-                onAddToQueue = { onAddToQueue(track) },
-                showDivider = index != dailyPicks.lastIndex,
-                isCurrent = currentTrackId == track.id,
-                isPlaying = isPlaying,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
+        trackList(dailyPicks, currentTrackId, isPlaying, trackCoverFor, onPlayTrack, onAddToQueue, keyPrefix = "daily-")
         // ── 随机专辑（横滑封面墙）──────────────────────────────────
         // 换一批不在这里单独放按钮：整页只有一个「换一批」，在「每日推荐」标题右侧。
         item(key = "albumHeader") {
-            DiscoverSectionHeader(
+            SectionHeader(
                 "随机专辑",
-                Modifier.padding(top = Dimens.SpaceMidLarge)
+                style = SectionHeaderStyle.Discover,
+                modifier = Modifier.padding(top = Dimens.SpaceMidLarge)
             )
         }
         val albums = discoverAlbums
@@ -2599,27 +2606,6 @@ private fun DiscoverContent(
     }
 }
 
-/** 发现页 section 标题行（可选右侧动作），与库页标题同一层级。 */
-@Composable
-private fun DiscoverSectionHeader(
-    title: String,
-    modifier: Modifier = Modifier,
-    action: (@Composable () -> Unit)? = null
-) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f)
-        )
-        action?.invoke()
-    }
-}
-
 /**
  * 发现页的曲目横滑 section（最近播放 / 最常播放）：Auxio 的列表项语言压成竖卡——
  * 方形封面 + 歌名 + 歌手，点击直接播放（整条队列 = 这一节）。
@@ -2639,7 +2625,7 @@ private fun DiscoverTrackStrip(
     if (tracks != null && tracks.isEmpty()) return
     if (tracks == null && !showSkeleton) return
     Column {
-        DiscoverSectionHeader(title, Modifier.padding(top = Dimens.SpaceMidLarge))
+        SectionHeader(title, SectionHeaderStyle.Discover, Modifier.padding(top = Dimens.SpaceMidLarge))
         if (tracks == null) {
             DiscoverStripSkeleton()
             return@Column
@@ -2674,7 +2660,7 @@ private fun DiscoverAlbumStrip(
     if (albums != null && albums.isEmpty()) return
     if (albums == null && !showSkeleton) return
     Column {
-        DiscoverSectionHeader(title, Modifier.padding(top = Dimens.SpaceMidLarge))
+        SectionHeader(title, SectionHeaderStyle.Discover, Modifier.padding(top = Dimens.SpaceMidLarge))
         if (albums == null) {
             DiscoverStripSkeleton()
             return@Column
@@ -3211,19 +3197,10 @@ private fun AlbumDetailContent(
             trackList.isEmpty() -> item(key = "empty") {
                 EmptyState(if (isOfflineView) "离线 · 这张专辑没有下载的歌曲" else "该专辑暂无歌曲")
             }
-            else -> itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
-                TrackRow(
-                    track = track,
-                    cover = coverFor(track),
-                    onClick = { onPlayTrack(trackList, track.id) },
-                    onAddToQueue = { onAddToQueue(track) },
-                    showDivider = index != trackList.lastIndex,
-                    isCurrent = currentTrackId == track.id,
-                    isPlaying = isPlaying,
-                    leadingNumber = index + 1,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+            else -> trackList(
+                trackList, currentTrackId, isPlaying, coverFor, onPlayTrack, onAddToQueue,
+                leadingNumbers = true
+            )
         }
     }
 }
@@ -3420,22 +3397,14 @@ private fun SearchContent(
                         val library = view.library
                         if (library != null) {
                             if (library.tracks.isNotEmpty()) {
-                                item { SearchSectionHeader("歌曲") }
-                                itemsIndexed(library.tracks, key = { _, t -> t.id }) { index, track ->
-                                    TrackRow(
-                                        track = track,
-                                        cover = state.trackCover(track),
-                                        onClick = { actions.onPlayTrack(library.tracks, track.id) },
-                                        onAddToQueue = { actions.onAddToQueue(track) },
-                                        showDivider = index != library.tracks.lastIndex,
-                                        isCurrent = state.currentTrackId == track.id,
-                                        isPlaying = state.isPlaying,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
-                                }
+                                item { SectionHeader("歌曲", SectionHeaderStyle.Search) }
+                                trackList(
+                                    library.tracks, state.currentTrackId, state.isPlaying,
+                                    state.trackCover, actions.onPlayTrack, actions.onAddToQueue
+                                )
                             }
                             if (library.albums.isNotEmpty()) {
-                                item { SearchSectionHeader("专辑") }
+                                item { SectionHeader("专辑", SectionHeaderStyle.Search) }
                                 itemsIndexed(library.albums, key = { _, a -> a.id }) { index, album ->
                                     SearchResultRow(
                                         cover = state.albumCover(album),
@@ -3448,7 +3417,7 @@ private fun SearchContent(
                                 }
                             }
                             if (library.playlists.isNotEmpty()) {
-                                item { SearchSectionHeader("播放列表") }
+                                item { SectionHeader("播放列表", SectionHeaderStyle.Search) }
                                 itemsIndexed(library.playlists, key = { _, p -> p.id }) { index, playlist ->
                                     SearchResultRow(
                                         cover = state.playlistCover(playlist),
@@ -3478,18 +3447,6 @@ private fun SearchContent(
     }
     // 两个弹窗挂搜索页：只有这里能发起下载。状态仍由 QQDownloadViewModel 持有。
     QQSearchDialogs(state = state.qq, actions = actions)
-}
-
-/** 搜索结果分区标题（与 QQ 下载页的区块标题同语言：小号、半粗、次要色）。 */
-@Composable
-private fun SearchSectionHeader(title: String) {
-    Text(
-        title,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = Dimens.SpaceSmall, bottom = Dimens.SpaceTiny, start = Dimens.SpaceTiny)
-    )
 }
 
 /** 搜索结果里的专辑 / 播放列表行（艺术家列表也用它）：和 [TrackRow] 共用 [MediaRowLayout]
@@ -3604,18 +3561,7 @@ private fun PlaylistDetailContent(
                     if (offlineView) "离线 · 这个播放列表还没有下载的歌曲" else "该播放列表暂无歌曲"
                 )
             }
-            else -> itemsIndexed(trackList, key = { _, t -> t.id }) { index, track ->
-                TrackRow(
-                    track = track,
-                    cover = coverFor(track),
-                    onClick = { onPlayTrack(trackList, track.id) },
-                    onAddToQueue = { onAddToQueue(track) },
-                    showDivider = index != trackList.lastIndex,
-                    isCurrent = currentTrackId == track.id,
-                    isPlaying = isPlaying,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+            else -> trackList(trackList, currentTrackId, isPlaying, coverFor, onPlayTrack, onAddToQueue)
         }
     }
 }
@@ -3658,16 +3604,16 @@ private fun SettingsContent(
             .padding(bottom = Dimens.BottomContentInset),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
     ) {
-        Text(
+        SectionHeader(
             "设置",
-            style = MaterialTheme.typography.titleLarge,
+            style = SectionHeaderStyle.Page,
             modifier = Modifier.padding(top = Dimens.SpaceSmall, bottom = Dimens.SpaceSmall)
         )
         // 外观：手动兜底配色。永远显示（设置项不该忽隐忽现），有封面色时说明它只是兜底。
-        SettingsSectionHeader("外观")
+        SectionHeader("外观", SectionHeaderStyle.Section)
         AppearanceSection(themePreferences = themePreferences, seedSource = seedSource)
         // 播放相关开关收进一张卡：与 QQ 下载页的凭证/服务/密钥卡同一套卡片语言。
-        SettingsSectionHeader("播放")
+        SectionHeader("播放", SectionHeaderStyle.Section)
         SurfaceCard {
             // USB 独占开关：与普通系统 USB 路由信息分开显示。
             Row(
@@ -3811,7 +3757,7 @@ private fun SettingsContent(
         }
         // QQ 音乐导入（ADR-0006 / ADR-0007）：QQ 下载退出顶层导航后从这里进，二级页与「已下载」同一套模式。
         // 不叫「下载」——那个词已经归手机上的下载功能了（ADR-0007）。
-        SettingsSectionHeader("QQ 音乐导入")
+        SectionHeader("QQ 音乐导入", SectionHeaderStyle.Section)
         SurfaceCard(onClick = onOpenDownloadService) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -3830,7 +3776,7 @@ private fun SettingsContent(
             }
         }
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
-        SettingsSectionHeader("存储")
+        SectionHeader("存储", SectionHeaderStyle.Section)
         SurfaceCard { RecycleBinSection(fileOps = fileOps, viewModel = viewModel) }
         // 下载（ADR-0007）：占用 + 首数 + 「已下载」入口。没有清空按钮——没有一键清空。
         SurfaceCard {
@@ -3921,18 +3867,6 @@ private fun AppearanceSection(themePreferences: ThemePreferences, seedSource: Th
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
-}
-
-/** 设置页分组标题（与 QQ 下载页的区块标题同语言：小号、半粗、次要色）。 */
-@Composable
-private fun SettingsSectionHeader(title: String) {
-    Text(
-        title,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = Dimens.SpaceSmall, start = Dimens.SpaceTiny)
-    )
 }
 
 /** 设置页的回收站区块：列表 + 单条恢复 + 清空（唯一不可逆的操作，二次确认写明后果）。
@@ -4046,9 +3980,9 @@ private fun CachedCopiesContent(
             .padding(horizontal = Dimens.SpaceMedium)
             .padding(top = Dimens.SpaceSmall)
     ) {
-        Text(
+        SectionHeader(
             "已下载",
-            style = MaterialTheme.typography.titleLarge,
+            style = SectionHeaderStyle.Page,
             modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.SpaceMidMedium)
         )
         val cachedAlbums = downloads.cachedAlbums

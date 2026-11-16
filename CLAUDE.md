@@ -82,6 +82,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 
 ### UI
 
+- `LibraryScreenScaffold` 管列表页外框与状态渲染，`libraryLoadState` / `LoadState` 负责加载、错误、空态、内容的判定；内容列表或网格仍由页面提供。歌曲行统一走 `trackList`（`LazyListScope` 工厂），多选、菜单和播放指示仍归 `TrackRow`。
 - `ui/theme/Dimens.kt` 是设计 token 唯一出处，不写魔法 dp。玻璃面统一走 `GlassPanel`（全屏播放页两处圆钮是已知例外）。
 - 主题色板由当前播放封面的**鲜艳色**推导（ADR-0005），手动预设色只兜底。**不要引入 `material-color-utilities` 系依赖**。
 - **不引入导航库**：顶层顺序只由 `TopLevelSections` 决定（发现/歌曲/专辑/艺术家/播放列表）；流派页已删除（ADR-0009），别加回来。

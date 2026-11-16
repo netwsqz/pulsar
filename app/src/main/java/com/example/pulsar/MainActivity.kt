@@ -5,6 +5,8 @@ import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import com.example.pulsar.ui.components.DeleteProgressNotice
+import com.example.pulsar.ui.components.DetailActions
+import com.example.pulsar.ui.components.DetailHeader
 import com.example.pulsar.ui.components.EmptyState
 import com.example.pulsar.ui.components.ErrorState
 import com.example.pulsar.ui.components.GlassPanel
@@ -176,7 +178,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -484,7 +485,7 @@ private fun LibraryGroupsContent(
  * 艺术家组详情（工单 06 / 11）：与专辑/播放列表详情同源——共用 [MediaDetailScaffold]，
  * 只是内容区换成专辑网格（spec §6「艺术家组用网格变体」）。
  *
- * 这一页没有「播放 / 随机」语义（列的是专辑，不是曲目），所以不画操作行（`showActions = false`）；
+ * 这一页没有「播放 / 随机」语义（列的是专辑，不是曲目），所以使用不带动作的详情头；
  * 头部其余部分（大封面、两行标题、副标题、摘要）与另外两页完全一致，摘要「N 张专辑」由
  * [artistGroupSummary] 从网格实际卡片数算出，离线时改「已下载 N 张 · 共 M 张」。
  *
@@ -526,16 +527,8 @@ private fun LibraryGroupDetailContent(
         title = groupName,
         subtitle = "艺术家",
         summary = artistGroupSummary(groupAlbums, isOfflineView = isOfflineView, serverTotal = serverTotal),
-        // 艺术家组没有「播放 / 随机」语义，下面这几个参数不渲染（showActions = false）。
-        playLabel = "",
-        playable = false,
-        onPlay = {},
-        onShuffle = {},
-        // 这一页列的是专辑，没有整组下载的概念：不画下载槽。
-        download = null,
+        // 只列专辑，没有整组播放 / 下载语义：不传动作，使用纯信息头部。
         offlineNotice = offlineNotice,
-        // 这一页列的是专辑，没有「整组播放」语义：不画操作行（头部其余部分照常）。
-        showActions = false,
         // 网格变体：内容区是 2 列专辑网格，头部照常跨满整行（真实头部永远画一次）。
         gridColumns = 2,
         contentArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium),
@@ -3035,9 +3028,8 @@ private fun AlbumsContent(
  * 差异交给调用方：背景（专辑有封面色晕、播放列表没有）、播放按钮文案（「播放」/「播放全部」）、
  * 下载槽（离线时传 null 即隐藏）、曲目的骨架 / 错误 / 空态（[body]）。
  *
- * [showActions] 为 false 时不画「播放 / 随机播放」操作行（工单 11）：艺术家组详情列的是专辑，
- * 没有「整页播放」这个语义，头部其余部分与专辑/播放列表完全一致。这时 [playLabel] /
- * [playable] / [onPlay] / [onShuffle] 都不参与渲染，调用方传占位值即可。
+ * [actions] 非空时由 [DetailHeader] 画播放 / 随机操作行与可选下载槽；艺术家组详情只列专辑，
+ * 没有整页播放语义，不传动作即可，不再需要占位参数（#26）。
  */
 @Composable
 private fun MediaDetailScaffold(
@@ -3046,14 +3038,8 @@ private fun MediaDetailScaffold(
     title: String,
     subtitle: String,
     summary: String,
-    playLabel: String,
-    playable: Boolean,
-    onPlay: () -> Unit,
-    onShuffle: () -> Unit,
-    download: (@Composable () -> Unit)?,
     offlineNotice: String?,
-    /** false 时不画「播放 / 随机播放」操作行（工单 11：艺术家组详情列的是专辑，没有整组播放语义）。 */
-    showActions: Boolean = true,
+    actions: DetailActions? = null,
     /** 曲目行之间的间距；必须与骨架一致，加载完成不跳。专辑详情不额外留距（[Arrangement.spacedBy] 0）。 */
     tracksArrangement: Arrangement.Vertical = Arrangement.spacedBy(0.dp),
     /** 头部下方的间距：曲目列表的骨架自己带行距、传 0dp；网格骨架是一张整块、传 [Dimens.SpaceMidMedium]。 */
@@ -3084,11 +3070,16 @@ private fun MediaDetailScaffold(
                 verticalArrangement = contentArrangement,
                 horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)
             ) {
-                // 头部跨满整行：网格变体的头部与列表变体是同一份（抽取成 [MediaDetailHeader]）。
+                // 头部跨满整行：网格变体与列表变体共用 [DetailHeader]。
                 item(key = "header", span = { GridItemSpan(maxLineSpan) }) {
-                    MediaDetailHeader(
-                        cover, coverDescription, title, subtitle, summary,
-                        playLabel, playable, onPlay, onShuffle, download, offlineNotice, showActions
+                    DetailHeader(
+                        cover = cover,
+                        coverDescription = coverDescription,
+                        title = title,
+                        subtitle = subtitle,
+                        summary = summary,
+                        offlineNotice = offlineNotice,
+                        actions = actions
                     )
                 }
                 // 网格语义的 body：整屏状态块（骨架/错误/空态）用 [fullRow] 跨满整行，
@@ -3103,9 +3094,14 @@ private fun MediaDetailScaffold(
                 verticalArrangement = contentArrangement
             ) {
                 item(key = "header") {
-                    MediaDetailHeader(
-                        cover, coverDescription, title, subtitle, summary,
-                        playLabel, playable, onPlay, onShuffle, download, offlineNotice, showActions
+                    DetailHeader(
+                        cover = cover,
+                        coverDescription = coverDescription,
+                        title = title,
+                        subtitle = subtitle,
+                        summary = summary,
+                        offlineNotice = offlineNotice,
+                        actions = actions
                     )
                 }
                 body()
@@ -3118,86 +3114,6 @@ private fun MediaDetailScaffold(
  * 免得被多列网格切成半屏宽（工单 11）。本文件内的详情骨架专用。 */
 private fun LazyGridScope.fullRow(key: String, content: @Composable () -> Unit) {
     item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
-}
-
-/** 详情页头部（工单 10 / 11）：大封面 + 居中标题 + 副标题 + 摘要 + 可选的播放/随机操作行、
- * 下载槽、离线提示。列表变体与网格变体共用同一份，头部永远不骨架。 */
-@Composable
-private fun MediaDetailHeader(
-    cover: JellyfinRequest?,
-    coverDescription: String?,
-    title: String,
-    subtitle: String,
-    summary: String,
-    playLabel: String,
-    playable: Boolean,
-    onPlay: () -> Unit,
-    onShuffle: () -> Unit,
-    download: (@Composable () -> Unit)?,
-    offlineNotice: String?,
-    showActions: Boolean
-) {
-    Column(
-        Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        AlbumCover(
-            cover,
-            coverDescription,
-            Modifier.fillMaxWidth(0.62f).aspectRatio(1f),
-            cornerRadius = Dimens.CornerLarge
-        )
-        Spacer(Modifier.height(Dimens.SpaceLarge))
-        Text(
-            title,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            // 长名字最多两行：头部在内容流里会随页面滚走，不再把下方内容挤没。
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.height(Dimens.SpaceTiny))
-        Text(
-            subtitle,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-        Spacer(Modifier.height(Dimens.SpaceTiny))
-        Text(
-            summary,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        if (showActions) {
-            Spacer(Modifier.height(Dimens.SpaceMedium))
-            Row(horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceMidMedium)) {
-                Button(onClick = onPlay, enabled = playable) {
-                    Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(Dimens.SpaceSmall))
-                    Text(playLabel)
-                }
-                FilledTonalButton(onClick = onShuffle, enabled = playable) {
-                    Icon(Icons.Filled.Shuffle, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(Dimens.SpaceSmall))
-                    Text("随机播放")
-                }
-            }
-        }
-        // 下载槽（工单 05 / 10）：四态由 DownloadActionButton 自己算。离线时调用方传 null。
-        if (download != null) {
-            Spacer(Modifier.height(Dimens.SpaceMidMedium))
-            download()
-        }
-        offlineNotice?.let { notice ->
-            Spacer(Modifier.height(Dimens.SpaceMidMedium))
-            OfflineNoticeText(notice)
-        }
-        Spacer(Modifier.height(Dimens.SpaceLarge))
-    }
 }
 
 @Composable
@@ -3235,29 +3151,31 @@ private fun AlbumDetailContent(
         subtitle = album.artist,
         // 曲目数优先取已加载的列表（服务端的 trackCount 可能滞后），时长按已加载曲目求和。
         summary = albumSummary(album, albumTracks, isOfflineView = isOfflineView),
-        playLabel = "播放",
-        playable = playable,
-        onPlay = { onPlayTrack(trackList, trackList.first().id) },
-        onShuffle = {
-            val shuffled = trackList.shuffled()
-            onPlayTrack(shuffled, shuffled.first().id)
-        },
-        download = if (isOfflineView) {
-            null
-        } else {
-            {
-                DownloadActionButton(
-                    kind = DownloadKind.ALBUM,
-                    id = album.id,
-                    name = album.name,
-                    tracks = trackList,
-                    serverUrl = session.serverUrl,
-                    streamUrl = streamUrl,
-                    currentTrackId = currentTrackId,
-                    onMessage = onDownloadMessage
-                )
+        actions = DetailActions(
+            playLabel = "播放",
+            playable = playable,
+            onPlay = { onPlayTrack(trackList, trackList.first().id) },
+            onShuffle = {
+                val shuffled = trackList.shuffled()
+                onPlayTrack(shuffled, shuffled.first().id)
+            },
+            download = if (isOfflineView) {
+                null
+            } else {
+                {
+                    DownloadActionButton(
+                        kind = DownloadKind.ALBUM,
+                        id = album.id,
+                        name = album.name,
+                        tracks = trackList,
+                        serverUrl = session.serverUrl,
+                        streamUrl = streamUrl,
+                        currentTrackId = currentTrackId,
+                        onMessage = onDownloadMessage
+                    )
+                }
             }
-        },
+        ),
         offlineNotice = offlineNotice,
         // 专辑详情的真实曲目行紧挨着排（LazyColumn 无额外间距），骨架也别留行距。
         tracksArrangement = Arrangement.spacedBy(0.dp),
@@ -3628,31 +3546,33 @@ private fun PlaylistDetailContent(
         subtitle = "播放列表",
         // 曲目数与下方实际行数同源：已加载用列表长度，未加载才退回服务端计数。
         summary = playlistSummary(playlist, playlistTracks, isOfflineView = offlineView),
-        playLabel = "播放全部",
-        playable = playable,
-        onPlay = { onPlayTrack(trackList, trackList.first().id) },
-        onShuffle = {
-            val shuffled = trackList.shuffled()
-            onPlayTrack(shuffled, shuffled.first().id)
-        },
-        // 下载（工单 05）：曲目还没加载时按钮禁用（target 为 null）。
-        // 离线时藏起来（ADR-0008）：下不了，且列表里已经全是下载过的。
-        download = if (isOffline) {
-            null
-        } else {
-            {
-                DownloadActionButton(
-                    kind = DownloadKind.PLAYLIST,
-                    id = playlist.id,
-                    name = playlist.name,
-                    tracks = trackList,
-                    serverUrl = session.serverUrl,
-                    streamUrl = streamUrl,
-                    currentTrackId = currentTrackId,
-                    onMessage = onDownloadMessage
-                )
+        actions = DetailActions(
+            playLabel = "播放全部",
+            playable = playable,
+            onPlay = { onPlayTrack(trackList, trackList.first().id) },
+            onShuffle = {
+                val shuffled = trackList.shuffled()
+                onPlayTrack(shuffled, shuffled.first().id)
+            },
+            // 下载（工单 05）：曲目还没加载时按钮禁用（target 为 null）。
+            // 离线时藏起来（ADR-0008）：下不了，且列表里已经全是下载过的。
+            download = if (isOffline) {
+                null
+            } else {
+                {
+                    DownloadActionButton(
+                        kind = DownloadKind.PLAYLIST,
+                        id = playlist.id,
+                        name = playlist.name,
+                        tracks = trackList,
+                        serverUrl = session.serverUrl,
+                        streamUrl = streamUrl,
+                        currentTrackId = currentTrackId,
+                        onMessage = onDownloadMessage
+                    )
+                }
             }
-        },
+        ),
         offlineNotice = offlineNotice,
         // 曲目行之间保持原来的 4dp：与下方骨架的 rowSpacing 一致，加载完成不跳。
         tracksArrangement = Arrangement.spacedBy(Dimens.SpaceTiny),

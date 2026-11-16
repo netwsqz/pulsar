@@ -173,12 +173,22 @@ data class DetailActions(
 
 ### Step 3 — 拆详情头，迁详情页
 
+> **已完成 2026-11-16（#26，代码完成待真机）**：新增 `ui/components/DetailHeader.kt`，按本节方案用
+> `DetailActions?` 表达带动作 / 纯信息两种头部，不额外引入 sealed 变体；`MediaDetailScaffold` 改为
+> 传递动作对象，删除 `MediaDetailHeader`、`showActions` 与艺术家组详情的占位参数。三个详情页的
+> 头部布局、列表 / 网格、播放 / 随机回调与下载槽保持原样；专辑仍在离线过滤生效时隐藏下载，
+> 播放列表仍按全局离线状态隐藏下载，艺术家组始终无整组播放 / 下载。未改数据或状态逻辑，
+> 未新增 Compose 测试。全量 947 项单测 0 失败 / 0 跳过，`assembleDebug` 通过；三页真机验收待用户确认。
+
 1. `MediaDetailScaffold` 的 header 部分抽成 `DetailHeader`；`showActions` 改成 `actions: DetailActions?`。
 2. `AlbumDetailContent` / `PlaylistDetailContent` / `LibraryGroupDetailContent` 改用新 header。
 3. 删除占位参数与 `showActions` 分支。
 4. 真机看三页的播放 / 随机 / 下载 / 离线隐藏。
 
 **验收**：详情页不再有 `playLabel=""` / `playable=false` / `onPlay={}` 这类调用。
+
+**回退**：仅回退 #26 对 `MainActivity.kt` 与新增 `ui/components/DetailHeader.kt` 的改动，恢复旧的
+`MediaDetailHeader` 和 `showActions` 调用；不涉及数据、下载名单、会话存储或离线策略。
 
 ### Step 4 — `TrackList` + `SectionHeader` 收口
 

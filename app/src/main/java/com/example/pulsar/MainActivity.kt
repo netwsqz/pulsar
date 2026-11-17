@@ -933,13 +933,9 @@ private fun MusicLibraryScreen(
     // 切页时收起菜单：菜单是常驻 overlay，不跟着行一起离开组合，得显式收。
     LaunchedEffect(section) { trackMenu.dismiss() }
     // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
-    val currentListTracks: List<Track> = when (val s = section) {
-        LibrarySection.Tracks, LibrarySection.Discover -> tracks
-        is LibrarySection.AlbumDetail -> library.albumTracks.orEmpty()
-        is LibrarySection.PlaylistDetail -> library.playlistTracks.orEmpty()
-        LibrarySection.Search -> library.search.results?.tracks.orEmpty()
-        else -> emptyList()
-    }
+    // **取可见列表**（#30）：离线时只显示已下载，全选也必须只勾看得见的那批，
+    // 否则批量删除会波及界面上根本不存在的歌。
+    val currentListTracks: List<Track> = currentListTracks(section, visible)
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
     BackHandler(section != LibrarySection.Discover) {

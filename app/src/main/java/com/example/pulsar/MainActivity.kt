@@ -846,6 +846,18 @@ private fun MusicLibraryScreen(
     )
     val visible = offline.visibleLibrary
     val tracks = visible.tracks.orEmpty()
+    // 每日推荐（发现页顶部那几首）：算在父层而不是发现页内部，因为多选「全选」的目标
+    // 必须是页面真正渲染的同一份（#30）——发现页只有这几行可勾选，取全量会把整个曲库勾进去。
+    // 「换一批」的变体编号也一并提升，子页面只负责画。
+    var discoverPicksVariant by rememberSaveable { mutableStateOf(0) }
+    val discoverPicks = remember(tracks, discoverPicksVariant) {
+        discoverDailyPicks(
+            tracks,
+            dayIndex = LocalDate.now().toEpochDay(),
+            count = 4,
+            variant = discoverPicksVariant
+        )
+    }
     // 歌词：随当前曲目自动加载（全屏页歌词页用）。加载时机在全屏页开关声明之后。
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     // 音量浮窗的显示窗口：独占模式下音量键被 App 截获、系统音量条不会弹，靠它给唯一的视觉反馈。
@@ -934,8 +946,8 @@ private fun MusicLibraryScreen(
     LaunchedEffect(section) { trackMenu.dismiss() }
     // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
     // **取可见列表**（#30）：离线时只显示已下载，全选也必须只勾看得见的那批，
-    // 否则批量删除会波及界面上根本不存在的歌。
-    val currentListTracks: List<Track> = currentListTracks(section, visible)
+    // 否则批量删除会波及界面上根本不存在的歌。发现页只勾每日推荐那几首（页面只有它们可勾）。
+    val currentListTracks: List<Track> = currentListTracks(section, visible, discoverPicks)
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
     BackHandler(section != LibrarySection.Discover) {
@@ -1066,7 +1078,8 @@ private fun MusicLibraryScreen(
                     LibrarySection.Discover -> DiscoverContent(
                         library = library,
                         session = session,
-                        tracks = tracks,
+                        dailyPicks = discoverPicks,
+                        onNextPicks = { discoverPicksVariant++ },
                         discoverAlbums = visible.discoverAlbums,
                         sections = offline.discover,
                         emptyKind = offline.emptyKind,
@@ -1380,8 +1393,11 @@ private fun MusicLibraryScreen(
                     ) { Text("取消") }
                     TextButton(
                         onClick = {
-                            // 同一个确认框：目标换成勾选的全部曲目
-                            deleteTarget = currentListTracks.filter { it.id in library.multiSelectIds }
+                            // 同一个确认框：目标换成勾选的全部曲目。
+                            // 候选池取原始列表而不是可见列表（#30）：勾选后若离线翻转，
+                            // 可见列表会收缩，已勾的歌不该被悄悄丢掉（或让删除按钮点了没反应）。
+                            deleteTarget = deleteCandidateTracks(section, library)
+                                .filter { it.id in library.multiSelectIds }
                         },
                         enabled = library.multiSelectIds.isNotEmpty() && !library.fileOps.isBusy,
                         modifier = Modifier.height(Dimens.TouchTargetSmall)
@@ -2382,7 +2398,8 @@ private fun StaggeredMenuItem(
 private fun DiscoverContent(
     library: LibraryState,
     session: SessionState,
-    tracks: List<Track>,
+    dailyPicks: List<Track>,
+    onNextPicks: () -> Unit,
     discoverAlbums: List<Album>?,
     sections: DiscoverSections,
     emptyKind: DiscoverEmpty,
@@ -2421,12 +2438,9 @@ private fun DiscoverContent(
             refreshRotation.snapTo(refreshRotation.value % 360f)
         }
     }
-    // 每日推荐：按当天日期稳定随机挑 4 首（同一天内跨重启不变）。
-    // 「换一批」递增变体编号，立刻换一批（挑选是纯本地计算，不等网络）。
-    var picksVariant by rememberSaveable { mutableStateOf(0) }
-    val dailyPicks = remember(tracks, picksVariant) {
-        discoverDailyPicks(tracks, dayIndex = LocalDate.now().toEpochDay(), count = 4, variant = picksVariant)
-    }
+    // 每日推荐由父层算好传入（#30）：多选「全选」要用同一份列表，
+    // 「换一批」的变体编号也提升到了父层，这里只负责画。
+    // 挑选规则：按当天日期稳定随机挑 4 首（同一天内跨重启不变）。
     // 这一页「哪几节显示 / 整页空态 / 空态说哪句」由离线策略算好（OfflineView），
     // 这里只负责画——不再自己组合 isOffline 与加载态（报告 #22）。
     //
@@ -2457,7 +2471,7 @@ private fun DiscoverContent(
                 action = {
                     TextButton(
                         onClick = {
-                            picksVariant++
+                            onNextPicks()
                             if (!isFiltering) onRefresh()
                         },
                         enabled = !library.isDiscoverRefreshing

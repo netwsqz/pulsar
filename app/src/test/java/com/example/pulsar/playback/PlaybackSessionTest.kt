@@ -1,5 +1,6 @@
 package com.example.pulsar.playback
 
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.SessionResult
 import com.example.pulsar.QueueTrack
@@ -203,6 +204,55 @@ class PlaybackSessionTest {
         assertEquals(1, remote.playCalls)
         // 起播前把当前模式应用到播放器（与旧 playTracks 一致）。
         assertEquals(listOf(PlaybackMode.SEQUENCE), remote.appliedModes)
+    }
+
+    @Test
+    fun `某首算不出播放地址时跳过它 其余照常入队并播放`() = runTest {
+        remote.snapshot = connected()
+        val badFactory = FakeTrackMediaItemFactory { track ->
+            if (track.id == "b") null else MediaItem.Builder().setMediaId(track.id).build()
+        }
+        val session = PlaybackSession(remote, badFactory, gate, backgroundScope)
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Play(listOf(track("a"), track("b"), track("c")), "a")
+        )
+        runCurrent()
+
+        assertTrue(accepted)
+        val call = remote.setQueueCalls.single()
+        // b 算不出地址被跳过，其余保留原顺序，从点的那首开头。
+        assertEquals(listOf("a", "c"), call.items.map { it.mediaId })
+        assertEquals(0, call.startIndex)
+        assertEquals(1, remote.prepareCalls)
+        assertEquals(1, remote.playCalls)
+        val prepared = events.filterIsInstance<PlaybackEvent.PlaybackQueuePrepared>().single()
+        assertEquals(listOf("a", "c"), prepared.tracks.map { it.id })
+    }
+
+    @Test
+    fun `点的那首算不出播放地址时给出提示且不写队列`() = runTest {
+        remote.snapshot = connected()
+        val badFactory = FakeTrackMediaItemFactory { track ->
+            if (track.id == "b") null else MediaItem.Builder().setMediaId(track.id).build()
+        }
+        val session = PlaybackSession(remote, badFactory, gate, backgroundScope)
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Play(listOf(track("a"), track("b"), track("c")), "b")
+        )
+        runCurrent()
+
+        assertTrue(accepted)
+        assertEquals(0, remote.setQueueCalls.size)
+        assertEquals(0, remote.prepareCalls)
+        assertEquals(0, remote.playCalls)
+        assertFalse(events.any { it is PlaybackEvent.PlaybackQueuePrepared })
+        assertEquals(1, events.filterIsInstance<PlaybackEvent.Unplayable>().size)
     }
 
     @Test

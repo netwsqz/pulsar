@@ -99,6 +99,9 @@ private const val STATUS_UNAVAILABLE = "播放服务不可用"
 private const val STATUS_USB_SET_FAILED = "USB 独占设置失败"
 private const val STATUS_USB_VOLUME_FAILED = "USB 音量设置失败"
 
+/** 点的那首算不出播放地址时的提示（#29）：明确告诉用户，而不是点了没反应。 */
+internal const val UNPLAYABLE_NO_STREAM_URL = "这首歌暂时无法播放：拿不到播放地址，请稍后重试"
+
 /**
  * 播放会话：连接播放服务、监听播放器事件、500ms 轮询进度/队列/USB/静音，并下发
  * USB 独占 / USB 音量 / 静音跳过的自定义命令。
@@ -361,8 +364,9 @@ internal class PlaybackSession(
      * 点歌播放。不可播的曲目从队列里筛掉；**点的那首不可播 → 只发 [PlaybackEvent.Unplayable]，
      * 不写队列**（旧界面就是这个口径，避免「正在播」镜像指向一首根本没在放的歌）。
      *
-     * 队列顺序仍用 [buildPlaybackOrder] 旋转到点的那首开头；某首算不出播放条目时整条放弃
-     * （保留旧 `playTracks` 语义，不在这里做 null URL 容错）。
+     * 队列顺序仍用 [buildPlaybackOrder] 旋转到点的那首开头。**某首算不出播放条目就跳过它**
+     * （#29）：其余曲目照常入队播放；如果算不出地址的正是点的那首，给一条明确提示，不静默失败。
+     * 发 [PlaybackEvent.PlaybackQueuePrepared] 的列表与真正入队的列表保持一致（都跳过坏曲目）。
      */
     private fun play(tracks: List<Track>, startTrackId: String): Boolean {
         if (!remote.snapshot().isConnected) return false
@@ -373,12 +377,31 @@ internal class PlaybackSession(
             return true
         }
         val playable = tracks.filter(gate::isPlayable)
-        // ViewModel 的可播队列记录保持旧顺序：先记队列，再尝试起播（起播失败也不回滚记录）。
-        _events.tryEmit(PlaybackEvent.PlaybackQueuePrepared(playable, startTrackId))
         val order = buildPlaybackOrder(playable, startTrackId) ?: return false
-        val items = order.map { track -> mediaItems.create(track) ?: return false }
+        // 先按顺序构造播放条目，算不出地址的跳过；点的那首若被跳过则明确提示、不写队列。
+        val entries = order.mapNotNull { track ->
+            val item = mediaItems.create(track)
+            if (item == null) null else track to item
+        }
+        if (entries.isEmpty()) {
+            _events.tryEmit(PlaybackEvent.Unplayable(UNPLAYABLE_NO_STREAM_URL))
+            return true
+        }
+        if (entries.first().first.id != startTrackId) {
+            _events.tryEmit(PlaybackEvent.Unplayable(UNPLAYABLE_NO_STREAM_URL))
+            return true
+        }
+        // ViewModel 的可播队列记录保持旧顺序（未旋转），且与真正入队的条目同源：
+        // 算不出地址的曲目两边都不出现（起播失败也不回滚记录）。
+        val queuedIds = entries.mapTo(mutableSetOf()) { it.first.id }
+        _events.tryEmit(
+            PlaybackEvent.PlaybackQueuePrepared(
+                playable.filter { it.id in queuedIds },
+                startTrackId
+            )
+        )
         remote.applyPlaybackMode(state.value.mode)
-        remote.setQueue(items, 0)
+        remote.setQueue(entries.map { it.second }, 0)
         remote.prepare()
         remote.play()
         return true

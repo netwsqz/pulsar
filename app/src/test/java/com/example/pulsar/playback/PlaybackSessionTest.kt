@@ -190,10 +190,12 @@ class PlaybackSessionTest {
         val blockedGate = FakePlaybackGate(mapOf("b" to "这首歌没有下载，联网后才能播放"))
         val session = newSession(blockedGate)
         remote.connect()
+        val events = collectEvents(session)
 
         val accepted = session.dispatch(
             PlaybackIntent.Play(listOf(track("a"), track("b"), track("c")), "c")
         )
+        runCurrent()
 
         assertTrue(accepted)
         val call = remote.setQueueCalls.single()
@@ -203,7 +205,12 @@ class PlaybackSessionTest {
         assertEquals(1, remote.prepareCalls)
         assertEquals(1, remote.playCalls)
         // 起播前把当前模式应用到播放器（与旧 playTracks 一致）。
-        assertEquals(listOf(PlaybackMode.SEQUENCE), remote.appliedModes)
+        // onConnected 补发恢复的模式时可能已经应用过一次，这里看最后一次即可。
+        assertEquals(PlaybackMode.SEQUENCE, remote.appliedModes.lastOrNull())
+        // 正常路径也要发「可播队列」事件：ViewModel 靠它更新迷你条 / 歌词 / 封面色。
+        val prepared = events.filterIsInstance<PlaybackEvent.PlaybackQueuePrepared>().single()
+        assertEquals(listOf("a", "c"), prepared.tracks.map { it.id })
+        assertEquals("c", prepared.startTrackId)
     }
 
     @Test
@@ -252,7 +259,32 @@ class PlaybackSessionTest {
         assertEquals(0, remote.prepareCalls)
         assertEquals(0, remote.playCalls)
         assertFalse(events.any { it is PlaybackEvent.PlaybackQueuePrepared })
-        assertEquals(1, events.filterIsInstance<PlaybackEvent.Unplayable>().size)
+        // 提示必须是「拿不到播放地址」这句，不能变成空串或别的文案。
+        val unplayable = events.filterIsInstance<PlaybackEvent.Unplayable>().single()
+        assertEquals(UNPLAYABLE_NO_STREAM_URL, unplayable.reason)
+    }
+
+    @Test
+    fun `整列曲目都算不出播放地址时给出提示且不写队列`() = runTest {
+        remote.snapshot = connected()
+        val badFactory = FakeTrackMediaItemFactory { null }
+        val session = PlaybackSession(remote, badFactory, gate, backgroundScope)
+        remote.connect()
+        val events = collectEvents(session)
+
+        val accepted = session.dispatch(
+            PlaybackIntent.Play(listOf(track("a"), track("b")), "a")
+        )
+        runCurrent()
+
+        // 不能因为空列表走到 entries.first() 抛异常：给提示，队列不动。
+        assertTrue(accepted)
+        assertEquals(0, remote.setQueueCalls.size)
+        assertEquals(0, remote.prepareCalls)
+        assertEquals(0, remote.playCalls)
+        assertFalse(events.any { it is PlaybackEvent.PlaybackQueuePrepared })
+        val unplayable = events.filterIsInstance<PlaybackEvent.Unplayable>().single()
+        assertEquals(UNPLAYABLE_NO_STREAM_URL, unplayable.reason)
     }
 
     @Test

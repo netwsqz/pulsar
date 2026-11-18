@@ -49,8 +49,8 @@ class QQDownloadViewModelTest {
         val viewModel = createViewModel(preferences, api)
         advanceUntilIdle()
 
-        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
-        assertTrue(viewModel.state.value.serviceReachable)
+        assertEquals("http://192.168.1.10:8900", viewModel.state.value.service.serviceUrl)
+        assertTrue(viewModel.state.value.service.serviceReachable)
         assertEquals(1, api.healthCalls)
     }
 
@@ -68,8 +68,8 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.searchQueries.isEmpty() || api.searchQueries == listOf("晴天"))
-        assertTrue(viewModel.state.value.songs.isEmpty())
-        assertFalse(viewModel.state.value.isSearching)
+        assertTrue(viewModel.state.value.search.songs.isEmpty())
+        assertFalse(viewModel.state.value.search.isSearching)
     }
 
     @Test
@@ -88,7 +88,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf("latest"), api.searchQueries)
-        assertEquals(listOf(song), viewModel.state.value.songs)
+        assertEquals(listOf(song), viewModel.state.value.search.songs)
     }
 
     @Test
@@ -102,9 +102,9 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.searchQueries.isEmpty())
-        assertNotNull(viewModel.state.value.searchError)
+        assertNotNull(viewModel.state.value.search.error)
         // 搜索期失败只进分区内小字，不能同时弹一条动作反馈。
-        assertNull(viewModel.state.value.actionMessage)
+        assertNull(viewModel.state.value.download.actionMessage)
     }
 
     @Test
@@ -121,7 +121,7 @@ class QQDownloadViewModelTest {
 
         assertEquals("0039MnYb0qxYhV", api.downloadSongMids.single())
         assertEquals("flac", api.downloadQualities.single())
-        assertEquals(1, viewModel.state.value.jobs.size)
+        assertEquals(1, viewModel.state.value.download.jobs.size)
     }
 
     @Test
@@ -149,7 +149,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals("000MkMni19ClKG", api.downloadAlbumMids.single())
-        assertFalse(viewModel.state.value.isEnqueuingAlbum)
+        assertFalse(viewModel.state.value.download.isEnqueuingAlbum)
         assertTrue(api.jobsCalls >= 1)
     }
 
@@ -165,13 +165,13 @@ class QQDownloadViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.credentialExpired)
-        assertTrue(viewModel.state.value.searchError!!.contains("凭证"))
+        assertTrue(viewModel.state.value.service.credentialExpired)
+        assertTrue(viewModel.state.value.search.error!!.contains("凭证"))
 
         viewModel.retryCredential()
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.credentialExpired)
+        assertFalse(viewModel.state.value.service.credentialExpired)
         assertTrue(api.retryCredentialCalls >= 1)
     }
 
@@ -186,8 +186,8 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals(1, api.retryCredentialCalls)
-        assertFalse(viewModel.state.value.credentialExpired)
-        assertTrue(viewModel.state.value.credentialMessage!!.contains("已刷新"))
+        assertFalse(viewModel.state.value.service.credentialExpired)
+        assertTrue(viewModel.state.value.service.credentialMessage!!.contains("已刷新"))
     }
 
     @Test
@@ -205,8 +205,8 @@ class QQDownloadViewModelTest {
         viewModel.refreshCredential()
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.credentialExpired)
-        assertTrue(viewModel.state.value.actionMessage!!.contains("QQ 音乐客户端"))
+        assertFalse(viewModel.state.value.service.credentialExpired)
+        assertTrue(viewModel.state.value.download.actionMessage!!.contains("QQ 音乐客户端"))
     }
 
     @Test
@@ -216,8 +216,8 @@ class QQDownloadViewModelTest {
         val viewModel = createViewModel(preferences, api)
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.serviceReachable)
-        assertTrue(viewModel.state.value.searchError!!.contains("连不上"))
+        assertFalse(viewModel.state.value.service.serviceReachable)
+        assertTrue(viewModel.state.value.search.error!!.contains("连不上"))
     }
 
     @Test
@@ -277,7 +277,7 @@ class QQDownloadViewModelTest {
         viewModel.openAlbumPicker(album)
         advanceUntilIdle()
 
-        val picker = viewModel.state.value.albumPicker!!
+        val picker = viewModel.state.value.download.albumPicker!!
         assertEquals("000MkMni19ClKG", picker.albumMid)
         assertEquals("叶惠美", picker.albumName)
         assertFalse(picker.isLoading)
@@ -297,10 +297,10 @@ class QQDownloadViewModelTest {
 
         viewModel.toggleAlbumTrack("000trackB2")
         viewModel.toggleAlbumTrack("000trackC3")
-        assertEquals(setOf("000trackB2", "000trackC3"), viewModel.state.value.albumPicker!!.selectedMids)
+        assertEquals(setOf("000trackB2", "000trackC3"), viewModel.state.value.download.albumPicker!!.selectedMids)
 
         viewModel.toggleAlbumTrack("000trackB2")
-        assertEquals(setOf("000trackC3"), viewModel.state.value.albumPicker!!.selectedMids)
+        assertEquals(setOf("000trackC3"), viewModel.state.value.download.albumPicker!!.selectedMids)
     }
 
     @Test
@@ -313,10 +313,10 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         viewModel.selectAllAlbumTracks()
-        assertEquals(setOf("000trackA1", "000trackB2", "000trackC3"), viewModel.state.value.albumPicker!!.selectedMids)
+        assertEquals(setOf("000trackA1", "000trackB2", "000trackC3"), viewModel.state.value.download.albumPicker!!.selectedMids)
 
         viewModel.clearAlbumSelection()
-        assertTrue(viewModel.state.value.albumPicker!!.selectedMids.isEmpty())
+        assertTrue(viewModel.state.value.download.albumPicker!!.selectedMids.isEmpty())
     }
 
     @Test
@@ -335,8 +335,8 @@ class QQDownloadViewModelTest {
 
         assertEquals(listOf("000MkMni19ClKG"), api.downloadAlbumMids)
         assertEquals(listOf(listOf("000trackA1", "000trackC3")), api.downloadAlbumSelections)
-        assertNull(viewModel.state.value.albumPicker)
-        assertFalse(viewModel.state.value.isEnqueuingAlbum)
+        assertNull(viewModel.state.value.download.albumPicker)
+        assertFalse(viewModel.state.value.download.isEnqueuingAlbum)
         assertTrue(api.jobsCalls >= 1)
     }
 
@@ -357,9 +357,9 @@ class QQDownloadViewModelTest {
         viewModel.confirmAlbumDownload()
         advanceUntilIdle()
 
-        val picker = viewModel.state.value.albumPicker!!
+        val picker = viewModel.state.value.download.albumPicker!!
         assertEquals(setOf("000trackB2"), picker.selectedMids)
-        assertFalse(viewModel.state.value.isEnqueuingAlbum)
+        assertFalse(viewModel.state.value.download.isEnqueuingAlbum)
         assertTrue(picker.errorMessage!!.contains("凭证"))
     }
 
@@ -375,7 +375,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         // 关掉弹窗后到达的曲目列表必须被丢弃，否则会凭空弹回来
-        assertNull(viewModel.state.value.albumPicker)
+        assertNull(viewModel.state.value.download.albumPicker)
     }
 
     @Test
@@ -391,16 +391,16 @@ class QQDownloadViewModelTest {
         viewModel.openAlbumPicker(album)
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.albumPicker!!.isLoading)
-        assertTrue(viewModel.state.value.albumPicker!!.tracks.isEmpty())
-        assertTrue(viewModel.state.value.albumPicker!!.errorMessage!!.contains("连不上"))
+        assertFalse(viewModel.state.value.download.albumPicker!!.isLoading)
+        assertTrue(viewModel.state.value.download.albumPicker!!.tracks.isEmpty())
+        assertTrue(viewModel.state.value.download.albumPicker!!.errorMessage!!.contains("连不上"))
 
         api.albumSongsError = null
         viewModel.retryAlbumTracks()
         advanceUntilIdle()
 
-        assertEquals(albumTracks, viewModel.state.value.albumPicker!!.tracks)
-        assertNull(viewModel.state.value.albumPicker!!.errorMessage)
+        assertEquals(albumTracks, viewModel.state.value.download.albumPicker!!.tracks)
+        assertNull(viewModel.state.value.download.albumPicker!!.errorMessage)
     }
 
     @Test
@@ -432,8 +432,8 @@ class QQDownloadViewModelTest {
         viewModel.confirmAlbumDownload()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.albumPicker)
-        assertTrue(viewModel.state.value.actionMessage!!.contains("1 首"))
+        assertNull(viewModel.state.value.download.albumPicker)
+        assertTrue(viewModel.state.value.download.actionMessage!!.contains("1 首"))
     }
 
     @Test
@@ -450,7 +450,7 @@ class QQDownloadViewModelTest {
         viewModel.confirmAlbumDownload()
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.actionMessage)
+        assertNull(viewModel.state.value.download.actionMessage)
     }
 
     @Test
@@ -466,7 +466,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.downloadAlbumMids.isEmpty())
-        assertNotNull(viewModel.state.value.albumPicker)
+        assertNotNull(viewModel.state.value.download.albumPicker)
     }
 
     @Test
@@ -481,7 +481,7 @@ class QQDownloadViewModelTest {
         viewModel.openAlbumPicker(album.copy(albumMid = "000OtherAlbum", albumName = "七里香"))
         advanceUntilIdle()
 
-        val picker = viewModel.state.value.albumPicker!!
+        val picker = viewModel.state.value.download.albumPicker!!
         assertEquals("000OtherAlbum", picker.albumMid)
         assertFalse(picker.isLoading)
         assertEquals(albumTracks, picker.tracks)
@@ -500,14 +500,14 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
         viewModel.openAlbumPicker(album)
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.credentialExpired)
+        assertTrue(viewModel.state.value.service.credentialExpired)
 
         api.albumSongsError = null
         viewModel.retryCredential()
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.credentialExpired)
-        assertEquals(albumTracks, viewModel.state.value.albumPicker!!.tracks)
+        assertFalse(viewModel.state.value.service.credentialExpired)
+        assertEquals(albumTracks, viewModel.state.value.download.albumPicker!!.tracks)
     }
 
     // ── 工单 03：搜索行看得见 + 能强制下载 ──────────────────────────
@@ -529,8 +529,8 @@ class QQDownloadViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.inLibraryMids.contains("0039MnYb0qxYhV"))
-        assertTrue(viewModel.state.value.activeDownloadingMids.contains("000DownMid"))
+        assertTrue(viewModel.state.value.download.inLibraryMids.contains("0039MnYb0qxYhV"))
+        assertTrue(viewModel.state.value.download.activeDownloadingMids.contains("000DownMid"))
     }
 
     @Test
@@ -548,8 +548,8 @@ class QQDownloadViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.inLibraryMids.isEmpty())
-        assertTrue(viewModel.state.value.activeDownloadingMids.isEmpty())
+        assertTrue(viewModel.state.value.download.inLibraryMids.isEmpty())
+        assertTrue(viewModel.state.value.download.activeDownloadingMids.isEmpty())
     }
 
     @Test
@@ -582,8 +582,8 @@ class QQDownloadViewModelTest {
         viewModel.downloadSong(song)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.inLibraryMids.contains(song.songMid))
-        assertNull(viewModel.state.value.actionMessage)
+        assertTrue(viewModel.state.value.download.inLibraryMids.contains(song.songMid))
+        assertNull(viewModel.state.value.download.actionMessage)
         assertEquals(0, api.jobsCalls)
     }
 
@@ -595,10 +595,10 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         viewModel.requestRedownload(song)
-        assertEquals(song, viewModel.state.value.redownloadPrompt)
+        assertEquals(song, viewModel.state.value.download.redownloadPrompt)
 
         viewModel.dismissRedownload()
-        assertNull(viewModel.state.value.redownloadPrompt)
+        assertNull(viewModel.state.value.download.redownloadPrompt)
         assertTrue(api.downloadSongMids.isEmpty())
 
         viewModel.requestRedownload(song)
@@ -606,7 +606,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertTrue(api.downloadForces.single())
-        assertNull(viewModel.state.value.redownloadPrompt)
+        assertNull(viewModel.state.value.download.redownloadPrompt)
     }
 
     @Test
@@ -619,13 +619,13 @@ class QQDownloadViewModelTest {
 
         viewModel.downloadSong(song)
         advanceTimeBy(1)
-        assertTrue(viewModel.state.value.activeDownloadingMids.contains(song.songMid))
+        assertTrue(viewModel.state.value.download.activeDownloadingMids.contains(song.songMid))
 
         api.jobs = listOf(QQJobDto("j1", song.songMid, "flac", "晴天", "done"))
         advanceTimeBy(2_000)
 
-        assertTrue(viewModel.state.value.inLibraryMids.contains(song.songMid))
-        assertFalse(viewModel.state.value.activeDownloadingMids.contains(song.songMid))
+        assertTrue(viewModel.state.value.download.inLibraryMids.contains(song.songMid))
+        assertFalse(viewModel.state.value.download.activeDownloadingMids.contains(song.songMid))
     }
 
     @Test
@@ -641,12 +641,12 @@ class QQDownloadViewModelTest {
         val viewModel = createViewModel(preferences, api)
 
         advanceTimeBy(100)
-        assertFalse(viewModel.state.value.libraryReady)
-        assertEquals("E:\\file\\Te_Music", viewModel.state.value.libraryRoot)
+        assertFalse(viewModel.state.value.service.libraryReady)
+        assertEquals("E:\\file\\Te_Music", viewModel.state.value.service.libraryRoot)
 
         advanceTimeBy(5_000)
-        assertTrue(viewModel.state.value.libraryReady)
-        assertEquals(596, viewModel.state.value.libraryCount)
+        assertTrue(viewModel.state.value.service.libraryReady)
+        assertEquals(596, viewModel.state.value.service.libraryCount)
     }
 
     // ── 工单 04：选曲弹窗与整张下载 ──────────────────────────────
@@ -667,10 +667,10 @@ class QQDownloadViewModelTest {
         viewModel.openAlbumPicker(album)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.inLibraryMids.contains("000trackB2"))
+        assertTrue(viewModel.state.value.download.inLibraryMids.contains("000trackB2"))
         viewModel.selectAllAlbumTracks()
 
-        assertEquals(setOf("000trackA1"), viewModel.state.value.albumPicker!!.selectedMids)
+        assertEquals(setOf("000trackA1"), viewModel.state.value.download.albumPicker!!.selectedMids)
     }
 
     @Test
@@ -685,7 +685,7 @@ class QQDownloadViewModelTest {
 
         viewModel.toggleAlbumTrack("000trackC3")
 
-        assertTrue(viewModel.state.value.albumPicker!!.selectedMids.isEmpty())
+        assertTrue(viewModel.state.value.download.albumPicker!!.selectedMids.isEmpty())
     }
 
     @Test
@@ -709,7 +709,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf(listOf("000trackB2")), api.downloadAlbumSelections)
-        assertNull(viewModel.state.value.albumPicker)
+        assertNull(viewModel.state.value.download.albumPicker)
     }
 
     @Test
@@ -734,7 +734,7 @@ class QQDownloadViewModelTest {
         viewModel.downloadAlbum(album)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.actionMessage!!.contains("已跳过 8 首"))
+        assertTrue(viewModel.state.value.download.actionMessage!!.contains("已跳过 8 首"))
         assertTrue(api.jobsCalls >= 1)
     }
 
@@ -748,8 +748,8 @@ class QQDownloadViewModelTest {
         viewModel.downloadAlbum(album)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.actionMessage!!.contains("11"))
-        assertFalse(viewModel.state.value.isEnqueuingAlbum)
+        assertTrue(viewModel.state.value.download.actionMessage!!.contains("11"))
+        assertFalse(viewModel.state.value.download.isEnqueuingAlbum)
     }
 
     @Test
@@ -758,14 +758,14 @@ class QQDownloadViewModelTest {
         val viewModel = createViewModel(preferences, FakeQQApi())
         advanceUntilIdle()
 
-        assertEquals("old-key", viewModel.state.value.fileOpsKey)
+        assertEquals("old-key", viewModel.state.value.settings.fileOpsKey)
 
         viewModel.updateFileOpsKeyInput("new-key")
         viewModel.saveFileOpsKey()
         advanceUntilIdle()
 
         assertEquals("new-key", preferences.savedKey)
-        assertEquals("new-key", viewModel.state.value.fileOpsKey)
+        assertEquals("new-key", viewModel.state.value.settings.fileOpsKey)
     }
 
     // ===== 服务地址自动填充（来自 Jellyfin 服务器地址，端口固定 8900）=====
@@ -779,7 +779,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals("http://192.168.1.5:8900", preferences.savedUrl)
-        assertEquals("http://192.168.1.5:8900", viewModel.state.value.serviceUrl)
+        assertEquals("http://192.168.1.5:8900", viewModel.state.value.service.serviceUrl)
     }
 
     @Test
@@ -791,7 +791,7 @@ class QQDownloadViewModelTest {
         viewModel.autoFillServiceUrl("http://192.168.1.5:8096")
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.serviceReachable)
+        assertTrue(viewModel.state.value.service.serviceReachable)
         assertEquals(1, api.healthCalls)
     }
 
@@ -805,7 +805,7 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals("http://192.168.1.10:8900", preferences.savedUrl)
-        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
+        assertEquals("http://192.168.1.10:8900", viewModel.state.value.service.serviceUrl)
     }
 
     // ── 工单 01：搜索期失败与动作反馈分开 ──────────────────────────
@@ -826,10 +826,10 @@ class QQDownloadViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.searchError!!.contains("连不上"))
-        assertNull(viewModel.state.value.actionMessage)
-        assertFalse(viewModel.state.value.serviceReachable)
-        assertFalse(viewModel.state.value.isSearching)
+        assertTrue(viewModel.state.value.search.error!!.contains("连不上"))
+        assertNull(viewModel.state.value.download.actionMessage)
+        assertFalse(viewModel.state.value.service.serviceReachable)
+        assertFalse(viewModel.state.value.search.isSearching)
     }
 
     @Test
@@ -843,8 +843,8 @@ class QQDownloadViewModelTest {
         viewModel.downloadSong(song.copy(availableQualities = emptyList()))
         advanceUntilIdle()
 
-        assertTrue(viewModel.state.value.actionMessage!!.contains("音质"))
-        assertNull(viewModel.state.value.searchError)
+        assertTrue(viewModel.state.value.download.actionMessage!!.contains("音质"))
+        assertNull(viewModel.state.value.search.error)
     }
 
     @Test
@@ -859,14 +859,14 @@ class QQDownloadViewModelTest {
         viewModel.updateSearchQuery("晴天")
         advanceTimeBy(300)
         advanceUntilIdle()
-        assertNotNull(viewModel.state.value.searchError)
+        assertNotNull(viewModel.state.value.search.error)
 
         api.searchError = null
         viewModel.updateSearchQuery("七里香")
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertNull(viewModel.state.value.searchError)
+        assertNull(viewModel.state.value.search.error)
     }
 
     @Test
@@ -885,7 +885,7 @@ class QQDownloadViewModelTest {
         advanceTimeBy(300)
         advanceUntilIdle()
         assertEquals(listOf("晴天"), api.searchQueries)
-        assertNotNull(viewModel.state.value.searchError)
+        assertNotNull(viewModel.state.value.search.error)
 
         api.searchError = null
         viewModel.retrySearch()
@@ -893,8 +893,8 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
 
         assertEquals(listOf("晴天", "晴天"), api.searchQueries)
-        assertNull(viewModel.state.value.searchError)
-        assertEquals(listOf(song), viewModel.state.value.songs)
+        assertNull(viewModel.state.value.search.error)
+        assertEquals(listOf(song), viewModel.state.value.search.songs)
     }
 
     @Test
@@ -910,15 +910,15 @@ class QQDownloadViewModelTest {
         viewModel.updateSearchQuery("晴天")
         advanceTimeBy(300)
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.credentialExpired)
+        assertTrue(viewModel.state.value.service.credentialExpired)
         val queriesBefore = api.searchQueries.toList()
 
         viewModel.retryCredential()
         advanceTimeBy(300)
         advanceUntilIdle()
 
-        assertFalse(viewModel.state.value.credentialExpired)
-        assertNull(viewModel.state.value.searchError)
+        assertFalse(viewModel.state.value.service.credentialExpired)
+        assertNull(viewModel.state.value.search.error)
         assertEquals(queriesBefore + "晴天", api.searchQueries)
     }
 
@@ -930,10 +930,10 @@ class QQDownloadViewModelTest {
 
         viewModel.downloadSong(song.copy(availableQualities = emptyList()))
         advanceUntilIdle()
-        assertNotNull(viewModel.state.value.actionMessage)
+        assertNotNull(viewModel.state.value.download.actionMessage)
 
         viewModel.dismissActionMessage()
-        assertNull(viewModel.state.value.actionMessage)
+        assertNull(viewModel.state.value.download.actionMessage)
     }
 
     // ── 换服务地址（#31）：上一条服务看到的东西全部作废 ──────────────
@@ -957,24 +957,24 @@ class QQDownloadViewModelTest {
         advanceUntilIdle()
         viewModel.refreshJobs()
         advanceUntilIdle()
-        assertTrue(viewModel.state.value.inLibraryMids.isNotEmpty())
-        assertNotNull(viewModel.state.value.albumPicker)
-        assertEquals(1, viewModel.state.value.jobs.size)
+        assertTrue(viewModel.state.value.download.inLibraryMids.isNotEmpty())
+        assertNotNull(viewModel.state.value.download.albumPicker)
+        assertEquals(1, viewModel.state.value.download.jobs.size)
 
         // 换了一台电脑上的导入服务：搜索结果、任务、已入库标记、弹窗都属于上一条服务。
         viewModel.autoFillServiceUrl("http://192.168.1.99")
         advanceUntilIdle()
 
-        assertEquals("http://192.168.1.99:8900", viewModel.state.value.serviceUrl)
-        assertTrue(viewModel.state.value.songs.isEmpty())
-        assertTrue(viewModel.state.value.albums.isEmpty())
-        assertTrue(viewModel.state.value.inLibraryMids.isEmpty())
-        assertTrue(viewModel.state.value.activeDownloadingMids.isEmpty())
-        assertTrue(viewModel.state.value.jobs.isEmpty())
-        assertNull(viewModel.state.value.albumPicker)
+        assertEquals("http://192.168.1.99:8900", viewModel.state.value.service.serviceUrl)
+        assertTrue(viewModel.state.value.search.songs.isEmpty())
+        assertTrue(viewModel.state.value.search.albums.isEmpty())
+        assertTrue(viewModel.state.value.download.inLibraryMids.isEmpty())
+        assertTrue(viewModel.state.value.download.activeDownloadingMids.isEmpty())
+        assertTrue(viewModel.state.value.download.jobs.isEmpty())
+        assertNull(viewModel.state.value.download.albumPicker)
         // 用户偏好不随换服务丢；新服务的探活结果照常落盘。
-        assertEquals("320", viewModel.state.value.quality)
-        assertTrue(viewModel.state.value.serviceReachable)
+        assertEquals("320", viewModel.state.value.settings.quality)
+        assertTrue(viewModel.state.value.service.serviceReachable)
     }
 
     @Test
@@ -994,8 +994,8 @@ class QQDownloadViewModelTest {
         viewModel.autoFillServiceUrl("http://192.168.1.10:1234")
         advanceUntilIdle()
 
-        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
-        assertEquals(listOf(song), viewModel.state.value.songs)
+        assertEquals("http://192.168.1.10:8900", viewModel.state.value.service.serviceUrl)
+        assertEquals(listOf(song), viewModel.state.value.search.songs)
     }
 
     @Test
@@ -1023,10 +1023,10 @@ class QQDownloadViewModelTest {
         // 有界推进（不 advanceUntilIdle）：够旧请求回来即可。
         advanceTimeBy(6_000)
 
-        assertTrue(viewModel.state.value.songs.isEmpty())
-        assertTrue(viewModel.state.value.jobs.isEmpty())
-        assertTrue(viewModel.state.value.inLibraryMids.isEmpty())
-        assertEquals("http://192.168.1.99:8900", viewModel.state.value.serviceUrl)
+        assertTrue(viewModel.state.value.search.songs.isEmpty())
+        assertTrue(viewModel.state.value.download.jobs.isEmpty())
+        assertTrue(viewModel.state.value.download.inLibraryMids.isEmpty())
+        assertEquals("http://192.168.1.99:8900", viewModel.state.value.service.serviceUrl)
     }
 
     private fun TestScope.createViewModel(

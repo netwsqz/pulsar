@@ -1,6 +1,6 @@
 # QQ 下载状态拆分（#31）
 
-> 状态：**代码完成（2026-11-18，#31）**，待真机验收。
+> 状态：**代码完成（2026-11-18，#31）**，待真机验收。迁移期兼容层已由 #34（2026-11-18）删除。
 > 这是 `docs/library-state-refactor.md` §9「待确认 4」的落地：`QQDownloadViewModel` 的 25 字段大 state
 > 按曲库那条线（#11–#16）的同一套口径拆成 slice，**独立于曲库状态**。
 > 相关：`docs/library-state-refactor.md`、`docs/unified-search-refactor.md`（合并搜索只读 QQ 状态，未改）。
@@ -10,13 +10,20 @@
 ## 1. 目标
 
 把 `QQDownloadUiState` 的 25 个平铺字段按**所有权**拆成四块 slice，组合后仍只对外发一条
-`StateFlow<QQDownloadUiState>`（ADR-0010）。旧读法保留为只读兼容层，**各屏行为与现有测试不变**。
+`StateFlow<QQDownloadUiState>`（ADR-0010）。当时旧读法保留为只读兼容层、各屏行为与测试不变；
+兼容层随后已由 #34 删除（见 §5、§8），现在只剩带归属的读法。
 
 ## 2. 非目标
 
 - 不改搜索 / 入队 / 轮询 / 凭证的任何行为与文案（唯一例外见 §4）。
 - 不拆 ViewModel（仍是一个 `QQDownloadViewModel`），不碰 PC 服务、DataStore 键与接口。
-- 不删除兼容层（另开一张票，口径同 #16；见 §8）。
+- 不删除兼容层（另开一张票，口径同 #16；见 §8）——**该票即 #34，已完成**。
+
+## 1.1 当前形状（#34 之后）
+
+`QQDownloadUiState` 只有 `service` / `settings` / `search` / `download` 四个字段；
+界面与测试直接读 `state.service.xxx` / `state.search.xxx` / `state.download.xxx`。
+本文其余各节保留 #31 当时的决策记录，涉及「兼容层」的表述以 §5 / §8 的更新注记为准。
 
 ## 3. slice 划分
 
@@ -26,7 +33,7 @@
 |---|---|---|
 | `QQServiceState` | `serviceUrl` / `serviceReachable` / `credentialExpired` / `isRetryingCredential` / `credentialMessage` / `libraryReady` / `libraryCount` / `libraryRoot` | 服务**回报**的状态：连通、凭证、曲库索引 |
 | `QQSettingsState` | `quality` / `fileOpsKey` / `fileOpsKeyInput` | 用户**设定**的偏好（落盘在 `QQDownloadPreferences`） |
-| `QQSearchState` | `query` / `isSearching` / `songs` / `albums` / `searchHadResults` / `error` | 搜索自己的一组状态；错误只有一格（ADR-0006 的两条渲染路径之一） |
+| `QQSearchState` | `query` / `isSearching` / `songs` / `albums` / `error` | 搜索自己的一组状态；错误只有一格（ADR-0006 的两条渲染路径之一）。`searchHadResults` 已随 #34 删除（只写不读） |
 | `QQDownloadState` | `jobs` / `downloadingMids` / `inLibraryMids` / `isEnqueuingAlbum` / `enqueuingAlbumMid` / `albumPicker` / `redownloadPrompt` / `actionMessage` | 入队到电脑的任务、标记、弹窗与动作提示 |
 
 命名与位置：
@@ -57,10 +64,16 @@
 - `QQSettingsState` **没有** `cleared()`：它没有清理路径（用户偏好不随换服务清）。
   将来真有「重置设置」入口时再加，别提前留一个没人调的空壳。
 
-## 5. 兼容层
+## 5. 兼容层（已删除，#34）
 
-25 个旧字段保留为**构造时求值的只读 `val`**（不是自定义 getter：getter 会让
+> **2026-11-18 更新**：迁移期兼容层已在 #34 整段删除。`QQDownloadUiState` 现在只有
+> `service` / `settings` / `search` / `download` 四个字段，界面与测试直接读带归属的路径
+> （`state.service.xxx` / `state.search.xxx` / `state.download.xxx`）。
+> 下面是当时的做法，保留作决策历史。
+
+25 个旧字段曾保留为**构造时求值的只读 `val`**（不是自定义 getter：getter 会让
 `if (state.credentialMessage != null)` 之后的智能转换失效，界面现有写法会编译不过）。
+删掉它们时读法无需二次改造——本来就写成 `service.xxx` 这类带归属的路径，删除后没有行为变化。
 
 与 #11 的差异：那里连 `copy(...)` 也做了旧参数名兼容；这里调用方只剩 `QQDownloadViewModel`
 一个，直接改成写 slice（`updateService` / `updateSettings` / `updateSearch` / `updateDownload`），
@@ -69,8 +82,8 @@
 
 ## 6. 测试
 
-- `QQDownloadUiStateTest`（4 项）：四块 slice 的形状、默认实例、兼容层只读（没有 `var`）、
-  兼容层与 slice 字段的映射固定。
+- `QQDownloadUiStateTest`（#31 时 4 项；#34 删掉两条兼容层用例后 2 项）：四块 slice 的形状
+  （字段名集合恰好四块）、默认实例。
 - `QQDownloadStateClearedTest`（4 项）：换服务的清空语义 + 反射夹具覆盖每块 slice 的每个字段
   （新增字段漏清会红）+ 有清理路径的三块 slice 的 `cleared()` 是默认实例。
 - `QQDownloadViewModelTest` +3 项：换地址清掉旧服务数据（保留音质、新服务探活照常）；
@@ -89,5 +102,9 @@
 
 ## 8. 后续
 
-- **删除兼容层 + 屏幕迁 slice**：口径同 #16（屏幕直接读 `qqState.search.xxx` 等，删掉平铺读法）。
-  兼容层是只读的，删除前不会发生「两份写法各写一半」的问题。
+- **删除兼容层 + 屏幕迁 slice**：✅ 已完成（#34，2026-11-18）。
+  口径同 #16：屏幕直接读 `qqState.search.xxx` 等，平铺读法整段删除；
+  `QQDownloadUiStateTest` 的形状钉子从「按类型筛」收紧成「字段名集合恰好四块 slice」
+  （否则删掉兼容层后会退化成恒真）；顺手删掉只写不读的 `QQSearchState.searchHadResults`。
+- 页面 Composable 仍收整个 `QQDownloadUiState`（本票只改读法、不收窄参数），
+  将来要收窄的话按需再做。

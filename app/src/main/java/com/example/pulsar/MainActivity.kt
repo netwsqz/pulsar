@@ -887,8 +887,8 @@ private fun MusicLibraryScreen(
     }
     // QQ 下载动作反馈（音质不可用 / 入队失败 / 整专跳过 N 首）走 Snackbar——那是动作反馈。
     // 搜索期失败（服务不可用 / 凭证过期）不走这里，它在搜索页 QQ 分区里常驻（ADR-0006）。
-    LaunchedEffect(qqState.actionMessage) {
-        val message = qqState.actionMessage ?: return@LaunchedEffect
+    LaunchedEffect(qqState.download.actionMessage) {
+        val message = qqState.download.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
         qqViewModel.dismissActionMessage()
     }

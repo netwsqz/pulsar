@@ -104,15 +104,15 @@ internal fun DownloadServiceScreen(
                 modifier = Modifier.padding(bottom = Dimens.SpaceSmall)
             )
         }
-        if (state.credentialExpired) {
+        if (state.service.credentialExpired) {
             item(key = "credentialExpired") {
                 SurfaceCard {
-                    CredentialExpiredCard(state.isRetryingCredential, onRetryCredential)
+                    CredentialExpiredCard(state.service.isRetryingCredential, onRetryCredential)
                 }
             }
         }
         // 服务级错误：这里展示的是「服务本身有问题」（凭证过期已有专属卡片，跳过避免重复）。
-        val errorText = state.searchError?.takeIf { !state.credentialExpired }
+        val errorText = state.search.error?.takeIf { !state.service.credentialExpired }
         if (errorText != null) {
             item(key = "errorText") {
                 Text(
@@ -123,7 +123,7 @@ internal fun DownloadServiceScreen(
                 )
             }
         }
-        if (!state.serviceReachable || state.serviceUrl.isBlank()) {
+        if (!state.service.serviceReachable || state.service.serviceUrl.isBlank()) {
             item(key = "serviceStatus") { SurfaceCard { ServiceStatusCard(state) } }
         }
         // 默认下载音质：下载时优先用这档，音源没有则自动降级。
@@ -148,7 +148,7 @@ internal fun DownloadServiceScreen(
                     "128" to "128K"
                 ).forEach { (value, label) ->
                     FilterChip(
-                        selected = state.quality == value,
+                        selected = state.settings.quality == value,
                         onClick = { onQualityChange(value) },
                         label = { Text(label, maxLines = 1) }
                     )
@@ -163,10 +163,10 @@ internal fun DownloadServiceScreen(
         // 老服务端没有曲库索引（root 为空且就绪）时不显示这行。
         // 绑 serviceUrl 而不是 serviceReachable：服务不可达时它同样是 false，会把
         // 「连不上服务」和「这是台没索引的老服务端」两种完全不同的病因混成同一句话。
-        if (state.serviceUrl.isNotBlank() && (!state.libraryReady || state.libraryRoot.isNotBlank())) {
+        if (state.service.serviceUrl.isNotBlank() && (!state.service.libraryReady || state.service.libraryRoot.isNotBlank())) {
             item(key = "libraryInfo") {
                 Text(
-                    if (state.libraryReady) "曲库：${state.libraryRoot} · ${state.libraryCount} 首"
+                    if (state.service.libraryReady) "曲库：${state.service.libraryRoot} · ${state.service.libraryCount} 首"
                     else "曲库：扫描中…（服务刚启动要先扫一遍曲库，约十几秒）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -175,10 +175,10 @@ internal fun DownloadServiceScreen(
             }
         }
         // 手动一键刷新凭证：只在已连接且未过期时显示（过期时顶部横幅已有重试按钮）。
-        if (state.serviceReachable && !state.credentialExpired) {
+        if (state.service.serviceReachable && !state.service.credentialExpired) {
             item(key = "credentialRefresh") { CredentialRefreshRow(state, onRefreshCredential) }
         }
-        if (state.jobs.isNotEmpty()) {
+        if (state.download.jobs.isNotEmpty()) {
             item(key = "jobsHeader") {
                 Row(
                     Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
@@ -189,7 +189,7 @@ internal fun DownloadServiceScreen(
                     TextButton(onClick = onRefreshJobs) { Text("刷新") }
                 }
             }
-            items(state.jobs, key = { it.jobId }) { job ->
+            items(state.download.jobs, key = { it.jobId }) { job ->
                 QQJobRow(job)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
             }
@@ -215,11 +215,11 @@ internal fun LazyListScope.qqSearchSection(
     onSelectAlbumTracks: (QQAlbumDto) -> Unit,
     onRetrySearch: () -> Unit
 ) {
-    if (state.searchQuery.isBlank()) return
-    val hasResults = state.songs.isNotEmpty() || state.albums.isNotEmpty()
+    if (state.search.query.isBlank()) return
+    val hasResults = state.search.songs.isNotEmpty() || state.search.albums.isNotEmpty()
     val statusText = state.searchStatus
     // 什么都没有（没结果、没错误、没在搜）时连标题都不出：别在曲库结果下面留一个空分区。
-    if (!hasResults && statusText == null && !state.isSearching) return
+    if (!hasResults && statusText == null && !state.search.isSearching) return
     // 「搜过了确实没有」说清楚：只在曲库为空、QQ 有结果时出现在 QQ 分区上方。
     if (libraryMessage != null) {
         item(key = "qqLibraryEmpty") {
@@ -249,7 +249,7 @@ internal fun LazyListScope.qqSearchSection(
             }
         }
     }
-    if (state.isSearching) {
+    if (state.search.isSearching) {
         item(key = "qqSearching") {
             Box(
                 Modifier.fillMaxWidth().padding(vertical = Dimens.SpaceLarge),
@@ -257,25 +257,26 @@ internal fun LazyListScope.qqSearchSection(
             ) { CircularProgressIndicator() }
         }
     }
-    if (state.songs.isNotEmpty()) {
+    if (state.search.songs.isNotEmpty()) {
         item(key = "qqSongsHeader") { SectionHeader("歌曲", SectionHeaderStyle.Section) }
-        items(state.songs, key = { song -> "qq-song-${song.songMid}-${song.title}" }) { song ->
+        items(state.search.songs, key = { song -> "qq-song-${song.songMid}-${song.title}" }) { song ->
             QQSongRow(
                 song = song,
-                downloading = song.songMid in state.activeDownloadingMids,
-                inLibrary = song.songMid in state.inLibraryMids,
+                downloading = song.songMid in state.download.activeDownloadingMids,
+                inLibrary = song.songMid in state.download.inLibraryMids,
                 onDownload = { onDownloadSong(song) },
                 onRequestRedownload = { onRequestRedownload(song) }
             )
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
         }
     }
-    if (state.albums.isNotEmpty()) {
+    if (state.search.albums.isNotEmpty()) {
         item(key = "qqAlbumsHeader") { SectionHeader("专辑", SectionHeaderStyle.Section) }
-        items(state.albums, key = { "qq-album-${it.albumMid}" }) { album ->
+        items(state.search.albums, key = { "qq-album-${it.albumMid}" }) { album ->
             QQAlbumRow(
                 album = album,
-                isEnqueuing = state.isEnqueuingAlbum && state.enqueuingAlbumMid == album.albumMid,
+                isEnqueuing = state.download.isEnqueuingAlbum &&
+                    state.download.enqueuingAlbumMid == album.albumMid,
                 onSelectTracks = { onSelectAlbumTracks(album) },
                 onDownloadAll = { onDownloadAlbum(album) }
             )
@@ -296,15 +297,16 @@ internal fun QQSearchDialogs(
     actions: SearchActions
 ) {
     // 选曲弹窗：AlertDialog 自带独立窗口，不占列表布局。
-    state.albumPicker?.let { picker ->
+    state.download.albumPicker?.let { picker ->
         AlbumPickerDialog(
             picker = picker,
             // 按专辑收窄（同专辑行的判法）：别的专辑正在入队时，不能把本弹窗一起冻住。
-            isEnqueuing = state.isEnqueuingAlbum && state.enqueuingAlbumMid == picker.albumMid,
+            isEnqueuing = state.download.isEnqueuingAlbum &&
+                state.download.enqueuingAlbumMid == picker.albumMid,
             // 凭证过期有专属卡片（同主列表的横幅），避免和 errorMessage 重复说同一件事。
-            errorMessage = picker.errorMessage?.takeIf { !state.credentialExpired },
-            credentialExpired = state.credentialExpired,
-            isRetryingCredential = state.isRetryingCredential,
+            errorMessage = picker.errorMessage?.takeIf { !state.service.credentialExpired },
+            credentialExpired = state.service.credentialExpired,
+            isRetryingCredential = state.service.isRetryingCredential,
             onRetryCredential = actions.onRetryCredential,
             onToggleTrack = actions.onToggleAlbumTrack,
             onSelectAll = actions.onSelectAllAlbumTracks,
@@ -312,12 +314,12 @@ internal fun QQSearchDialogs(
             onConfirm = actions.onConfirmAlbumDownload,
             onRetryLoad = actions.onRetryAlbumTracks,
             onDismiss = actions.onDismissAlbumPicker,
-            inLibraryMids = state.inLibraryMids,
-            downloadingMids = state.activeDownloadingMids
+            inLibraryMids = state.download.inLibraryMids,
+            downloadingMids = state.download.activeDownloadingMids
         )
     }
     // 重下确认：已在库的曲目点了下载图标 → 问一句「仍要重新下载？」，确认才带 force 重发。
-    state.redownloadPrompt?.let { song ->
+    state.download.redownloadPrompt?.let { song ->
         AlertDialog(
             onDismissRequest = actions.onDismissRedownload,
             shape = RoundedCornerShape(Dimens.CornerExtraLarge),
@@ -353,7 +355,7 @@ private fun FileOpsKeyCard(
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
-                value = state.fileOpsKeyInput,
+                value = state.settings.fileOpsKeyInput,
                 onValueChange = onFileOpsKeyInput,
                 modifier = Modifier.weight(1f),
                 label = { Text("密钥") },
@@ -371,8 +373,15 @@ private fun FileOpsKeyCard(
             Spacer(Modifier.width(Dimens.SpaceSmall))
             TextButton(
                 onClick = onSaveFileOpsKey,
-                enabled = state.fileOpsKeyInput.isNotBlank() && state.fileOpsKeyInput.trim() != state.fileOpsKey
-            ) { Text(if (state.fileOpsKeyInput.trim() == state.fileOpsKey && state.fileOpsKey.isNotBlank()) "已保存" else "保存") }
+                enabled = state.settings.fileOpsKeyInput.isNotBlank() &&
+                    state.settings.fileOpsKeyInput.trim() != state.settings.fileOpsKey
+            ) {
+                Text(
+                    if (state.settings.fileOpsKeyInput.trim() == state.settings.fileOpsKey &&
+                        state.settings.fileOpsKey.isNotBlank()
+                    ) "已保存" else "保存"
+                )
+            }
         }
     }
 }
@@ -382,7 +391,7 @@ private fun FileOpsKeyCard(
 private fun ServiceStatusCard(state: QQDownloadUiState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)) {
         Text("QQ 音乐导入服务", style = MaterialTheme.typography.titleMedium)
-        if (state.serviceUrl.isBlank()) {
+        if (state.service.serviceUrl.isBlank()) {
             Text(
                 "等待服务器地址：登录 Jellyfin 后会自动连接同机的下载服务。",
                 style = MaterialTheme.typography.bodySmall,
@@ -390,7 +399,7 @@ private fun ServiceStatusCard(state: QQDownloadUiState) {
             )
         } else {
             Text(
-                "连不上 ${state.serviceUrl}：确认电脑上已双击 server\\start.bat 启动服务，且手机和电脑在同一网络。",
+                "连不上 ${state.service.serviceUrl}：确认电脑上已双击 server\\start.bat 启动服务，且手机和电脑在同一网络。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -439,8 +448,8 @@ private fun CredentialRefreshRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)
     ) {
-        TextButton(onClick = onRefreshCredential, enabled = !state.isRetryingCredential) {
-            if (state.isRetryingCredential) {
+        TextButton(onClick = onRefreshCredential, enabled = !state.service.isRetryingCredential) {
+            if (state.service.isRetryingCredential) {
                 CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(Dimens.SpaceSmall))
             } else {
@@ -449,9 +458,9 @@ private fun CredentialRefreshRow(
             }
             Text("刷新凭证")
         }
-        if (state.credentialMessage != null) {
+        if (state.service.credentialMessage != null) {
             Text(
-                state.credentialMessage,
+                state.service.credentialMessage,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.primary
             )

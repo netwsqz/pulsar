@@ -62,7 +62,6 @@ internal object QQDownloadStateFixtures {
             isSearching = true,
             songs = listOf(song),
             albums = listOf(album),
-            searchHadResults = true,
             error = "连不上下载服务",
         ),
         download = QQDownloadState(

@@ -179,15 +179,9 @@ class QQDownloadViewModel(
             currentApi.search(query).fold(
                 onSuccess = { songs ->
                     if (generation == searchGeneration) {
-                        updateSearch {
-                            it.copy(
-                                isSearching = false,
-                                songs = songs,
-                                // 搜索能成功就说明服务是通的（服务标志写 service slice）。
-                                searchHadResults = songs.isNotEmpty(),
-                            )
-                        }
-                        // 搜索能成功就说明服务是通的：把之前那次「连不上」的常驻小字撤掉。
+                        updateSearch { it.copy(isSearching = false, songs = songs) }
+                        // 搜索能成功就说明服务是通的（「搜过了有没有结果」看 songs / albums，
+                        // 不再单独记一个布尔）：把之前那次「连不上」的常驻小字撤掉。
                         updateService { it.copy(serviceReachable = true) }
                         // 标记并入全局集合（以 song_mid 为键），不挂在单曲对象上——
                         // 搜索结果整批替换，挂在单曲上的标记每搜一次就丢。
@@ -729,11 +723,9 @@ interface QQDownloadApiFactory {
  * | [search] | 查询词、搜索结果、搜索期错误 | 清空 |
  * | [download] | 任务列表、已在库/下载中标记、选曲弹窗、动作提示 | 清空 |
  *
- * **构造参数只有这四块 slice**；下面那批平铺字段是**只读兼容层**（构造时求值的 `val`），
- * 屏幕与现有测试因此不用改，写入一律走 slice。它与曲库那条线的差异只有一点：那里连
- * `copy(...)` 也做了旧参数名兼容，这里调用方只有 `QQDownloadViewModel` 一个，直接改成写
- * slice，少一层过渡。兼容层是只读的——想写状态就加到对应 slice 上
- * （`QQDownloadUiStateTest` 钉死形状与一致性）。
+ * **构造参数只有这四块 slice**（#34 删除平铺读法）：屏幕与测试直接读带归属的路径
+ * （`state.service.xxx` / `state.search.xxx` / `state.download.xxx`），想写状态就改对应 slice。
+ * `QQDownloadUiStateTest` 钉死形状。
  */
 data class QQDownloadUiState(
     val service: QQServiceState = QQServiceState(),
@@ -741,40 +733,6 @@ data class QQDownloadUiState(
     val search: QQSearchState = QQSearchState(),
     val download: QQDownloadState = QQDownloadState(),
 ) {
-    // ── 迁移期兼容层（#31）：旧读法，只读 ──────────────────────────
-    // 用构造时求值的 val 而不是自定义 getter：getter 会让 `state.credentialMessage != null`
-    // 之后的智能转换失效，而那是界面现有的写法。
-
-    val serviceUrl: String = service.serviceUrl
-    val serviceReachable: Boolean = service.serviceReachable
-    val credentialExpired: Boolean = service.credentialExpired
-    val isRetryingCredential: Boolean = service.isRetryingCredential
-    val credentialMessage: String? = service.credentialMessage
-    val libraryReady: Boolean = service.libraryReady
-    val libraryCount: Int = service.libraryCount
-    val libraryRoot: String = service.libraryRoot
-
-    val quality: String = settings.quality
-    val fileOpsKey: String = settings.fileOpsKey
-    val fileOpsKeyInput: String = settings.fileOpsKeyInput
-
-    val searchQuery: String = search.query
-    val isSearching: Boolean = search.isSearching
-    val songs: List<QQSongDto> = search.songs
-    val albums: List<QQAlbumDto> = search.albums
-    val searchHadResults: Boolean = search.searchHadResults
-    val searchError: String? = search.error
-
-    val jobs: List<QQJobDto> = download.jobs
-    val downloadingMids: Set<String> = download.downloadingMids
-    val inLibraryMids: Set<String> = download.inLibraryMids
-    val isEnqueuingAlbum: Boolean = download.isEnqueuingAlbum
-    val enqueuingAlbumMid: String? = download.enqueuingAlbumMid
-    val albumPicker: AlbumPickerState? = download.albumPicker
-    val redownloadPrompt: QQSongDto? = download.redownloadPrompt
-    val actionMessage: String? = download.actionMessage
-    val activeDownloadingMids: Set<String> = download.activeDownloadingMids
-
     /**
      * 换了一台电脑上的导入服务（`autoFillServiceUrl` 算出的地址变了）：
      * 上一条服务的状态、搜索结果、任务与弹窗整块作废，只保留用户偏好 [settings]，
@@ -795,7 +753,7 @@ data class QQDownloadUiState(
  * 搜索页 QQ 分区顶部那行常驻状态：搜索期失败或凭证过期。
  *
  * 凭证过期即便还没搜（健康接口先报出来的）也要提前说，别等用户点了下载才拦。
- * 与 [QQDownloadUiState.actionMessage] 是两条渲染路径：这条常驻在分区里，那条走 Snackbar。
+ * 与 [QQDownloadState.actionMessage] 是两条渲染路径：这条常驻在分区里，那条走 Snackbar。
  */
 internal val QQDownloadUiState.searchStatus: String?
     get() = search.error ?: if (service.credentialExpired) {

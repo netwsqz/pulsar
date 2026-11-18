@@ -20,13 +20,6 @@ data class QQSearchState(
     val isSearching: Boolean = false,
     val songs: List<QQSongDto> = emptyList(),
     val albums: List<QQAlbumDto> = emptyList(),
-    /**
-     * 最近一次成功的歌曲搜索是否有结果。
-     *
-     * 目前**只写不读**（合并搜索的判据改看 [songs] / [albums] 是否为空）：保留它是因为
-     * 旧状态里就有，删字段不属于这次拆 slice 的范围。别拿它当渲染依据。
-     */
-    val searchHadResults: Boolean = false,
     /** 搜索期失败的一行小字（常驻分区，见类注释）；null = 没有错误。 */
     val error: String? = null,
 ) {

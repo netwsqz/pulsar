@@ -62,9 +62,9 @@ internal fun searchScreenState(
             searchNotice = searchNotice
         ),
         qq = QqSearchInput(
-            songs = qq.songs,
-            albums = qq.albums,
-            isSearching = qq.isSearching,
+            songs = qq.search.songs,
+            albums = qq.search.albums,
+            isSearching = qq.search.isSearching,
             searchStatus = qq.searchStatus
         )
     ),

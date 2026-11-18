@@ -94,7 +94,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 
 `server/qqmusic_service.py`（FastAPI，8900，`start.bat` 手动启动）只调用不修改 `E:\music` 的现成函数，落盘 `E:\file\Te_Music`；QQ cookie 只在 PC 侧，**App 不接触**。Android 侧 `data/qqdownload/` + `QQDownloadViewModel` 与 Jellyfin 会话完全独立，搜索 300ms 防抖、任务轮询 2s。入口是「设置 → QQ 音乐导入」，不占顶层页签。
 
-状态按所有权分四块 slice（`state/QQServiceState` / `QQSettingsState` / `QQSearchState` / `QQDownloadState`，#31）：**服务回报的**状态、**用户设的**偏好、搜索、下载任务分开放。`QQDownloadUiState` 仍是组合根，25 个旧字段是**只读兼容层**——写状态一律走 slice，别写兼容层。换服务地址（`autoFillServiceUrl` 到不同地址）走 `cleared(newUrl)`：旧服务的状态/搜索/下载整块作废，用户偏好保留。细节见 `docs/qq-download-state-refactor.md`。
+状态按所有权分四块 slice（`state/QQServiceState` / `QQSettingsState` / `QQSearchState` / `QQDownloadState`，#31）：**服务回报的**状态、**用户设的**偏好、搜索、下载任务分开放。`QQDownloadUiState` 只有这四块 slice（兼容层已由 #34 删除），界面与测试直接读带归属的路径（`qqState.search.xxx` / `qqState.download.xxx`），写状态一律走 slice，**别往组合根加字段**（`QQDownloadUiStateTest` 钉死形状）。换服务地址（`autoFillServiceUrl` 到不同地址）走 `cleared(newUrl)`：旧服务的状态/搜索/下载整块作废，用户偏好保留。细节见 `docs/qq-download-state-refactor.md`。
 
 ## 测试
 

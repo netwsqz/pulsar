@@ -375,6 +375,20 @@ class LibraryCache(
 3. 如果决定改「单一 StateFlow」约定，写一条 ADR：**state 按所有权分 slice，组合后仍单一 StateFlow**。
 4. 全量测试 + `assembleDebug` + 真机清单。
 
+## 6.1 回退策略
+
+每一步都是独立 commit，`git revert <hash>` 即可退回该步之前（提交对照见 roadmap §5.2）。
+下面只写「revert 之外还要注意什么」：
+
+| Step | 怎么退 |
+|---|---|
+| Step 0 | 未碰生产代码，无需回退 |
+| Step 1 | revert `e36d958`；旧 UI 读法一直保留，退回来只是 slice 消失，无数据迁移 |
+| Step 2 | revert `aff7b09` 会连 `LibraryCache` 本身一起删掉（它是 #12 新建的），而 **#16 之后已有代码依赖它**：`JellyfinViewModel.kt:1095` 读 `libraryCache.currentAlbum`，单退这一步编译不过，要先退 #16 或一起退。另外改前共享 `albumsJob` 的旧实现不在仓库里，**跨节互不取消的 bug 会一起回来** |
+| Step 3 | revert `dfc4ed3`；登出/过期/登录重新回到手抄字段列表，新加字段会漏清 |
+| Step 4 | 分两次 revert：`f7d0f88`（#14 列表页）+ `4317b0b`（#15 详情/设置页）。**在当前 HEAD 单退一半编译不过**——#16 已删掉 `JellyfinUiState` 的兼容读法，退回去的调用点会指向不存在的字段；要退就和 #16 一起退 |
+| Step 5 / Step 6 | 都并进 `bc5a844`（#16）一个提交，不能分开退：删死字段与兼容层、删 `selectedAlbum` / `selectedPlaylist`、补 ADR-0010 与文档。revert 后旧字段回来但没有生产读者、`rememberSaveable` 导航恢复消失（转屏丢页签），**ADR-0010 也一起被删**（它在同一个提交里新增）；如需撤销决策另写 ADR。注意 DataStore 键名未动，回退不丢会话 |
+
 ## 7. 测试策略
 
 - `LibraryCacheTest`：每节 job、幂等、失败语义、离线快照、代次。

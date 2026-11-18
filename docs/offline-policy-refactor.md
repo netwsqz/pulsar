@@ -1,6 +1,6 @@
 # OfflinePolicy 重构执行计划
 
-> 状态：**待研究**。本文是 candidate 2（离线策略收成一个 module）的执行规格，不是 ADR。
+> 状态：**已落地（2026-11-11，#8–#10；#30 于 2026-11-18 补齐），待真机确认**。本文是 candidate 2（离线策略收成一个 module）的执行规格，不是 ADR。
 > 相关：`docs/playback-session-refactor.md`、`docs/download-library-refactor.md`、`docs/library-state-refactor.md`。
 > ADR 边界：**ADR-0008 明确决定「离线过滤在界面层派生、原始 state 不动」**。本方案不改变这条，只是把散落的派生收进一个由界面调用的纯 module。
 
@@ -136,6 +136,11 @@ fun albumsFromTracks(tracks: List<Track>): List<Album>
 >
 > 新测试：`app/src/test/java/com/example/pulsar/offline/OfflinePolicyTest.kt`（16 项）。
 > 旧 `offlineVisibleLibrary` / `discoverSections` 保留为内部委托，未删。
+
+> **已完成 2026-11-18（#30，本步的「多选全选」遗留）**：离线过滤只作用于渲染、不作用于「全选」的 bug 已补。
+> 新增纯函数 `currentListTracks(section, visible)`，各页全选源一律取离线过滤后的可见列表（`edde51c`）；
+> 发现页全选只勾每日推荐，删除目标改从原始列表反查——离线翻转后可见列表收缩，已勾的歌不会被悄悄丢掉（`2d0b45c`）。
+> `SelectableTracksTest` 钉死「各页全选集合 = 可见集合」与删除候选池。
 
 1. 新增 `app/src/main/java/com/example/pulsar/offline/OfflinePolicy.kt`、`OfflineModels.kt`。
 2. `MusicLibraryScreen` 里把 `offlineFilter` + `visible` 的 if/else 换成 `offlineView(...)`。

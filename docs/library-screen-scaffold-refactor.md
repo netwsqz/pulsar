@@ -1,6 +1,6 @@
 # LibraryScreenScaffold 重构执行计划
 
-> 状态：**待研究（Speculative）**。本文是 candidate 7（页面骨架收成一个 module）的执行规格，不是 ADR。
+> 状态：**已落地（2026-11-15 → 11-17，#24–#27），待真机确认**。本文是 candidate 7（页面骨架收成一个 module）的执行规格，不是 ADR。
 > 相关：`docs/offline-policy-refactor.md`（离线提示类型）、`docs/unified-search-refactor.md`（搜索页骨架）。
 > 注意：这是 presentation 的 consolidation，收益主要是「少改几处、少漏一个分支」，不直接提高可测性。项目没有 Compose 测试设施，验收靠编译 + 真机。
 
@@ -126,17 +126,23 @@ data class DetailActions(
 
 ### Step 0 — 基线 + 站点清单
 
+> **已完成 2026-11-15（#24）**：差异表落在 [issue #24 评论](https://github.com/netwsqz/pulsar/issues/24#issuecomment-6892458474)。
+> 实际扫到 11 处三态块（规格列的 10 处之外，另有三节历史这一组组合态）；`TracksContent` 的错误分支确认是**漏的**
+> ——`library.tracks == null` 时无条件画骨架，错误永远不显示，留给 #25 补。
+
 1. 跑全量单测 + `assembleDebug`。
 2. 把 10 个三态块、5 个 TrackRow 组装点、3 个 header、3 套骨架逐个列出来，标出差异（哪些有 error、哪些有 offline 空态、哪些有 leadingNumber）。
 3. 先确认 `TracksContent` 的 error 分支是**漏了**还是有意为之；按现在的代码看是漏了。
 
 **验收**：站点清单 + 差异表；知道先迁哪两个屏。
 
-> **已完成 2026-11-15（#24）**：差异表落在 [issue #24 评论](https://github.com/netwsqz/pulsar/issues/24#issuecomment-6892458474)。
-> 实际扫到 11 处三态块（规格列的 10 处之外，另有三节历史这一组组合态）；`TracksContent` 的错误分支确认是**漏的**
-> ——`library.tracks == null` 时无条件画骨架，错误永远不显示，留给 #25 补。
-
 ### Step 1 — `LoadState` + `LibraryScreenScaffold`，迁 2 个简单列表页
+
+> **已完成 2026-11-15（#24）**：新增 `ui/components/LoadState.kt`（`LoadState` + 纯函数
+> `libraryLoadState`）与 `ui/components/LibraryScreenScaffold.kt`；`ErrorState` / `EmptyState` /
+> `OfflineNoticeText` 从 `MainActivity.kt` 移到 `ui/components/StateMessages.kt`（只搬家，样式未改）。
+> 两页的分支顺序与对齐差异原样保留（播放列表「离线优先于错误」、专辑居顶 / 播放列表居中）；
+> `LibraryLoadStateTest` 9 项钉死映射。全量 944 项 0 失败，`assembleDebug` 通过；真机验收待用户确认。
 
 1. 新增 `app/src/main/java/com/example/pulsar/ui/components/LibraryScreenScaffold.kt`、`LoadState.kt`。
 2. 先迁 `AlbumsContent` 与 `PlaylistsContent`：
@@ -146,19 +152,7 @@ data class DetailActions(
 
 **验收**：两页视觉与交互不变；代码里不再有各自的三态 `when`。
 
-> **已完成 2026-11-15（#24）**：新增 `ui/components/LoadState.kt`（`LoadState` + 纯函数
-> `libraryLoadState`）与 `ui/components/LibraryScreenScaffold.kt`；`ErrorState` / `EmptyState` /
-> `OfflineNoticeText` 从 `MainActivity.kt` 移到 `ui/components/StateMessages.kt`（只搬家，样式未改）。
-> 两页的分支顺序与对齐差异原样保留（播放列表「离线优先于错误」、专辑居顶 / 播放列表居中）；
-> `LibraryLoadStateTest` 9 项钉死映射。全量 944 项 0 失败，`assembleDebug` 通过；真机验收待用户确认。
-
 ### Step 2 — 迁歌曲页与艺术家页（顺手补 error 分支）
-
-1. `TracksContent` 改用 scaffold；`errorMessage` 现在会显示。
-2. `LibraryGroupsContent` 改用 scaffold。
-3. 真机断网 / 制造错误，确认歌曲页这次能显示错误 + 重试。
-
-**验收**：歌曲页错误分支出现；其余行为不变。
 
 > **已完成 2026-11-16（#25）**：两页都改用 `LibraryScreenScaffold`，三态判断统一走 `libraryLoadState`。
 > 歌曲页错误态的重试接新增的 `JellyfinViewModel.loadTracks()`（`LibraryCache` 新增 `Tracks` 槽，
@@ -170,6 +164,12 @@ data class DetailActions(
 > `library.tracks` 几乎总是非 null——错误分支在结构上补齐了，但按现在的流程真机触发不到；
 > 要让它在真机上出现，得改「恢复失败回登录页」的产品决策（另开工单，不在 #25）。
 > 全量 947 项 0 失败；`assembleDebug` 通过；真机验收待用户确认。
+
+1. `TracksContent` 改用 scaffold；`errorMessage` 现在会显示。
+2. `LibraryGroupsContent` 改用 scaffold。
+3. 真机断网 / 制造错误，确认歌曲页这次能显示错误 + 重试。
+
+**验收**：歌曲页错误分支出现；其余行为不变。
 
 ### Step 3 — 拆详情头，迁详情页
 
@@ -192,6 +192,14 @@ data class DetailActions(
 
 ### Step 4 — `TrackList` + `SectionHeader` 收口
 
+> **已完成 2026-11-17（#27）**：`TrackRow` 组装收成 `LazyListScope.trackList` 工厂——
+> 歌曲 / 发现 / 专辑详情 / 播放列表 / 搜索五处不再各拼一遍参数（专辑详情用 `leadingNumbers`、
+> 发现页用 `keyPrefix`）；三个区块标题（`SettingsSectionHeader` / `DiscoverSectionHeader` /
+> `SearchSectionHeader`）与 `QQDownloadScreen` 的 `QQSectionHeader` 收成
+> `SectionHeader` + `SectionHeaderStyle`，页面标题统一走 `SectionHeaderStyle.Page`。
+> 与原文的差异：**第 3 条「发现页两张卡抽成 `DiscoverCard`」是可选项，未做**（保持原状）。
+> 验收达成：`grep "TrackRow("` 只剩 `trackList` 内部一处；header 只剩一个定义。
+
 1. 五个 TrackRow 组装点改成 `TrackList`（或 `TrackList` 的变体）。
 2. 三个 section header + 六个内联 title 收成一个 `SectionHeader`。
 3. 发现页两张卡如果只差 click / long-click，抽成一个 `DiscoverCard`（可选）。
@@ -201,10 +209,30 @@ data class DetailActions(
 
 ### Step 5 — 清理 + 文档
 
+> **已完成 2026-11-17（#27）**：`CLAUDE.md` 的 UI 章节补上骨架 / 三态 / 列表组件
+> （`LibraryScreenScaffold` / `LoadState` / `trackList` / `SectionHeader`）的职责。
+> 与原文的差异：`MediaDetailScaffold` 已无 `fullRow` 参数（#26 就改成了 `DetailActions?`），
+> 无需删除；`MainActivity` 里仍有一个 `LazyGridScope.fullRow`，那是网格状态块跨满整行的
+> 布局助手，**与本次无关、保留**。`CONTEXT.md` 未改（UI 结构不是领域概念，与原文判断一致）。
+> 全量单测与 `assembleDebug` 通过；§8 真机清单待验。
+
 1. 删除 `MediaDetailScaffold` 的旧分支、未使用的 `fullRow`（如果不再需要）。
 2. 更新 `CLAUDE.md` 的 UI 章节：加 `LibraryScreenScaffold` / `LoadState` / `TrackList` 的职责。
 3. `CONTEXT.md` 不需要新术语（这是 UI 结构，不是领域概念）。
 4. 全量测试 + `assembleDebug` + 真机清单。
+
+## 6.1 回退策略
+
+| Step | 怎么退 |
+|---|---|
+| Step 0 / Step 1 | 都落在 `a3a1920`（#24）一个提交里，不能单独回退；退回后专辑 / 播放列表恢复各自的三态 `when`，`LoadState` / `LibraryScreenScaffold` 消失 |
+| Step 2 | revert `30f57c9`（#25）；歌曲页恢复「无错误分支」的旧形态，`LibraryCache.Tracks` 槽与 `loadTracks()` 一起消失（歌曲页重试回到无入口） |
+| Step 3 | 见本节末尾的「回退」段：只回退 `7668fb0` 对 `MainActivity.kt` 与 `ui/components/DetailHeader.kt` 的改动 |
+| Step 4 / Step 5 | 都落在 `4d1df8a`（#27）一个提交里，不能单独回退；退回后五处 `TrackRow` 组装点与四个 header 组件复原，`CLAUDE.md` 章节一并消失 |
+
+**注意**：整套骨架只改 presentation 层，**不涉及数据、下载名单、会话存储或离线策略**，
+任何一步回退都不会影响已下载字节或登录状态。真机验收前回退是安全的；验收后回退
+会丢掉「歌曲页固定头部」这一处可见的布局变化（#25 已记录）。
 
 ## 7. 测试策略
 

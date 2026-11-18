@@ -121,6 +121,15 @@ fun interface SessionScopedJellyfinApiFactory {
 
 ### Step 0 — 基线 + 调用点清单
 
+> **已完成 2026-11-15（#20）**：清单落在 issue #20 的 Step 0 评论。与原文的差异（实际清点）：
+> - `JellyfinApi` 有 **17 个接口方法**，其中 16 个带凭据：10 个带 `(userId, accessToken)`、
+>   6 个只带 `accessToken`（原文「12 个」已与当时的接口数量不符）。
+> - `activeAuthorization` 是**6 个写点**（不是 7 个），全在 `JellyfinViewModel`；
+>   读点 2 处（`PlaybackService` 播放流、`PulsarApplication` 下载上游）。
+> - 两个会话模型 `SavedSession`（DataStore 持久化）/ `JellyfinSession`（内存）的构造、读点、
+>   测试构造点已逐条列出。
+> 本步未碰生产代码。
+
 1. 跑全量单测。
 2. 列出所有 `userId` / `accessToken` 的调用点（grep）。
 3. 列出所有 `activeAuthorization` 的读写点。
@@ -245,6 +254,24 @@ fun interface SessionScopedJellyfinApiFactory {
 3. 更新 `CONTEXT.md`：加 **会话作用域（SessionScope）** 术语；说明 token 不进 URL/日志/UI。
 4. 全量测试 + `assembleDebug` + 真机清单。
 5. 如果决定删掉 `activeAuthorization` 全局，补一条 ADR：**会话凭据由 SessionManager 单一持有**。
+
+## 6.1 回退策略
+
+每一步是独立 commit（对照见 roadmap §5.2）。**DataStore 的键名与字段名全程未动**，
+所以任何一步回退都不会让用户重新登录。
+
+| Step | 怎么退 |
+|---|---|
+| Step 0 | 未碰生产代码，无需回退 |
+| Step 1 | revert `d6c9f14`；两个新文件与测试一起消失，生产代码从未接线 |
+| Step 2 | revert `eeb00d2`；ViewModel 回到自带 `sessionStore` / `apiFactory` / `authorizationSink`，`SessionManager` 仍在但无人用 |
+| Step 3 | revert `1970287`；播放/下载回到读 `AuthorizationSink`，`PlaybackReporter` 回到每次自建 API。**这一步会恢复全局 `activeAuthorization` 缓存**，与 ADR-0011 的结论相反（ADR 文件本身在 `124921d` 才加，不会跟着这次回退消失，但代码不再遵守它） |
+| Step 4 / Step 5 | 都并进 `124921d`（#23）一个提交，不能分开退：`SessionScopedJellyfinApi` 与 `JellyfinLoginApi` 回到单一 `JellyfinApi`，`Session` 回到 `SavedSession` / `JellyfinSession`，**ADR-0011 与 `CLAUDE.md` / `CONTEXT.md` 的对应章节也在这个提交里，会一起被删**。所有调用点与 Fake 必须同步回退，否则编译不过 |
+
+**注意**：Step 3 与 Step 4 互相引用对方引入的 API 形状（上报走窄接口 / 会话作用域 API）。
+跨步回退（例如只退 Step 3 而不退 Step 4）需要手工把 `PlaybackReporter` 适配到现有
+`SessionScopedJellyfinApi`，不会自动编译通过；要整段退建议 `git revert 1970287 124921d`
+或直接退到 `eeb00d2`。
 
 ## 7. 测试策略
 

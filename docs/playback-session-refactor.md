@@ -235,6 +235,15 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 
 ### Step 2 — 引入 `PlaybackRemote` + `PlaybackSession`（连接 / 状态 / 轮询）
 
+> **已完成 2026-11-08（#1）**：新增 `PlaybackRemote` / `MediaControllerPlaybackRemote` /
+> `PlaybackSession` / `PlaybackUiState`，把 `rememberMediaController` 的连接、`Player.Listener`、
+> 500ms 轮询与 USB 独占 / USB 音量 / 静音跳过自定义命令搬进会话模块；UI 改
+> `rememberPlaybackSession`，`ControllerState` 暂留作过渡映射。
+> 与原文的差异：`SessionCommand` 的 extras 改用 `Bundle()`（JVM 桩化 android.jar 里
+> `Bundle.EMPTY` 为 null，会让构造抛 NPE；语义等价于空包）。
+> `PlaybackSessionTest` 17 例（连接成功 / 失败、轮询、USB 命令成功与失败、in-flight 不并发、
+> 静音开关、音量键、`close()` 后停轮询）；全量 748 例与 `assembleDebug` 通过。
+
 **目标**：把 `rememberMediaController` 的 229 行搬进 module；UI 只收状态 + 发 intent。队列写操作仍在旧路径，先不动。
 
 **改哪些文件**
@@ -282,6 +291,13 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 
 ### Step 3 — 队列与播放意图全部走 module
 
+> **已完成 2026-11-08（#2）**：`ControllerState` 补 `isConnected` / `mode` / `dispatch` / `events` /
+> `currentMediaItem`，界面统一只读状态、只发 `PlaybackIntent`；迷你条与全屏页删掉 `playbackMode`
+> 本地副本，队列与传输（播放暂停 / 上一首 / 下一首 / seek / Reorder / PlayQueueItem /
+> RemoveFromQueue / CycleMode）全部走 dispatch；删除已死的 `playTracks`、
+> `MediaController.applyPlaybackMode`、`applyQueueOrder`；`PlaybackSession` 补齐 10 个意图。
+> 新增 9 个用例；全量 757 例与 `assembleDebug` 通过。
+
 **目标**：删掉 UI 里所有直接 `MediaController` 写操作；`playbackMode` 进 module。
 
 **改哪些文件**
@@ -327,6 +343,15 @@ GRADLE='/c/Tools/gradle-8.10.2/bin/gradle.bat'
 ---
 
 ### Step 4 — 清理 + 文档 + 删除测试
+
+> **已完成 2026-11-08（#3）**：`ControllerState` 过渡壳删除，`SettingsContent` / `MiniPlayerBar` /
+> `NowPlayingScreen` 直接读 `PlaybackUiState`、只发 `PlaybackIntent`，`rememberPlaybackSession`
+> 直接返回 `PlaybackSession`；新增 `PlaybackModeStore`（接口 + DataStore 实现，键 `playback_mode`）
+> 让播放模式跨转屏保留；`PlaybackSessionTest` +4 例（加载进 state、连接后应用到播放器、写盘、
+> `close()` 后不再写盘）。全量 761 例与 `assembleDebug` 通过。
+> 与原文验收的差异：**「`MainActivity.kt` 至少少 400 行」不是这一步单独达成的**——
+> 大头（229 行 `rememberMediaController`）在 Step 2 就搬走了，Step 4 自身只再减 33 行（5076 → 5043）。
+> 真机清单见 §8。
 
 > **2026-11-09 更新**：#2 / #3 已经把动作 1 的四个符号全部删掉了（`ControllerState` / `queueSnapshot` /
 > `applyQueueOrder` / `playTracks` 在 `MainActivity.kt` 里各 0 处）。动作 2 的 grep 也已经干净。

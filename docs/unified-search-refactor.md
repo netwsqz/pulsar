@@ -138,6 +138,10 @@ fun SearchContent(
 
 ### Step 0 — 基线 + 分支清单
 
+> **已完成 2026-11-14（#17）**：10 个分支逐条列成用例清单，落地成 `UnifiedSearchViewTest`
+> 的 18 个用例（部分分支拆成多条）；确认 `QQSearchDialogs` 的 9 个转发回调都能放进 `SearchActions`。
+> 本步未碰生产代码。
+
 1. 跑全量单测。
 2. 把 `SearchContent` 的 `when` 分支逐条抄成一张表（条件 → 界面），作为测试用例清单。
 3. 确认 `QQSearchDialogs` 的 10 个参数是否都能放进 `SearchActions`。
@@ -145,6 +149,17 @@ fun SearchContent(
 **验收**：10 个分支都有名字；知道哪些分支目前没有测试。
 
 ### Step 1 — 纯函数 + 测试（不接 UI）
+
+> **已完成 2026-11-14（#17）**：新增 `search/SearchModels.kt`（`SearchInput` / `QqSearchInput` /
+> sealed `SearchViewState`）与 `search/UnifiedSearchView.kt`（`unifiedSearchViewState`）。
+> 与原文的差异：
+> - sealed 变体实际是 `Blank` / `Loading` / `Results` / `LibraryError` / `LibraryEmptyQqError` /
+>   `BothEmpty` / `OfflineEmpty`（比草图多一个 `LibraryError`）。
+> - 离线标识直接消费 `OfflinePolicy` 的 `searchNotice`（#8），**没有另造 `isOfflineFiltered`**
+>   （与 §9 的命名对齐约定一致）。
+> - 测试 18 例，钉住 10 个验收分支 + 错误优先级（曲库错误 > QQ 状态 > 离线空态 > 普通空态），
+>   并覆盖「QQ 有结果时曲库侧问题不能盖掉它」。
+> 两个 ViewModel 与两套 300ms 防抖一概未动。
 
 1. 新增 `app/src/main/java/com/example/pulsar/search/UnifiedSearchView.kt`、`SearchModels.kt`。
 2. 先写 `UnifiedSearchViewTest`：
@@ -164,6 +179,14 @@ fun SearchContent(
 
 ### Step 2 — SearchContent 接纯状态（参数先不缩）
 
+> **已完成 2026-11-14（#18）**：没有保留「先不缩参数」的中间态——`SearchContent` 一次性缩到
+> **3 个参数**（`state` / `actions` / `modifier`）。合并结论由 `searchScreenState` 调
+> `unifiedSearchViewState` 算好后整块传入，页面只按 sealed `SearchViewState` 的类型渲染，
+> 不再内联 `libraryEmpty` / `bothEmpty` 与错误优先级。新增 `SearchScreenState`
+> （合并结论 + 输入框即时值 + 离线标识 + QQ 下载状态 + 播放高亮/封面）与
+> `SearchScreenModelsTest` 4 例，钉住「离线标识在 Loading 时仍在」「QQ 状态原样带到分区」等口径。
+> 全量 901 例与 `assembleDebug` 通过。
+
 1. `SearchContent` 内部把 `when` 换成 `when (state: SearchViewState)`。
 2. 保持 30 个参数不变，先让渲染逻辑走新状态；行为不变。
 3. 跑测试 + 真机搜索几种情况。
@@ -171,6 +194,11 @@ fun SearchContent(
 **验收**：搜索结果、空态、错误优先级与改前一致。
 
 ### Step 3 — 引入 `SearchActions`，缩 interface
+
+> **已完成 2026-11-14（#18）**：`SearchActions`（`search/SearchScreenModels.kt`）把 20 个动作
+> 按 Library / Qq / Dialog 分组；`QQSearchDialogs` 改收 `SearchActions`，不再逐条转发；
+> 调用点删掉 30 行 `viewModel::*` / `qqViewModel::*` 参数块，改由 `searchActions` 一处组装。
+> 验收：`SearchContent` 3 个参数（< 4）。
 
 1. 在调用点构造 `SearchActions`（一次性），传给 `SearchContent`。
 2. `SearchContent` 只保留 `state` / `query` / `actions` / `modifier`。
@@ -181,10 +209,31 @@ fun SearchContent(
 
 ### Step 4 — 清理 + 文档
 
+> **已完成 2026-11-15（#19）**：合并判据与文案收单点——
+> 「曲库中没找到 / 曲库搜索未完成」只在 `SearchModels.libraryEmptyMessage` 一处，
+> 整页空态与 QQ 分区共用；QQ 分区不再自己拼 `libraryEmpty && hasResults`，改由
+> `SearchViewState.Results.libraryMessage` 传入；离线搜索空态文案移到
+> `offline/OfflineSearchNotice.emptyMessage`，遵守「离线文案只在离线 module」的约定。
+> `CLAUDE.md` 增加「合并搜索（ADR-0006）」章节，`CONTEXT.md` 补「合并规则由纯函数单点决定」。
+> 全量 905 例与 `assembleDebug` 通过；§8 真机清单待验。
+
 1. 删除 `SearchContent` 里内联的合并判断与重复文案。
 2. 更新 `CLAUDE.md` 搜索章节：加 `UnifiedSearchView` 的职责与「两个 ViewModel 不动」。
 3. `CONTEXT.md` 已有「合并搜索」，可补一句「合并规则由 `unifiedSearchViewState` 单点决定」。
 4. 全量测试 + `assembleDebug` + 真机清单。
+
+## 6.1 回退策略
+
+| Step | 怎么退 |
+|---|---|
+| Step 0 | 未碰生产代码，无需回退 |
+| Step 1 | revert `07e6c7e`；纯 module 与 `UnifiedSearchViewTest` 一起消失，`SearchContent` 仍用内联判据（本步不接 UI） |
+| Step 2 / Step 3 | 两步都落在 `b665427` 一个提交里，**不能单独回退**；要退就整张 #18 一起退，`SearchContent` 回到 30 个参数 + 内联合并判断 |
+| Step 4 | revert `15c3c48`；文案回到页面内联、QQ 分区自拼判据；`CLAUDE.md` / `CONTEXT.md` 的对应章节一并消失 |
+
+**注意**：回退 #18/#19 **不会**影响两个 ViewModel 的搜索防抖与凭证过期逻辑——那两块从始至终
+没被这套重构碰过（ADR-0006）。若只回退 UI 层而保留 `search/` module，代码仍可编译
+（`searchScreenState` 是独立纯函数），只是没人调用。
 
 ## 7. 测试策略
 

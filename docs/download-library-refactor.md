@@ -1,6 +1,7 @@
 # DownloadLibrary 重构执行计划
 
-> 状态：**进行中（2026-11-09）**。#4 / #5 已完成并本地提交；#6 进行中；#7 未开始。
+> 状态：**已落地（2026-11-08 → 11-10，#4–#7），待真机确认**。各 Step 的落地说明见 Step 顶部注记；
+> 回退见 §11。
 > 本文是 candidate 4（下载真相只留一个 module）的执行规格，不是 ADR。
 > 相关：`docs/session-scope-refactor.md`（账号作用域）、`docs/library-state-refactor.md`（DownloadState slice）。
 > ADR 边界：**ADR-0007 决定「音频字节共享、可见性按账号、退出登录不清下载、只有完整副本才算数」**。本方案不改任何一条，只把同一批规则从五处收成一处。
@@ -132,6 +133,9 @@ class DownloadLibrary(
 
 ### Step 0 — 基线 + 行为矩阵
 
+> **已完成 2026-11-08（#4）**：基线 **761 例**全绿；五套派生的覆盖清单与「输入 → 期望输出」矩阵
+> 并进 #4 的 TDD 列表。本步未碰生产代码。
+
 1. 跑全量单测。
 2. 列出当前五个派生各自的测试覆盖：
    - `MediaDownloadsTest`（字节层，5 个）
@@ -144,6 +148,13 @@ class DownloadLibrary(
 **验收**：知道哪些行为已有测试、哪些是空白。
 
 ### Step 1 — `DownloadLibrary` 骨架 + 账号作用域
+
+> **已完成 2026-11-08（#4）**：新增 `download/DownloadModels.kt`（`AccountScope` / `DownloadStats` /
+> `DownloadSnapshot` / `DownloadActionState`）与 `download/DownloadLibrary.kt`：**字节完整 ∩ 当前账号名单**
+> 的唯一真相，`refresh(tracks, cacheKeyOf)` 在 module 内算交集。`JellyfinViewModel.computeDownloadedTrackIds`
+> 委托 library，module 未注入时保留旧兜底；登录 / 恢复 / 切号 / 退出 / 会话过期同步账号作用域，
+> 退出登录字节与统计不丢（ADR-0007）。`PulsarApplication` 增加进程级单例并注入 ViewModel 工厂。
+> `DownloadLibraryTest` 15 例 + ViewModel 接线 2 例；全量 778 例与 `assembleDebug` 通过。
 
 1. 新增 `app/src/main/java/com/example/pulsar/download/DownloadLibrary.kt`、`DownloadModels.kt`。
 2. 构造函数注入 `MediaDownloads` / `DownloadLedgerStore` / `DownloadScheduler` / `CoroutineScope`。
@@ -164,6 +175,13 @@ class DownloadLibrary(
 
 ### Step 2 — 五态与删除收进 library
 
+> **已完成 2026-11-08（#5）**：`DownloadLibrary` 增加 `stateFor`（五态 StateFlow）与 `delete` / `deleteTrack`；
+> `DownloadModels` 增加 `buildDownloadTarget` / `downloadDeletedMessage` / `DownloadDeleteResult`。
+> `DownloadActionButton` 只画 `stateFor` + `library.delete`，去掉对 `mediaDownloads()` / `downloadLedgerStore()`
+> 的直接取用；两条删除路径（整张专辑 / 单曲）都走 library，整张专辑删除规则只剩一份实现。
+> 测试 790 例全绿；`DownloadActionButtonTest`（12 例）拆成删除行为用例（进 `DownloadLibraryTest`，
+> 15 → 29）与纯函数用例 `DownloadActionStateTest`（10 例）。
+
 1. `DownloadActionButton` 的 `resolveDownloadState` / `resolveAllTracksComplete` / `confirmDelete` / `openDeleteConfirm` 改为：
    - `val state by library.stateFor(target).collectAsStateWithLifecycle()`
    - 删除：`library.delete(target, currentTrackId)`
@@ -182,6 +200,12 @@ class DownloadLibrary(
 
 ### Step 3 — 入队 / 取消 / 统计统一入口
 
+> **已完成 2026-11-09（#6）**：`DownloadLibrary` 新增 `enqueue` / `cancel` / `updateLedger`，界面不再直接持有调度器；
+> 删除路径的两处 `load+replaceAll` 改为 `store.update`，名单只有唯一读改写入口；
+> `downloadLedgerStore` 收成进程级单例并包 `SerializedDownloadLedgerStore`（含 prune 加锁）；
+> 工厂与 ViewModel 去掉自建 store 和 DataStore 向下转型；完成 / 失败 / 取消 / 删除后刷新 stats。
+> 补并发写名单与取消补缺口测试。
+
 1. `DownloadLibrary.enqueue` / `cancel` 包 scheduler；
 2. `DownloadsSection` 的失败聚合改读 `library.state`；
 3. `PulsarApplication` 只保留一个 `downloadLibrary` 单例；`mediaDownloads()` / `downloadScheduler` 不再被 UI 直接拿。
@@ -196,6 +220,11 @@ class DownloadLibrary(
 
 ### Step 4 — 名单串行化 + 接口收口
 
+> **已完成 2026-11-09（#6）**：与 Step 3 同一个提交 `9870774`——名单读改写统一走 `DownloadLedgerStore.update`，
+> scheduler 的 `ledgerMutex` 收进 library，prune 加锁；`pruneUnattributed()` 进接口，
+> 生产代码里不再有 `as? DataStoreDownloadLedgerStore` 向下转型。补「并发两个 writer 不丢条目」
+> 与「prune 只删空归属」的测试。
+
 1. 把 `DownloadScheduler.recordInLedger` 的 `ledgerMutex` 逻辑收进 `DownloadLibrary` 的 `updateLedger`，scheduler 通过回调/接口写入。
 2. `DownloadLedgerStore` 增加 `pruneUnattributed()`（接口方法），删除 ViewModel 的向下转型；工厂统一用 `application.downloadLedgerStore()`。
 3. 补测试：并发两个 writer 不丢条目（用 `runTest` + 两个 coroutine）；prune 只删空归属。
@@ -204,6 +233,12 @@ class DownloadLibrary(
 **验收**：名单写入只有一个 `Mutex`；没有 `as? DataStoreDownloadLedgerStore`。
 
 ### Step 5 — 清理 + 文档
+
+> **已完成 2026-11-10（#7）**：`JellyfinViewModel` 删除 `legacyComputeDownloadedTrackIds` /
+> `visibleDownloadedTrackIds` / `refreshCacheStats`，已下载判定与统计统一走 `DownloadLibrary`；
+> `JellyfinUiState` 移除 `cacheBytes` / `cacheTrackCount`，设置页改读 module 快照的 `stats`；
+> `DownloadLibrary.refreshStats` 成为统计唯一入口。`CLAUDE.md` 补下载库职责与「一个真相」红线，
+> `CONTEXT.md` 补 `DownloadLibrary` / `DownloadSnapshot` 术语；补部分失败五态与 `refreshStats` 单测。
 
 1. 删除旧的 `resolveDownloadState` / `resolveAllTracksComplete` / `downloadKeysToDelete` / `downloadDeletedMessage`（或移到 library 内部并标注 internal）。
 2. 更新 `CLAUDE.md` 下载章节：加 `DownloadLibrary` 的职责与「一个真相」红线。

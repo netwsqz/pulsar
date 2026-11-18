@@ -234,6 +234,12 @@ _Avoid_: 大 state、旧字段、兼容层——它们描述的是已删除的�
 
 **界面字段随登出清，下载字节与名单不清**（ADR-0007）；「已下载」的算法只有 `DownloadLibrary` 一处。
 
+### QQ 导入状态（QQDownloadUiState）
+
+`QQDownloadViewModel.kt`。QQ 音乐导入（遥控电脑把歌抓进电脑曲库）的界面状态，与 Jellyfin 会话**完全独立**。组合根按所有权装四块 slice：`service`（服务回报的连通性 / 凭证 / 曲库索引）、`settings`（默认音质、文件操作密钥这类用户偏好）、`search`（QQ 侧的搜索结果与错误）、`download`（任务队列、已在库 / 下载中标记、选曲弹窗、动作提示）。换服务地址时清 `service` / `search` / `download`，保留 `settings`。
+
+_Avoid_: 在界面文案 / 页签名里用「下载」指 QQ 导入——这个词归手机上的[下载](#下载download)（ADR-0007）；这一页叫「QQ 音乐导入」。（`QQDownload*` 是代码里的历史前缀，指「把歌下载进电脑」，别把界面也写成「QQ 下载」。）
+
 ## 主题与配色
 
 ### 主题色板（Theme palette）

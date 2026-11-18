@@ -30,7 +30,7 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 单 `app` 模块，按层分包：
 
 - `data/`（jellyfin / qqdownload / libraryfiles）：网络与 PC 服务，统一返回 `Result<T>`；`toAlbum()` 的 imageTag **只取 `Primary`，不回退 Backdrop**。
-- `state/`（三个 slice）、`library/`（`LibraryCache`）、`offline/`（纯 module）、`search/`（合并搜索纯函数）、`download/`（`DownloadLibrary`）、`playback/`（含 `usb/`）、`ui/`（theme / components）、`domain/model/`、`server/`（PC 伴生 Python 服务）。
+- `state/`（曲库三个 slice + QQ 导入四个 slice）、`library/`（`LibraryCache`）、`offline/`（纯 module）、`search/`（合并搜索纯函数）、`download/`（`DownloadLibrary`）、`playback/`（含 `usb/`）、`ui/`（theme / components）、`domain/model/`、`server/`（PC 伴生 Python 服务）。
 - 页面级 Composable 仍集中在 `MainActivity.kt`（约 5000 行）；`NowPlayingScreen.kt`、`QQDownloadScreen.kt` 独立成文件。
 
 ## 跨层约定
@@ -93,6 +93,8 @@ lint 在 `app/build.gradle.kts` 里整体禁用（release 构建会崩），别�
 ### QQ 音乐导入（PC 伴生服务）
 
 `server/qqmusic_service.py`（FastAPI，8900，`start.bat` 手动启动）只调用不修改 `E:\music` 的现成函数，落盘 `E:\file\Te_Music`；QQ cookie 只在 PC 侧，**App 不接触**。Android 侧 `data/qqdownload/` + `QQDownloadViewModel` 与 Jellyfin 会话完全独立，搜索 300ms 防抖、任务轮询 2s。入口是「设置 → QQ 音乐导入」，不占顶层页签。
+
+状态按所有权分四块 slice（`state/QQServiceState` / `QQSettingsState` / `QQSearchState` / `QQDownloadState`，#31）：**服务回报的**状态、**用户设的**偏好、搜索、下载任务分开放。`QQDownloadUiState` 仍是组合根，25 个旧字段是**只读兼容层**——写状态一律走 slice，别写兼容层。换服务地址（`autoFillServiceUrl` 到不同地址）走 `cleared(newUrl)`：旧服务的状态/搜索/下载整块作废，用户偏好保留。细节见 `docs/qq-download-state-refactor.md`。
 
 ## 测试
 

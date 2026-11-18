@@ -11,6 +11,11 @@ import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQAlbumSongDto
 import com.example.pulsar.data.qqdownload.QQSongDto
+import com.example.pulsar.state.QQDownloadState
+import com.example.pulsar.state.QQSearchState
+import com.example.pulsar.state.QQServiceState
+import com.example.pulsar.state.QQSettingsState
+import com.example.pulsar.state.isActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -51,6 +56,23 @@ class QQDownloadViewModel(
     private val _state = MutableStateFlow(QQDownloadUiState())
     val state: StateFlow<QQDownloadUiState> = _state.asStateFlow()
 
+    // ── 状态写入口（#31）：组合根只有四块 slice，写哪个就落到哪个（同 JellyfinViewModel）──
+    private fun updateService(transform: (QQServiceState) -> QQServiceState) {
+        _state.value = _state.value.let { it.copy(service = transform(it.service)) }
+    }
+
+    private fun updateSettings(transform: (QQSettingsState) -> QQSettingsState) {
+        _state.value = _state.value.let { it.copy(settings = transform(it.settings)) }
+    }
+
+    private fun updateSearch(transform: (QQSearchState) -> QQSearchState) {
+        _state.value = _state.value.let { it.copy(search = transform(it.search)) }
+    }
+
+    private fun updateDownload(transform: (QQDownloadState) -> QQDownloadState) {
+        _state.value = _state.value.let { it.copy(download = transform(it.download)) }
+    }
+
     private var api: QQDownloadApi? = null
     private var searchJob: Job? = null
     private var searchGeneration = 0
@@ -59,13 +81,15 @@ class QQDownloadViewModel(
     private var pickerGeneration = 0
     private var healthJob: Job? = null
     private var healthGeneration = 0
+    private var credentialJob: Job? = null
 
     init {
         viewModelScope.launch(dispatcher) {
             val url = preferences.serviceUrl()
             val quality = preferences.quality()
             val fileOpsKey = preferences.fileOpsKey()
-            _state.value = _state.value.copy(serviceUrl = url, quality = quality, fileOpsKey = fileOpsKey, fileOpsKeyInput = fileOpsKey)
+            updateService { it.copy(serviceUrl = url) }
+            updateSettings { it.copy(quality = quality, fileOpsKey = fileOpsKey, fileOpsKeyInput = fileOpsKey) }
             if (url.isNotBlank()) {
                 applyServiceUrl(url)
                 checkHealth()
@@ -81,50 +105,72 @@ class QQDownloadViewModel(
         val host = runCatching { java.net.URI(jellyfinServerUrl.trim()).host }.getOrNull()
         if (host.isNullOrBlank()) return
         val url = "http://$host:8900"
-        if (url == _state.value.serviceUrl) return
+        if (url == _state.value.service.serviceUrl) return
         viewModelScope.launch(dispatcher) {
             preferences.saveServiceUrl(url)
             applyServiceUrl(url)
-            _state.value = _state.value.copy(serviceUrl = url)
+            // 换了另一台电脑上的导入服务：上一条服务的搜索结果、任务、已入库标记与弹窗
+            // 全部作废（它们都属于那条服务）；用户偏好（音质 / 文件操作密钥）保留。
+            // 先作废在途工作再清状态，否则旧服务的响应会写回新服务的状态里。
+            invalidateServiceScopedWork()
+            _state.value = _state.value.cleared(serviceUrl = url)
             checkHealth()
         }
     }
 
+    /**
+     * 换服务：把**属于上一条服务**的在途工作全部作废（取消 + 代次递增）。
+     *
+     * 只清状态是不够的——在途协程手里握着旧 api，回来时代次没变就会把旧服务的数据
+     * （搜索结果 / 任务列表 / 健康结果 / 凭证反馈）写回新服务的状态里。与曲库那条线
+     * 「登录 / 会话过期清空缓存并靠代次挡住过期协程」是同一套口径（#31）。
+     */
+    private fun invalidateServiceScopedWork() {
+        searchJob?.cancel()
+        searchGeneration++
+        pollJob?.cancel()
+        pollGeneration++
+        healthJob?.cancel()
+        healthGeneration++
+        credentialJob?.cancel()
+        pickerGeneration++
+    }
+
     fun updateQuality(quality: String) {
         if (quality !in QQDownloadSettings.QUALITIES) return
-        _state.value = _state.value.copy(quality = quality)
+        updateSettings { it.copy(quality = quality) }
         viewModelScope.launch(dispatcher) { preferences.saveQuality(quality) }
     }
 
     /** 文件操作密钥输入：只改输入框，点「保存」才落盘（删错一个字符不用去 DataStore 捞）。 */
     fun updateFileOpsKeyInput(value: String) {
-        _state.value = _state.value.copy(fileOpsKeyInput = value)
+        updateSettings { it.copy(fileOpsKeyInput = value) }
     }
 
     fun saveFileOpsKey() {
-        val key = _state.value.fileOpsKeyInput.trim()
+        val key = _state.value.settings.fileOpsKeyInput.trim()
         viewModelScope.launch(dispatcher) {
             preferences.saveFileOpsKey(key)
-            _state.value = _state.value.copy(fileOpsKey = key, fileOpsKeyInput = key)
+            updateSettings { it.copy(fileOpsKey = key, fileOpsKeyInput = key) }
         }
     }
 
     fun updateSearchQuery(value: String) {
-        _state.value = _state.value.copy(searchQuery = value, searchError = null)
+        updateSearch { it.copy(query = value, error = null) }
         searchJob?.cancel()
         val query = value.trim()
         val currentApi = api
         if (query.isEmpty()) {
             searchGeneration++
-            _state.value = _state.value.copy(songs = emptyList(), albums = emptyList(), isSearching = false)
+            updateSearch { it.copy(songs = emptyList(), albums = emptyList(), isSearching = false) }
             return
         }
         if (currentApi == null) {
-            _state.value = _state.value.copy(searchError = SERVICE_NOT_CONNECTED_MESSAGE)
+            updateSearch { it.copy(error = SERVICE_NOT_CONNECTED_MESSAGE) }
             return
         }
         val generation = ++searchGeneration
-        _state.value = _state.value.copy(isSearching = true)
+        updateSearch { it.copy(isSearching = true) }
         searchJob = viewModelScope.launch(dispatcher) {
             delay(SEARCH_DEBOUNCE_MS)
             if (!coroutineContext.isActive || generation != searchGeneration) return@launch
@@ -133,17 +179,24 @@ class QQDownloadViewModel(
             currentApi.search(query).fold(
                 onSuccess = { songs ->
                     if (generation == searchGeneration) {
+                        updateSearch {
+                            it.copy(
+                                isSearching = false,
+                                songs = songs,
+                                // 搜索能成功就说明服务是通的（服务标志写 service slice）。
+                                searchHadResults = songs.isNotEmpty(),
+                            )
+                        }
+                        // 搜索能成功就说明服务是通的：把之前那次「连不上」的常驻小字撤掉。
+                        updateService { it.copy(serviceReachable = true) }
                         // 标记并入全局集合（以 song_mid 为键），不挂在单曲对象上——
                         // 搜索结果整批替换，挂在单曲上的标记每搜一次就丢。
-                        _state.value = _state.value.copy(
-                            isSearching = false,
-                            songs = songs,
-                            // 搜索能成功就说明服务是通的：把之前那次「连不上」的常驻小字撤掉。
-                            serviceReachable = true,
-                            searchHadResults = songs.isNotEmpty(),
-                            inLibraryMids = _state.value.inLibraryMids + songs.filter { it.inLibrary }.map { it.songMid }.toSet(),
-                            downloadingMids = songs.filter { it.downloading }.map { it.songMid }.toSet()
-                        )
+                        updateDownload {
+                            it.copy(
+                                inLibraryMids = it.inLibraryMids + songs.filter { song -> song.inLibrary }.map { song -> song.songMid }.toSet(),
+                                downloadingMids = songs.filter { song -> song.downloading }.map { song -> song.songMid }.toSet(),
+                            )
+                        }
                     }
                 },
                 onFailure = { error ->
@@ -159,7 +212,7 @@ class QQDownloadViewModel(
                         // 代次已过期就悄悄丢弃：searchFailed 已在这一轮开头定好，
                         // 这里再走 showSearchError 会把新一轮搜索的错误文案冲掉。
                         if (generation == searchGeneration) {
-                            _state.value = _state.value.copy(albums = albums)
+                            updateSearch { it.copy(albums = albums) }
                         }
                     },
                     onFailure = { error ->
@@ -176,12 +229,12 @@ class QQDownloadViewModel(
      */
     fun downloadSong(song: QQSongDto, force: Boolean = false) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
+            updateDownload { it.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE) }
             return
         }
         val quality = selectQuality(song.availableQualities)
         if (quality == null) {
-            _state.value = _state.value.copy(actionMessage = "该歌曲没有可下载的音质")
+            updateDownload { it.copy(actionMessage = "该歌曲没有可下载的音质") }
             return
         }
         viewModelScope.launch(dispatcher) {
@@ -195,9 +248,7 @@ class QQDownloadViewModel(
                 onSuccess = { response ->
                     if (response.skipped) {
                         // 服务端判定已在库、没入队：不是错误，静默并入已在库集合让行变灰。
-                        _state.value = _state.value.copy(
-                            inLibraryMids = _state.value.inLibraryMids + song.songMid
-                        )
+                        updateDownload { it.copy(inLibraryMids = it.inLibraryMids + song.songMid) }
                     } else {
                         startPolling()
                     }
@@ -209,38 +260,40 @@ class QQDownloadViewModel(
 
     /** 点了已在库曲目的下载图标：先弹确认，用户明确要重下才带 force 重发。 */
     fun requestRedownload(song: QQSongDto) {
-        _state.value = _state.value.copy(redownloadPrompt = song)
+        updateDownload { it.copy(redownloadPrompt = song) }
     }
 
     fun dismissRedownload() {
-        _state.value = _state.value.copy(redownloadPrompt = null)
+        updateDownload { it.copy(redownloadPrompt = null) }
     }
 
     fun confirmRedownload() {
-        val song = _state.value.redownloadPrompt ?: return
-        _state.value = _state.value.copy(redownloadPrompt = null)
+        val song = _state.value.download.redownloadPrompt ?: return
+        updateDownload { it.copy(redownloadPrompt = null) }
         downloadSong(song, force = true)
     }
 
     fun downloadAlbum(album: QQAlbumDto) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
+            updateDownload { it.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE) }
             return
         }
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isEnqueuingAlbum = true, enqueuingAlbumMid = album.albumMid, actionMessage = null)
-            currentApi.enqueueAlbum(album.albumMid, _state.value.quality).fold(
+            updateDownload { it.copy(isEnqueuingAlbum = true, enqueuingAlbumMid = album.albumMid, actionMessage = null) }
+            currentApi.enqueueAlbum(album.albumMid, _state.value.settings.quality).fold(
                 onSuccess = { response ->
-                    _state.value = _state.value.copy(
-                        isEnqueuingAlbum = false,
-                        enqueuingAlbumMid = null,
-                        // 跳过了几首必须说出来：默默什么都不做会让人以为按钮坏了。
-                        actionMessage = albumSkipMessage(response)
-                    )
+                    updateDownload {
+                        it.copy(
+                            isEnqueuingAlbum = false,
+                            enqueuingAlbumMid = null,
+                            // 跳过了几首必须说出来：默默什么都不做会让人以为按钮坏了。
+                            actionMessage = albumSkipMessage(response),
+                        )
+                    }
                     startPolling()
                 },
                 onFailure = { error ->
-                    _state.value = _state.value.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null)
+                    updateDownload { it.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null) }
                     showActionError(error)
                 }
             )
@@ -250,7 +303,7 @@ class QQDownloadViewModel(
     /** 打开专辑选曲弹窗并拉取曲目列表（默认全不选：整张下载有专辑行上的专门按钮）。 */
     fun openAlbumPicker(album: QQAlbumDto) {
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
+            updateDownload { it.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE) }
             return
         }
         loadAlbumTracks(currentApi, album.albumMid, album.albumName)
@@ -259,76 +312,76 @@ class QQDownloadViewModel(
     /** 曲目列表没拉到时的「重新获取」。 */
     fun retryAlbumTracks() {
         val currentApi = api ?: return
-        val picker = _state.value.albumPicker ?: return
+        val picker = _state.value.download.albumPicker ?: return
         loadAlbumTracks(currentApi, picker.albumMid, picker.albumName)
     }
 
     fun toggleAlbumTrack(songMid: String) {
         // 正在下载中的不可勾（正在下还点它没意义）；已在库的可以勾——勾选本身就是强制。
-        if (songMid in _state.value.activeDownloadingMids) return
-        val picker = _state.value.albumPicker ?: return
+        if (songMid in _state.value.download.activeDownloadingMids) return
+        val picker = _state.value.download.albumPicker ?: return
         val selected = if (songMid in picker.selectedMids) {
             picker.selectedMids - songMid
         } else {
             picker.selectedMids + songMid
         }
-        _state.value = _state.value.copy(albumPicker = picker.copy(selectedMids = selected))
+        updateDownload { it.copy(albumPicker = picker.copy(selectedMids = selected)) }
     }
 
     /** 「全选未下载」：只勾没在库也没在下载中的；用户手动勾过的（含已在库）保留。 */
     fun selectAllAlbumTracks() {
-        val picker = _state.value.albumPicker ?: return
-        val state = _state.value
+        val picker = _state.value.download.albumPicker ?: return
+        val download = _state.value.download
         val undownloaded = picker.tracks
-            .filter { it.songMid !in state.inLibraryMids && it.songMid !in state.activeDownloadingMids }
+            .filter { it.songMid !in download.inLibraryMids && it.songMid !in download.activeDownloadingMids }
             .map { it.songMid }
             .toSet()
-        _state.value = _state.value.copy(
-            albumPicker = picker.copy(selectedMids = picker.selectedMids + undownloaded)
-        )
+        updateDownload { it.copy(albumPicker = picker.copy(selectedMids = picker.selectedMids + undownloaded)) }
     }
 
     fun clearAlbumSelection() {
-        val picker = _state.value.albumPicker ?: return
-        _state.value = _state.value.copy(albumPicker = picker.copy(selectedMids = emptySet()))
+        val picker = _state.value.download.albumPicker ?: return
+        updateDownload { it.copy(albumPicker = picker.copy(selectedMids = emptySet())) }
     }
 
     fun dismissAlbumPicker() {
-        if (_state.value.albumPicker == null) return
+        if (_state.value.download.albumPicker == null) return
         pickerGeneration++ // 丢弃在途的曲目加载结果，否则关掉后列表会凭空弹回来
-        _state.value = _state.value.copy(albumPicker = null)
+        updateDownload { it.copy(albumPicker = null) }
     }
 
     /** 下载弹窗里勾选的曲目；成功才关弹窗。 */
     fun confirmAlbumDownload() {
-        val picker = _state.value.albumPicker ?: return
+        val picker = _state.value.download.albumPicker ?: return
         if (picker.selectedMids.isEmpty()) return
         val currentApi = api ?: run {
-            _state.value = _state.value.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE)
+            updateDownload { it.copy(actionMessage = SERVICE_NOT_CONNECTED_MESSAGE) }
             return
         }
         viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(
-                isEnqueuingAlbum = true, enqueuingAlbumMid = picker.albumMid, actionMessage = null
-            )
-            currentApi.enqueueAlbum(picker.albumMid, _state.value.quality, picker.selectedMids.toList()).fold(
+            updateDownload {
+                it.copy(isEnqueuingAlbum = true, enqueuingAlbumMid = picker.albumMid, actionMessage = null)
+            }
+            currentApi.enqueueAlbum(picker.albumMid, _state.value.settings.quality, picker.selectedMids.toList()).fold(
                 onSuccess = { response ->
                     // 服务端只入队「确实还在这张专辑里」的曲目：少下了必须说出来，
                     // 否则用户勾了 5 首只下 3 首，全程没有任何提示。
                     //（显式勾选时服务端不跳过已在库的，所以差多少只能是这个原因，
                     //  skipped_count 恒为 0，不用减它。）
                     val missing = picker.selectedMids.size - response.count
-                    _state.value = _state.value.copy(
-                        isEnqueuingAlbum = false,
-                        enqueuingAlbumMid = null,
-                        albumPicker = null,
-                        actionMessage = if (missing > 0) "有 $missing 首已不在该专辑内，未加入下载" else null
-                    )
+                    updateDownload {
+                        it.copy(
+                            isEnqueuingAlbum = false,
+                            enqueuingAlbumMid = null,
+                            albumPicker = null,
+                            actionMessage = if (missing > 0) "有 $missing 首已不在该专辑内，未加入下载" else null,
+                        )
+                    }
                     startPolling()
                 },
                 onFailure = { error ->
                     // 失败保留弹窗与勾选：重选一遍代价太高，用户修好问题（如刷新凭证）可直接再点。
-                    _state.value = _state.value.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null)
+                    updateDownload { it.copy(isEnqueuingAlbum = false, enqueuingAlbumMid = null) }
                     setPickerError(error)
                 }
             )
@@ -338,20 +391,24 @@ class QQDownloadViewModel(
     private fun loadAlbumTracks(currentApi: QQDownloadApi, albumMid: String, albumName: String) {
         val generation = ++pickerGeneration
         // 先亮弹窗再拉列表：加载中也要看得见，用户才知道点到了。
-        _state.value = _state.value.copy(
-            albumPicker = AlbumPickerState(albumMid = albumMid, albumName = albumName),
-            actionMessage = null
-        )
+        updateDownload {
+            it.copy(
+                albumPicker = AlbumPickerState(albumMid = albumMid, albumName = albumName),
+                actionMessage = null,
+            )
+        }
         viewModelScope.launch(dispatcher) {
             currentApi.albumSongs(albumMid).fold(
                 onSuccess = { tracks ->
                     if (generation != pickerGeneration) return@fold
-                    val picker = _state.value.albumPicker ?: return@fold
-                    _state.value = _state.value.copy(
-                        albumPicker = picker.copy(isLoading = false, tracks = tracks),
-                        inLibraryMids = _state.value.inLibraryMids + tracks.filter { it.inLibrary }.map { it.songMid }.toSet(),
-                        downloadingMids = tracks.filter { it.downloading }.map { it.songMid }.toSet()
-                    )
+                    val picker = _state.value.download.albumPicker ?: return@fold
+                    updateDownload {
+                        it.copy(
+                            albumPicker = picker.copy(isLoading = false, tracks = tracks),
+                            inLibraryMids = it.inLibraryMids + tracks.filter { track -> track.inLibrary }.map { track -> track.songMid }.toSet(),
+                            downloadingMids = tracks.filter { track -> track.downloading }.map { track -> track.songMid }.toSet(),
+                        )
+                    }
                 },
                 onFailure = { error ->
                     if (generation != pickerGeneration) return@fold
@@ -360,11 +417,15 @@ class QQDownloadViewModel(
                     // 错误文案只写进弹窗：模态弹窗挡着 Snackbar，且 Snackbar 显示完就清。
                     applyErrorFlags(error)
                     val message = errorTextFor(error)
-                    val picker = _state.value.albumPicker ?: return@fold
-                    _state.value = _state.value.copy(
-                        albumPicker = picker.copy(isLoading = false, errorMessage = message),
-                        isSearching = false
-                    )
+                    val picker = _state.value.download.albumPicker ?: return@fold
+                    _state.value = _state.value.let { state ->
+                        state.copy(
+                            download = state.download.copy(
+                                albumPicker = picker.copy(isLoading = false, errorMessage = message)
+                            ),
+                            search = state.search.copy(isSearching = false),
+                        )
+                    }
                 }
             )
         }
@@ -373,25 +434,31 @@ class QQDownloadViewModel(
     /** 凭证过期后用户点「重试提取」：PC 需已打开 QQ 音乐客户端并登录。 */
     fun retryCredential() {
         val currentApi = api ?: return
-        viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isRetryingCredential = true, actionMessage = null)
+        credentialJob = viewModelScope.launch(dispatcher) {
+            _state.value = _state.value.let { state ->
+                state.copy(
+                    service = state.service.copy(isRetryingCredential = true),
+                    download = state.download.copy(actionMessage = null),
+                )
+            }
             currentApi.retryCredential().fold(
                 onSuccess = {
-                    _state.value = _state.value.copy(
-                        isRetryingCredential = false,
-                        credentialExpired = false,
-                        actionMessage = null,
-                        searchError = null
-                    )
+                    _state.value = _state.value.let { state ->
+                        state.copy(
+                            service = state.service.copy(isRetryingCredential = false, credentialExpired = false),
+                            search = state.search.copy(error = null),
+                            download = state.download.copy(actionMessage = null),
+                        )
+                    }
                     // 凭证恢复了，搜索页还停在同一句词：自动重搜，别让分区挂着旧错误。
-                    if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
+                    if (_state.value.search.query.isNotBlank()) updateSearchQuery(_state.value.search.query)
                     // 弹窗还开着但没拉到曲目（就是被凭证卡住的）→ 自动重拉，不用用户再点一次
-                    if (_state.value.albumPicker?.tracks.isNullOrEmpty()) retryAlbumTracks()
+                    if (_state.value.download.albumPicker?.tracks.isNullOrEmpty()) retryAlbumTracks()
                 },
                 onFailure = { error ->
-                    _state.value = _state.value.copy(isRetryingCredential = false)
+                    updateService { it.copy(isRetryingCredential = false) }
                     // 分区里的「重试」就是这条路：失败文案回到同一格小字，别又弹一条 Snackbar。
-                    if (_state.value.albumPicker == null) {
+                    if (_state.value.download.albumPicker == null) {
                         showSearchError(error)
                     } else {
                         setPickerError(error)
@@ -403,43 +470,53 @@ class QQDownloadViewModel(
 
     /** 搜索分区「重试」：凭证过期走重提，否则重新探活；查询词还在就顺手重搜一遍。 */
     fun retrySearch() {
-        if (_state.value.credentialExpired) {
+        if (_state.value.service.credentialExpired) {
             retryCredential()
             return
         }
         viewModelScope.launch(dispatcher) { checkHealth() }
-        if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
+        if (_state.value.search.query.isNotBlank()) updateSearchQuery(_state.value.search.query)
     }
 
     /** 手动一键刷新凭证：连接后随时可用（比如刚在电脑上重新登录了 QQ 音乐）。 */
     fun refreshCredential() {
         val currentApi = api ?: return
-        viewModelScope.launch(dispatcher) {
-            _state.value = _state.value.copy(isRetryingCredential = true, credentialMessage = null, actionMessage = null)
+        credentialJob = viewModelScope.launch(dispatcher) {
+            _state.value = _state.value.let { state ->
+                state.copy(
+                    service = state.service.copy(isRetryingCredential = true, credentialMessage = null),
+                    download = state.download.copy(actionMessage = null),
+                )
+            }
             currentApi.retryCredential().fold(
                 onSuccess = {
-                    _state.value = _state.value.copy(
-                        isRetryingCredential = false,
-                        credentialExpired = false,
-                        credentialMessage = "凭证已刷新",
-                        // 搜索页可能还挂着上一次「凭证过期」的小字：刷新成功一并撤掉。
-                        searchError = null
-                    )
-                    if (_state.value.searchQuery.isNotBlank()) updateSearchQuery(_state.value.searchQuery)
+                    _state.value = _state.value.let { state ->
+                        state.copy(
+                            service = state.service.copy(
+                                isRetryingCredential = false,
+                                credentialExpired = false,
+                                credentialMessage = "凭证已刷新",
+                            ),
+                            // 搜索页可能还挂着上一次「凭证过期」的小字：刷新成功一并撤掉。
+                            search = state.search.copy(error = null),
+                        )
+                    }
+                    if (_state.value.search.query.isNotBlank()) updateSearchQuery(_state.value.search.query)
                 },
                 onFailure = { error ->
                     // 提取不到新凭证 ≠ 当前凭证过期（常见：电脑上没开 QQ 音乐客户端），
                     // 所以这里不点亮过期横幅，只提示原因。
-                    _state.value = _state.value.copy(isRetryingCredential = false)
-                    _state.value = _state.value.copy(
-                        actionMessage = when (error) {
-                            is QQDownloadError.CredentialExpired ->
-                                "刷新凭证失败：请确认电脑上 QQ 音乐客户端正在运行并已登录"
-                            is QQDownloadError.ServiceUnreachable ->
-                                "连不上下载服务：确认电脑上已启动（start.bat），且手机和电脑在同一网络"
-                            else -> "刷新凭证失败，请稍后重试"
-                        }
-                    )
+                    updateService { it.copy(isRetryingCredential = false) }
+                    updateDownload {
+                        it.copy(
+                            actionMessage = when (error) {
+                                is QQDownloadError.CredentialExpired ->
+                                    "刷新凭证失败：请确认电脑上 QQ 音乐客户端正在运行并已登录"
+                                is QQDownloadError.ServiceUnreachable -> SERVICE_UNREACHABLE_MESSAGE
+                                else -> "刷新凭证失败，请稍后重试"
+                            }
+                        )
+                    }
                 }
             )
         }
@@ -455,7 +532,7 @@ class QQDownloadViewModel(
     /** 按用户偏好选音质，音源没有时逐档降级。 */
     private fun selectQuality(available: List<String>): String? {
         if (available.isEmpty()) return null
-        val preferred = _state.value.quality
+        val preferred = _state.value.settings.quality
         if (preferred in available) return preferred
         // 降级顺序 hires > flac > 320 > 128
         for (q in QQDownloadSettings.QUALITIES) {
@@ -483,11 +560,13 @@ class QQDownloadViewModel(
                             applyHealth(health)
                         } else {
                             // 重查轮只刷新曲库字段：别把界面上的其他错误提示冲掉。
-                            _state.value = _state.value.copy(
-                                libraryReady = health.library.ready,
-                                libraryCount = health.library.count,
-                                libraryRoot = health.libraryRoot
-                            )
+                            updateService {
+                                it.copy(
+                                    libraryReady = health.library.ready,
+                                    libraryCount = health.library.count,
+                                    libraryRoot = health.libraryRoot,
+                                )
+                            }
                         }
                         settled = health.library.ready
                     },
@@ -506,16 +585,23 @@ class QQDownloadViewModel(
     }
 
     private fun applyHealth(health: QQHealthResponse) {
-        _state.value = _state.value.copy(
-            serviceReachable = true,
-            credentialExpired = health.credentialExpired,
-            libraryReady = health.library.ready,
-            libraryCount = health.library.count,
-            libraryRoot = health.libraryRoot.ifBlank { health.library.root },
-            // ffmpeg 不可用是「服务不能干活」的持续状态，和连不上/凭证过期同类：放分区小字那一格。
-            searchError = if (health.ffmpegReady) null
-                else (health.ffmpegError ?: "电脑端 ffmpeg 不可用，无法处理下载")
-        )
+        // 一次写入：服务标志与分区小字归两块 slice，分两次写会出现「通了但还挂着旧错误」的中间态。
+        _state.value = _state.value.let { state ->
+            state.copy(
+                service = state.service.copy(
+                    serviceReachable = true,
+                    credentialExpired = health.credentialExpired,
+                    libraryReady = health.library.ready,
+                    libraryCount = health.library.count,
+                    libraryRoot = health.libraryRoot.ifBlank { health.library.root },
+                ),
+                // ffmpeg 不可用是「服务不能干活」的持续状态，和连不上/凭证过期同类：放分区小字那一格。
+                search = state.search.copy(
+                    error = if (health.ffmpegReady) null
+                    else (health.ffmpegError ?: "电脑端 ffmpeg 不可用，无法处理下载")
+                ),
+            )
+        }
     }
 
     /** 有活跃（排队/运行中）任务时启动轮询；没有则停。轮询出错也停（避免错误状态下无限重试）。 */
@@ -540,12 +626,17 @@ class QQDownloadViewModel(
     private fun applyJobs(jobs: List<QQJobDto>): Boolean {
         // jobs 是服务端队列的完整快照：活跃的就是「下载中」的真源（整体替换，下完自动消失）；
         // 变 done 的立刻并入已在库——零额外请求、零延迟，界面不用重搜就变灰。
-        _state.value = _state.value.copy(
-            jobs = jobs,
-            downloadingMids = jobs.filter { it.status == "queued" || it.status == "running" }.map { it.songMid }.toSet(),
-            inLibraryMids = _state.value.inLibraryMids + jobs.filter { it.status == "done" }.map { it.songMid }.toSet()
-        )
-        return jobs.any { it.status == "queued" || it.status == "running" }
+        val activeMids = jobs.filter { it.isActive }.map { it.songMid }.toSet()
+        updateDownload {
+            it.copy(
+                jobs = jobs,
+                downloadingMids = activeMids,
+                inLibraryMids = it.inLibraryMids + jobs.filter { job -> job.status == "done" }
+                    .map { job -> job.songMid }
+                    .toSet(),
+            )
+        }
+        return activeMids.isNotEmpty()
     }
 
     /** 整张下载的跳过提示；没跳过时返回 null（不打扰）。 */
@@ -564,35 +655,35 @@ class QQDownloadViewModel(
     private fun showSearchError(error: Throwable) {
         applyErrorFlags(error)
         val message = errorTextFor(error)
-        _state.value = _state.value.copy(isSearching = false, searchError = message)
+        updateSearch { it.copy(isSearching = false, error = message) }
     }
 
     private fun showActionError(error: Throwable) {
         applyErrorFlags(error)
         val message = errorTextFor(error)
-        _state.value = _state.value.copy(
-            isSearching = false,
-            isEnqueuingAlbum = false,
-            actionMessage = message
-        )
+        // 一次写入：忙碌位与提示分两块 slice，分两次写会闪一下「按钮好了但没提示」。
+        _state.value = _state.value.let { state ->
+            state.copy(
+                search = state.search.copy(isSearching = false),
+                download = state.download.copy(isEnqueuingAlbum = false, actionMessage = message),
+            )
+        }
     }
 
     /** 弹窗里也要一份错误文案：模态弹窗挡着 Snackbar，且 Snackbar 显示完就清。 */
     private fun setPickerError(error: Throwable) {
         applyErrorFlags(error)
         val message = errorTextFor(error)
-        val picker = _state.value.albumPicker ?: return
-        _state.value = _state.value.copy(albumPicker = picker.copy(errorMessage = message))
+        val picker = _state.value.download.albumPicker ?: return
+        updateDownload { it.copy(albumPicker = picker.copy(errorMessage = message)) }
     }
 
     /** 错误附带的服务状态变化（凭证过期 / 服务不可达）：和文案分开，文案保持纯函数。 */
     private fun applyErrorFlags(error: Throwable) {
         when (error) {
             is CancellationException -> throw error
-            is QQDownloadError.CredentialExpired ->
-                _state.value = _state.value.copy(credentialExpired = true)
-            is QQDownloadError.ServiceUnreachable ->
-                _state.value = _state.value.copy(serviceReachable = false)
+            is QQDownloadError.CredentialExpired -> updateService { it.copy(credentialExpired = true) }
+            is QQDownloadError.ServiceUnreachable -> updateService { it.copy(serviceReachable = false) }
             else -> Unit
         }
     }
@@ -609,7 +700,7 @@ class QQDownloadViewModel(
 
     /** Snackbar 显示完（或用户划掉）后清掉动作反馈。 */
     fun dismissActionMessage() {
-        _state.value = _state.value.copy(actionMessage = null)
+        updateDownload { it.copy(actionMessage = null) }
     }
 
     override fun onCleared() {
@@ -625,52 +716,79 @@ interface QQDownloadApiFactory {
     fun create(baseUrl: String): QQDownloadApi
 }
 
+/**
+ * QQ 下载界面状态的**组合根**（`docs/qq-download-state-refactor.md` / #31）。
+ *
+ * 拆法与曲库那条线（ADR-0010）一致：内部按**所有权**分四块 slice，组合后仍只对外发
+ * 一条 `StateFlow<QQDownloadUiState>`：
+ *
+ * | slice | 装什么 | 换服务（[cleared]） |
+ * |---|---|---|
+ * | [service] | 服务地址、连通性、凭证、曲库索引（服务回报的） | 清空，随后写入新地址 |
+ * | [settings] | 默认音质、文件操作密钥（用户设的） | **保留**——那是「怎么用」，不是「看到什么」 |
+ * | [search] | 查询词、搜索结果、搜索期错误 | 清空 |
+ * | [download] | 任务列表、已在库/下载中标记、选曲弹窗、动作提示 | 清空 |
+ *
+ * **构造参数只有这四块 slice**；下面那批平铺字段是**只读兼容层**（构造时求值的 `val`），
+ * 屏幕与现有测试因此不用改，写入一律走 slice。它与曲库那条线的差异只有一点：那里连
+ * `copy(...)` 也做了旧参数名兼容，这里调用方只有 `QQDownloadViewModel` 一个，直接改成写
+ * slice，少一层过渡。兼容层是只读的——想写状态就加到对应 slice 上
+ * （`QQDownloadUiStateTest` 钉死形状与一致性）。
+ */
 data class QQDownloadUiState(
-    val serviceUrl: String = "",
-    val serviceReachable: Boolean = false,
-    val credentialExpired: Boolean = false,
-    val quality: String = QQDownloadSettings.DEFAULT_QUALITY,
-    val searchQuery: String = "",
-    val isSearching: Boolean = false,
-    val songs: List<QQSongDto> = emptyList(),
-    val albums: List<QQAlbumDto> = emptyList(),
-    val searchHadResults: Boolean = false,
-    val jobs: List<QQJobDto> = emptyList(),
-    val isEnqueuingAlbum: Boolean = false,
-    /** 正在入队的专辑 mid：只有对应专辑行显示转圈，避免多专辑同时点全转。 */
-    val enqueuingAlbumMid: String? = null,
-    val isRetryingCredential: Boolean = false,
-    /** 最近一次手动刷新凭证的反馈（如「凭证已刷新」），下一次刷新开始时清除。 */
-    val credentialMessage: String? = null,
-    /** 专辑选曲弹窗；null = 未打开。 */
-    val albumPicker: AlbumPickerState? = null,
-    /** 已在库的曲目（键 song_mid）：搜索/弹窗响应、任务完成、服务端跳过都并进来；会话内只增不减。 */
-    val inLibraryMids: Set<String> = emptySet(),
-    /** 服务端最新一次回传的「下载中」标记（每次响应整体替换；渲染一律用 activeDownloadingMids）。 */
-    val downloadingMids: Set<String> = emptySet(),
-    /** 曲库索引状态（排查用：它说没有但你明明有，先看它扫的是哪个目录、扫到多少首）。 */
-    val libraryReady: Boolean = true,
-    val libraryCount: Int = 0,
-    val libraryRoot: String = "",
-    /** 非 null = 用户点了已在库曲目的下载图标，等确认「仍要重新下载」。 */
-    val redownloadPrompt: QQSongDto? = null,
-    /** 已保存的文件操作密钥（删歌/改名用，见工单 06）。 */
-    val fileOpsKey: String = "",
-    /** 密钥输入框的当前值；与 [fileOpsKey] 不同才允许保存。 */
-    val fileOpsKeyInput: String = "",
-    /**
-     * 搜索期失败（连不上服务 / 凭证过期 / ffmpeg 不可用）：搜索页 QQ 分区内的一行小字，常驻。
-     * 与 [actionMessage] 分开——共用一格会让「电脑没开」把曲库搜索结果盖掉（ADR-0006）。
-     */
-    val searchError: String? = null,
-    /** 下载动作的反馈（音质不可用 / 入队失败 / 整专跳过 N 首）：走 Snackbar，显示完即清。 */
-    val actionMessage: String? = null
+    val service: QQServiceState = QQServiceState(),
+    val settings: QQSettingsState = QQSettingsState(),
+    val search: QQSearchState = QQSearchState(),
+    val download: QQDownloadState = QQDownloadState(),
 ) {
-    /** 正在下载的 mid：服务端最新标记 ∪ 本地任务队列 queued/running（刚点下去还没轮询到也要立刻准）。 */
-    val activeDownloadingMids: Set<String>
-        get() = downloadingMids + jobs.filter { it.status == "queued" || it.status == "running" }
-            .map { it.songMid }
-            .toSet()
+    // ── 迁移期兼容层（#31）：旧读法，只读 ──────────────────────────
+    // 用构造时求值的 val 而不是自定义 getter：getter 会让 `state.credentialMessage != null`
+    // 之后的智能转换失效，而那是界面现有的写法。
+
+    val serviceUrl: String = service.serviceUrl
+    val serviceReachable: Boolean = service.serviceReachable
+    val credentialExpired: Boolean = service.credentialExpired
+    val isRetryingCredential: Boolean = service.isRetryingCredential
+    val credentialMessage: String? = service.credentialMessage
+    val libraryReady: Boolean = service.libraryReady
+    val libraryCount: Int = service.libraryCount
+    val libraryRoot: String = service.libraryRoot
+
+    val quality: String = settings.quality
+    val fileOpsKey: String = settings.fileOpsKey
+    val fileOpsKeyInput: String = settings.fileOpsKeyInput
+
+    val searchQuery: String = search.query
+    val isSearching: Boolean = search.isSearching
+    val songs: List<QQSongDto> = search.songs
+    val albums: List<QQAlbumDto> = search.albums
+    val searchHadResults: Boolean = search.searchHadResults
+    val searchError: String? = search.error
+
+    val jobs: List<QQJobDto> = download.jobs
+    val downloadingMids: Set<String> = download.downloadingMids
+    val inLibraryMids: Set<String> = download.inLibraryMids
+    val isEnqueuingAlbum: Boolean = download.isEnqueuingAlbum
+    val enqueuingAlbumMid: String? = download.enqueuingAlbumMid
+    val albumPicker: AlbumPickerState? = download.albumPicker
+    val redownloadPrompt: QQSongDto? = download.redownloadPrompt
+    val actionMessage: String? = download.actionMessage
+    val activeDownloadingMids: Set<String> = download.activeDownloadingMids
+
+    /**
+     * 换了一台电脑上的导入服务（`autoFillServiceUrl` 算出的地址变了）：
+     * 上一条服务的状态、搜索结果、任务与弹窗整块作废，只保留用户偏好 [settings]，
+     * 并把新地址写进 [service]。
+     *
+     * 「作废」= 每块 slice 的 `cleared()`（默认值即已清，新增字段自动跟上；
+     * `QQDownloadStateClearedTest` 用反射钉死覆盖）。新服务的探活由调用方随后发起。
+     */
+    fun cleared(serviceUrl: String): QQDownloadUiState = QQDownloadUiState(
+        service = service.cleared().copy(serviceUrl = serviceUrl),
+        settings = settings,
+        search = search.cleared(),
+        download = download.cleared(),
+    )
 }
 
 /**
@@ -680,7 +798,7 @@ data class QQDownloadUiState(
  * 与 [QQDownloadUiState.actionMessage] 是两条渲染路径：这条常驻在分区里，那条走 Snackbar。
  */
 internal val QQDownloadUiState.searchStatus: String?
-    get() = searchError ?: if (credentialExpired) {
+    get() = search.error ?: if (service.credentialExpired) {
         "QQ 音乐凭证已过期：在电脑上打开 QQ 音乐并登录，然后点「重试」"
     } else {
         null

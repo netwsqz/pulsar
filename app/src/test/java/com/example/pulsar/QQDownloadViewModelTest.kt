@@ -11,6 +11,7 @@ import com.example.pulsar.data.qqdownload.QQHealthResponse
 import com.example.pulsar.data.qqdownload.QQJobDto
 import com.example.pulsar.data.qqdownload.QQLibraryHealth
 import com.example.pulsar.data.qqdownload.QQSongDto
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -935,6 +936,99 @@ class QQDownloadViewModelTest {
         assertNull(viewModel.state.value.actionMessage)
     }
 
+    // ── 换服务地址（#31）：上一条服务看到的东西全部作废 ──────────────
+
+    @Test
+    fun `switching to another service address drops the previous service data`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900", initialQuality = "320")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            songs = listOf(song.copy(inLibrary = true, downloading = true)),
+            albums = listOf(album),
+            jobs = listOf(QQJobDto("j1", song.songMid, "flac", "晴天", "done"))
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+        viewModel.openAlbumPicker(album)
+        advanceUntilIdle()
+        viewModel.refreshJobs()
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.inLibraryMids.isNotEmpty())
+        assertNotNull(viewModel.state.value.albumPicker)
+        assertEquals(1, viewModel.state.value.jobs.size)
+
+        // 换了一台电脑上的导入服务：搜索结果、任务、已入库标记、弹窗都属于上一条服务。
+        viewModel.autoFillServiceUrl("http://192.168.1.99")
+        advanceUntilIdle()
+
+        assertEquals("http://192.168.1.99:8900", viewModel.state.value.serviceUrl)
+        assertTrue(viewModel.state.value.songs.isEmpty())
+        assertTrue(viewModel.state.value.albums.isEmpty())
+        assertTrue(viewModel.state.value.inLibraryMids.isEmpty())
+        assertTrue(viewModel.state.value.activeDownloadingMids.isEmpty())
+        assertTrue(viewModel.state.value.jobs.isEmpty())
+        assertNull(viewModel.state.value.albumPicker)
+        // 用户偏好不随换服务丢；新服务的探活结果照常落盘。
+        assertEquals("320", viewModel.state.value.quality)
+        assertTrue(viewModel.state.value.serviceReachable)
+    }
+
+    @Test
+    fun `the same service address keeps the search results`() = runTest {
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            songs = listOf(song)
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+        viewModel.updateSearchQuery("晴天")
+        advanceTimeBy(300)
+        advanceUntilIdle()
+
+        // 端口不同但主机相同 → 算出的地址一样，不是换服务：列表不该清空闪一下。
+        viewModel.autoFillServiceUrl("http://192.168.1.10:1234")
+        advanceUntilIdle()
+
+        assertEquals("http://192.168.1.10:8900", viewModel.state.value.serviceUrl)
+        assertEquals(listOf(song), viewModel.state.value.songs)
+    }
+
+    @Test
+    fun `in-flight work from the previous service never writes back after switching`() = runTest {
+        // 清状态只清「已经落地的值」；还在路上的搜索 / 轮询握着旧 api，代次不拦住就会
+        // 把上一条服务的结果写回来（#31 审查发现的缺口）。这里让两个请求都挂在半路。
+        val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
+        val api = FakeQQApi(
+            health = QQHealthResponse(ok = true, ffmpegReady = true),
+            songs = listOf(song),
+            // done：轮询收到这一轮就收工。用 running 会让轮询一直转，
+            // 断言失败时还会把测试卡在 advanceUntilIdle 里（虚拟时间活锁）。
+            jobs = listOf(QQJobDto("j1", song.songMid, "flac", "晴天", "done")),
+            searchDelayMs = 5_000,
+            jobsDelayMs = 5_000
+        )
+        val viewModel = createViewModel(preferences, api)
+        advanceUntilIdle()
+
+        viewModel.updateSearchQuery("晴天")
+        viewModel.downloadSong(song)
+        advanceTimeBy(300)
+
+        viewModel.autoFillServiceUrl("http://192.168.1.99")
+        // 有界推进（不 advanceUntilIdle）：够旧请求回来即可。
+        advanceTimeBy(6_000)
+
+        assertTrue(viewModel.state.value.songs.isEmpty())
+        assertTrue(viewModel.state.value.jobs.isEmpty())
+        assertTrue(viewModel.state.value.inLibraryMids.isEmpty())
+        assertEquals("http://192.168.1.99:8900", viewModel.state.value.serviceUrl)
+    }
+
     private fun TestScope.createViewModel(
         preferences: QQDownloadSettings,
         api: FakeQQApi
@@ -964,7 +1058,10 @@ class QQDownloadViewModelTest {
         var enqueueDownloadError: Throwable? = null,
         var jobs: List<QQJobDto> = emptyList(),
         var searchError: Throwable? = null,
-        var retryCredentialError: Throwable? = null
+        var retryCredentialError: Throwable? = null,
+        /** 让请求「挂在半路」，用来测换服务时在途响应会不会写回（默认 0 = 立即返回）。 */
+        var searchDelayMs: Long = 0,
+        var jobsDelayMs: Long = 0
     ) : QQDownloadApi {
         var healthCalls = 0
         var searchQueries = mutableListOf<String>()
@@ -991,6 +1088,7 @@ class QQDownloadViewModelTest {
 
         override suspend fun search(keyword: String, limit: Int): Result<List<QQSongDto>> {
             searchQueries += keyword
+            if (searchDelayMs > 0) delay(searchDelayMs)
             return searchError?.let { Result.failure(it) } ?: Result.success(songs)
         }
 
@@ -1037,6 +1135,7 @@ class QQDownloadViewModelTest {
 
         override suspend fun jobs(): Result<List<QQJobDto>> {
             jobsCalls++
+            if (jobsDelayMs > 0) delay(jobsDelayMs)
             return Result.success(jobs)
         }
 

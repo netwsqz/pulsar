@@ -7,6 +7,7 @@ import com.example.pulsar.domain.model.SearchResults
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.offline.OfflineSearchNotice
 import com.example.pulsar.searchStatus
+import com.example.pulsar.state.QQSearchState
 import com.example.pulsar.state.SearchState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -70,9 +71,11 @@ class SearchScreenModelsTest {
     @Test
     fun `QQ 下载状态原样带给分区与弹窗`() {
         val qq = QQDownloadUiState(
-            searchQuery = "周杰伦",
-            songs = listOf(QQSongDto(title = "QQ 歌", singer = "QQ 歌手", songMid = "qq-1")),
-            searchError = "连不上 QQ 音乐服务"
+            search = QQSearchState(
+                query = "周杰伦",
+                songs = listOf(QQSongDto(title = "QQ 歌", singer = "QQ 歌手", songMid = "qq-1")),
+                error = "连不上 QQ 音乐服务",
+            )
         )
 
         val state = screenState(results = null, qq = qq)
@@ -88,7 +91,7 @@ class SearchScreenModelsTest {
     fun `曲库为空且 QQ 报错时页面拿到的是 QQ 状态而不是空态`() {
         val state = screenState(
             results = SearchResults(),
-            qq = QQDownloadUiState(searchError = "连不上 QQ 音乐服务")
+            qq = QQDownloadUiState(search = QQSearchState(error = "连不上 QQ 音乐服务"))
         )
 
         val view = state.view as SearchViewState.LibraryEmptyQqError

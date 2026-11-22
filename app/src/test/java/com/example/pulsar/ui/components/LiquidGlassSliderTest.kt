@@ -10,6 +10,15 @@ import org.junit.Test
  */
 class LiquidGlassSliderTest {
 
+    @Test
+    fun `触感每百分之五一档 不改变滑块的连续取值`() {
+        assertEquals(8, feedbackSegment(0.40f))
+        assertEquals(8, feedbackSegment(0.449f))
+        assertEquals(9, feedbackSegment(0.45f))
+        assertEquals(20, feedbackSegment(1f))
+        assertEquals(44.9f, sliderValueForDragX(44.9f, 100f, 0f, 100f), 1e-4f)
+    }
+
     // ===== sliderValueForDragX：拖动 x 像素 → 进度值 =====
 
     @Test

@@ -34,6 +34,17 @@ class QueueDragStateTest {
     }
 
     @Test
+    fun `拖拽取消后迟到的跨位不再移动队列`() {
+        val state = QueueDragState()
+        state.start(queue)
+        state.cancel()
+
+        state.move(from = 0, to = 2, sessionQueue = queue)
+        assertSame(queue, state.displayed(queue))
+        assertNull(state.finish(queue))
+    }
+
+    @Test
     fun `拖拽中按暂态顺序显示 曲目数据始终取会话快照`() {
         val state = QueueDragState()
         state.start(queue)

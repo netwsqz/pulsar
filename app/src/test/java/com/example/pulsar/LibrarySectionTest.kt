@@ -1,5 +1,6 @@
 package com.example.pulsar
 
+import com.example.pulsar.domain.model.Album
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -57,6 +58,29 @@ class LibrarySectionTest {
         assertEquals(-1, group.navIndex())
         assertNull(group.navLabel())
         assertTrue(group.isDetail())
+    }
+
+    @Test
+    fun `合并搜索进专辑向内 详情返回搜索向外`() {
+        val album = LibrarySection.AlbumDetail(Album("a", "专辑", "歌手", null, null))
+        assertEquals(LibraryMotion.Forward, libraryMotion(LibrarySection.Search, album, isBack = false))
+        assertEquals(LibraryMotion.Back, libraryMotion(album, LibrarySection.Search, isBack = true))
+    }
+
+    @Test
+    fun `相邻顶层页签按顺序走短过渡`() {
+        assertEquals(LibraryMotion.TabForward, libraryMotion(LibrarySection.Tracks, LibrarySection.Albums, false))
+        assertEquals(LibraryMotion.TabBack, libraryMotion(LibrarySection.Albums, LibrarySection.Tracks, false))
+    }
+
+    @Test
+    fun `设置二级页面和艺术家专辑都从进入方向返回`() {
+        val artist = LibrarySection.GroupDetail("歌手")
+        val album = LibrarySection.AlbumDetail(Album("a", "专辑", "歌手", null, null))
+        assertEquals(LibraryMotion.Forward, libraryMotion(artist, album, false))
+        assertEquals(LibraryMotion.Back, libraryMotion(album, artist, true))
+        assertEquals(LibraryMotion.Forward, libraryMotion(LibrarySection.Settings, LibrarySection.DownloadService, false))
+        assertEquals(LibraryMotion.Back, libraryMotion(LibrarySection.DownloadService, LibrarySection.Settings, true))
     }
 
     @Test

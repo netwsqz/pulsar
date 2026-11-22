@@ -4,8 +4,6 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -68,8 +66,8 @@ internal fun VolumeFeedbackOverlay(
         visible = state.visible,
         modifier = modifier,
         // 进出场比保持时间短得多，读起来是「随按随到、自己慢慢淡掉」，不是一个需要等待的动画。
-        enter = fadeIn(tween(160)) + scaleIn(tween(220), initialScale = 0.88f),
-        exit = fadeOut(tween(280)) + scaleOut(tween(280), targetScale = 0.94f)
+        enter = fadeIn(tween(140)),
+        exit = fadeOut(tween(180))
     ) {
         VolumeFeedbackCapsule(percent = state.percent, backdrop = backdrop, accent = accent)
     }

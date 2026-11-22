@@ -1,8 +1,9 @@
 package com.example.pulsar
 
 import android.app.Application
+import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.util.Log
-import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import com.example.pulsar.ui.components.DeleteProgressNotice
 import com.example.pulsar.ui.components.DetailActions
@@ -15,8 +16,13 @@ import com.example.pulsar.ui.components.LiquidGlassSlider
 import com.example.pulsar.ui.components.MediaRowLayout
 import com.example.pulsar.ui.components.MediaRowText
 import com.example.pulsar.ui.components.OfflineNoticeText
+import com.example.pulsar.ui.components.PlaybackCover
 import com.example.pulsar.ui.components.QUEUE_DRAG_SETTLE_TIMEOUT_MS
 import com.example.pulsar.ui.components.QueueDragState
+import com.example.pulsar.ui.components.queueDragHandle
+import com.example.pulsar.ui.components.queuePlacement
+import com.example.pulsar.ui.components.rememberSegmentTick
+import com.example.pulsar.ui.components.feedbackSegment
 import com.example.pulsar.ui.components.SectionHeader
 import com.example.pulsar.ui.components.SectionHeaderStyle
 import com.example.pulsar.ui.components.PlayingBarCount
@@ -38,12 +44,15 @@ import com.example.pulsar.ui.theme.BrandPrimary
 import com.example.pulsar.ui.theme.CoverGradient
 import com.example.pulsar.ui.theme.CoverTheme
 import com.example.pulsar.ui.theme.Dimens
+import com.example.pulsar.ui.theme.PageEnterEasing
+import com.example.pulsar.ui.theme.PageExitEasing
 import com.example.pulsar.ui.theme.PulsarTheme
 import com.example.pulsar.ui.theme.THEME_TRANSITION_MS
 import com.example.pulsar.ui.theme.ThemePresets
 import com.example.pulsar.ui.theme.ThemeSeedSource
 import com.example.pulsar.ui.theme.deepened
 import com.example.pulsar.ui.theme.rememberCoverGradient
+import com.example.pulsar.ui.theme.systemMotionScale
 import com.example.pulsar.offline.OfflineEmpty
 import com.example.pulsar.offline.OfflineInput
 import com.example.pulsar.offline.message
@@ -73,26 +82,24 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.Transition
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.animateDp
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
@@ -109,6 +116,8 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -207,6 +216,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.remember
@@ -217,6 +227,11 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.hideFromAccessibility
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.graphicsLayer
@@ -227,13 +242,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.painter.ColorPainter
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
@@ -243,8 +256,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -396,10 +407,17 @@ private fun PulsarApp(
     val themePreferences = remember { ThemePreferences(themeContext.pulsarPreferencesDataStore) }
     val presetArgb by themePreferences.preset.collectAsStateWithLifecycle(initialValue = null)
     val preset = presetArgb?.let(::Color)
+    // 等待新封面时可留上一张，但不能跨登录界面或账号保留。不把会话凭据带进组合。
+    val artworkAccount = if (state.library.tracks != null) state.session.serverUrl to state.session.username else null
+    val playbackCoverRequest = currentTrack?.let(viewModel::trackCover)
+    val windowSize = LocalWindowInfo.current.containerSize
+    val artworkSizePx = minOf(windowSize.width, windowSize.height).coerceIn(96, 1440)
     val coverTheme = rememberCoverGradient(
-        coverRequest = currentTrack?.let(viewModel::trackCover),
+        coverRequest = playbackCoverRequest,
         darkTheme = darkTheme,
-        preset = preset
+        preset = preset,
+        sessionIdentity = artworkAccount,
+        artworkSizePx = artworkSizePx
     )
     // 无封面 / 全灰封面 → 不传种子，沿用改造前的固定靛蓝色板（工单 11 的回退要求）。
     val seed = coverTheme.seed.color.takeIf { coverTheme.seed.source != ThemeSeedSource.Default }
@@ -420,6 +438,7 @@ private fun PulsarApp(
                 qqState = qqState,
                 qqViewModel = qqViewModel,
                 currentTrack = currentTrack,
+                artworkSessionIdentity = artworkAccount,
                 coverTheme = coverTheme,
                 themePreferences = themePreferences
             )
@@ -759,6 +778,7 @@ private fun MusicLibraryScreen(
     qqState: QQDownloadUiState,
     qqViewModel: QQDownloadViewModel,
     currentTrack: Track?,
+    artworkSessionIdentity: Any?,
     coverTheme: CoverTheme,
     themePreferences: ThemePreferences
 ) {
@@ -800,6 +820,13 @@ private fun MusicLibraryScreen(
     var section by rememberSaveable(stateSaver = LibrarySectionSaver) {
         mutableStateOf<LibrarySection>(LibrarySection.Discover)
     }
+    var returning by remember { mutableStateOf(false) }
+    val pageStates = rememberSaveableStateHolder()
+    fun goTo(next: LibrarySection, isBack: Boolean = false) {
+        if (next == section) return
+        returning = isBack
+        section = next
+    }
     // 详情页来源：从列表页还是搜索页进的详情，返回时回到对应来源。也要跨重建保留，
     // 否则详情页转屏后再按返回会被送回发现页。
     var detailOrigin by rememberSaveable(stateSaver = LibrarySectionSaver) {
@@ -808,11 +835,11 @@ private fun MusicLibraryScreen(
     // 统一打开详情入口：打开前记下当前分区，返回键/侧滑能回到原页面（含搜索页）。
     val openAlbum: (Album) -> Unit = { album ->
         detailOrigin = section
-        section = LibrarySection.AlbumDetail(album)
+        goTo(LibrarySection.AlbumDetail(album))
     }
     val openPlaylist: (Playlist) -> Unit = { playlist ->
         detailOrigin = section
-        section = LibrarySection.PlaylistDetail(playlist)
+        goTo(LibrarySection.PlaylistDetail(playlist))
     }
     // 进入分区时加载数据：界面**只报「进了哪一节」**（#12）。
     // 加载方法名、幂等守卫、会话是否就绪、三态语义（null / 空列表 / 失败）都在
@@ -942,8 +969,6 @@ private fun MusicLibraryScreen(
     // 长按菜单状态提升到本层（工单 15）：只有这里拿得到主窗口 backdrop，菜单才能与玻璃岛同材质。
     // TrackRow 通过 LocalTrackMenu 上报「哪首歌 + 锚点」，不再各自持有 Popup。
     val trackMenu = remember { TrackMenuState() }
-    // 切页时收起菜单：菜单是常驻 overlay，不跟着行一起离开组合，得显式收。
-    LaunchedEffect(section) { trackMenu.dismiss() }
     // 当前列表（多选条的全选用）：按所在页面取对应列表，别页（设置/下载）没有行。
     // **取可见列表**（#30）：离线时只显示已下载，全选也必须只勾看得见的那批，
     // 否则批量删除会波及界面上根本不存在的歌。发现页只勾每日推荐那几首（页面只有它们可勾）。
@@ -954,30 +979,30 @@ private fun MusicLibraryScreen(
         when (val s = section) {
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
-                section = detailOrigin
+                goTo(detailOrigin, isBack = true)
                 // 来源已消费：二级链（设置 → 已下载 → 专辑）返回后不留陈旧来源，
                 // 否则再往回退会卡在 设置↔已下载 的循环里。
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.PlaylistDetail -> {
                 viewModel.clearPlaylistDetail()
-                section = detailOrigin
+                goTo(detailOrigin, isBack = true)
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.GroupDetail -> {
                 // 组详情没有可清的服务端状态（专辑列表还在用）。来源固定是艺术家页——
                 // 不借 detailOrigin：它可能被「组详情 → 专辑详情」覆盖过。
-                section = LibrarySection.Artists
+                goTo(LibrarySection.Artists, isBack = true)
                 detailOrigin = LibrarySection.Discover
             }
             LibrarySection.Settings -> {
-                section = detailOrigin
+                goTo(detailOrigin, isBack = true)
                 detailOrigin = LibrarySection.Discover
             }
-            LibrarySection.CachedCopies -> section = LibrarySection.Settings
-            // 下载服务是设置里的二级页：返回键回设置，不是回默认的发现页。
-            LibrarySection.DownloadService -> section = LibrarySection.Settings
-            else -> section = LibrarySection.Discover
+            // 已下载和 QQ 音乐导入都是设置里的二级页。
+            LibrarySection.CachedCopies, LibrarySection.DownloadService ->
+                goTo(LibrarySection.Settings, isBack = true)
+            else -> goTo(LibrarySection.Discover, isBack = true)
         }
     }
     // 多选模式下返回键先退出多选，而不是退出页面（后声明的 BackHandler 优先响应）。
@@ -989,26 +1014,70 @@ private fun MusicLibraryScreen(
         if (library.multiSelectIds.isNotEmpty()) viewModel.clearMultiSelect()
     }
     // 全屏播放页开关：迷你播放条点击打开，收起按钮 / 返回键关闭。
-    var showNowPlaying by remember { mutableStateOf(false) }
+    // **rememberSaveable**：转屏（含页面内旋转按钮）会重建 Activity，用 remember 会导致
+    // 全屏页当场消失、回到主界面。
+    var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+    // 切页或打开全屏播放页时收起常驻在上层的菜单。
+    LaunchedEffect(section, showNowPlaying) { trackMenu.dismiss() }
     // 底部浮层锚点栈（工单 04）：迷你条实测高度（折叠 64 / 展开时含整个小面板）。
     // Snackbar 与音量胶囊都锚在「导航栏 inset + 这个高度 + 外边距」，不再用固定 80/320dp 猜。
     // 首帧还没测到时用 PlayerDockHeight 兜底——它本来就等于折叠态高度，所以看不到跳动。
     // 这里只声明状态、不在本层读值：展开动画每帧都会刷新它，读点放在浮层小组件内部，
     // 否则整个主界面会跟着每帧重组。
     val playerDockHeight = remember { mutableStateOf(Dimens.PlayerDockHeight) }
-    // 全屏播放页打开次数编号：作为 NowPlayingScreen 的 key，每次打开强制重建组合，
-    // 页内手势状态（dragOffset 等）从零开始，不会被上一次退出残留污染。
-    var nowPlayingSession by remember { mutableStateOf(0) }
+    // 正在退场的全屏页继续绘制，收起期允许立即点击迷你播放条重开。
+    val closeNowPlaying: () -> Unit = { showNowPlaying = false }
+    // 全屏页里点过旋转按钮才需要还原。**不能用 -1 当「没锁过」的哨兵**：
+    // ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED 本身就是 -1，而 Manifest 没声明
+    // screenOrientation，进页前 requestedOrientation 恰好就是 -1——哨兵与真实值撞车，
+    // 收起时永远判断失败，App 会永久锁在横屏。所以用 `Int?`，null 才是「没锁过」。
+    // 自定义 Saver：默认 saver 对 `Int?` 的 null 走的是「不存」，重建后仍是 null 倒也对，
+    // 但显式存一个 sentinel 更不容易被后来的人改坏。
+    var orientationBeforeLock by rememberSaveable(stateSaver = NullableIntSaver) {
+        mutableStateOf<Int?>(null)
+    }
+    val hostActivity = remember(context) { context.findActivity() }
+    val applyOrientation: (Int) -> Unit = { requested ->
+        if (hostActivity != null) {
+            orientationBeforeLock = orientationToRestoreOnClose(
+                previous = orientationBeforeLock,
+                currentOrientation = hostActivity.requestedOrientation
+            )
+            hostActivity.requestedOrientation = requested
+        }
+    }
     // 全屏页打开期间跟随曲目拉歌词；切歌时因 key 变化重新触发，关闭时清掉常驻内存。
     LaunchedEffect(showNowPlaying, currentTrack?.id) {
         if (showNowPlaying && currentTrack != null) viewModel.loadLyricsForCurrentTrack()
     }
-    // 全屏播放页打开时，返回键先收起全屏页（后组合的 BackHandler 优先响应）。
-    if (showNowPlaying) {
-        BackHandler { showNowPlaying = false }
+    val nowPlayingVisibility = updateTransition(showNowPlaying, label = "nowPlaying")
+    val dockOnTop = !showNowPlaying && (nowPlayingVisibility.isRunning || nowPlayingVisibility.currentState)
+    // 收起期间把迷你播放条提上来让它接触控；它的底色同步淡入，不应瞬间盖住播放键。
+    val dockReveal = nowPlayingVisibility.animateFloat(
+        transitionSpec = { tween(NOW_PLAYING_CLOSE_MS) },
+        label = "dockReveal"
+    ) { if (it) 0f else 1f }
+    // 画面完全收起才清歌词和还原方向，避免淡出期间变空态或因旋转重建而闪回。
+    LaunchedEffect(showNowPlaying, nowPlayingVisibility.currentState, nowPlayingVisibility.isRunning) {
+        if (showNowPlaying || nowPlayingVisibility.currentState || nowPlayingVisibility.isRunning) return@LaunchedEffect
+        viewModel.clearLyrics()
+        orientationBeforeLock?.let { previous ->
+            hostActivity?.requestedOrientation = previous
+            orientationBeforeLock = null
+        }
     }
+    // 兜底还原：全屏页开着时会话过期（401 → tracks 变 null）会让整个 MusicLibraryScreen
+    // 连同全屏页一起被换成登录页，上面那条 LaunchedEffect 来不及跑。这时也要把方向还回去，
+    // 否则整个 App（含登录页）卡在锁定的方向上。
+    DisposableEffect(Unit) {
+        onDispose {
+            orientationBeforeLock?.let { hostActivity?.requestedOrientation = it }
+        }
+    }
+    // 全屏播放页打开时，返回键先收起全屏页（后组合的 BackHandler 优先响应）。
+    BackHandler(enabled = showNowPlaying, onBack = closeNowPlaying)
     // 主界面背景：色板 surface 三档渐变（带封面色调的中性底），不再是高饱和封面渐变。
-    // 颜色由 PulsarTheme 统一做 800ms 过渡，这里直接读动画后的色板。
+    // 颜色由 PulsarTheme 统一做过渡，这里直接读动画后的色板。
     // 色板本身接近白（浅色 surface l≈0.99），铺满全屏会发飘，所以只对**背景渐变**压深；
     // 色板角色本身不动——按钮/文字的对比度靠它保证，深色模式已足够深，压得更少。
     val scheme = MaterialTheme.colorScheme
@@ -1018,13 +1087,16 @@ private fun MusicLibraryScreen(
         0.3f to scheme.surfaceVariant.deepened(depth),
         1f to scheme.background.deepened(depth)
     )
-    // 全屏播放页背景保持原有的封面三色渐变（工单 12 再处理），三色 + 强调色一起 800ms 过渡。
+    // 全屏渐变、强调色与主题色板一起过渡，目标更新时从当前帧继续。
     val gradientSpec = tween<Color>(THEME_TRANSITION_MS)
     val coverTop by animateColorAsState(coverTheme.gradient.top, gradientSpec, label = "coverGradientTop")
     val coverMiddle by animateColorAsState(coverTheme.gradient.middle, gradientSpec, label = "coverGradientMiddle")
     val coverBottom by animateColorAsState(coverTheme.gradient.bottom, gradientSpec, label = "coverGradientBottom")
     val coverAccentAnimated by animateColorAsState(coverTheme.gradient.accent, gradientSpec, label = "coverGradientAccent")
     val animatedCoverGradient = CoverGradient(coverTop, coverMiddle, coverBottom, coverAccentAnimated)
+    val artwork = key(artworkSessionIdentity) {
+        updateTransition(coverTheme.artwork, label = "playbackArtwork")
+    }
     // 悬浮布局：内容铺满全屏，顶部栏 / 底部播放条是浮在内容上方的玻璃条。
     // SharedTransitionLayout 包住整个悬浮布局：迷你条小封面 ↔ 全屏页大封面共用
     // 同一 key 做 morph（打开/收起全屏页时封面跨布局连续飞行动画）。
@@ -1049,31 +1121,35 @@ private fun MusicLibraryScreen(
                 .navigationBarsPadding()
                 .layerBackdrop(backdrop)
         ) {
-            // 页面切换动画：进详情页 / 搜索页从右侧推入、返回从左侧退回；
-            // 顶层页签之间按 tab 顺序左右滑（与 Auxio 的 ViewPager 方向一致）。
+            // 顶层页签只移动一小段，详情／搜索／设置用更明确的层级位移。
             AnimatedContent(
                 targetState = section,
+                modifier = Modifier.fillMaxSize().clipToBounds(),
+                contentKey = LibrarySection::saveablePageKey,
                 transitionSpec = {
-                    val fromIndex = initialState.navIndex()
-                    val toIndex = targetState.navIndex()
-                    val forward = when {
-                        // 顶层页签之间：序号增大 = 往右翻。
-                        fromIndex >= 0 && toIndex >= 0 -> toIndex > fromIndex
-                        // 顶层 → 非顶层（详情 / 搜索 / 设置）：往里走，从右侧推入。
-                        fromIndex >= 0 -> true
-                        // 非顶层 → 任何页：往外退，从左侧退回。
-                        else -> false
+                    val motion = libraryMotion(initialState, targetState, isBack = returning)
+                    if (motion == LibraryMotion.None) {
+                        EnterTransition.None togetherWith ExitTransition.None
+                    } else {
+                        val tab = motion == LibraryMotion.TabForward || motion == LibraryMotion.TabBack
+                        val forward = motion == LibraryMotion.TabForward || motion == LibraryMotion.Forward
+                        val distance = (if (tab) 0.10f else 0.26f) * if (forward) 1f else -1f
+                        val enterMs = if (tab) 200 else 260
+                        val exitMs = if (tab) 150 else 190
+                        val enter = slideInHorizontally(tween(enterMs, easing = PageEnterEasing)) {
+                            (it * distance).roundToInt()
+                        } + fadeIn(tween(enterMs, easing = PageEnterEasing))
+                        val exit = slideOutHorizontally(tween(exitMs, easing = PageExitEasing)) {
+                            (-it * distance).roundToInt()
+                        } + fadeOut(tween(exitMs, easing = PageExitEasing))
+                        enter togetherWith exit
                     }
-                    val enter = slideInHorizontally(tween(320)) { width ->
-                        if (forward) width else -width
-                    } + fadeIn(tween(320))
-                    val exit = slideOutHorizontally(tween(320)) { width ->
-                        if (forward) -width else width
-                    } + fadeOut(tween(320))
-                    enter.togetherWith(exit)
                 },
                 label = "librarySection"
             ) { s ->
+                val currentPage = s.saveablePageKey() == section.saveablePageKey()
+                Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
+                pageStates.SaveableStateProvider(s.saveablePageKey()) {
                 when (s) {
                     LibrarySection.Discover -> DiscoverContent(
                         library = library,
@@ -1135,7 +1211,7 @@ private fun MusicLibraryScreen(
                         offlineNotice = offlineNotice,
                         onOpenGroup = { name ->
                             detailOrigin = section
-                            section = LibrarySection.GroupDetail(name)
+                            goTo(LibrarySection.GroupDetail(name))
                         },
                         coverFor = viewModel::albumCover,
                         onRetry = viewModel::loadAlbums,
@@ -1232,32 +1308,35 @@ private fun MusicLibraryScreen(
                         playback = playback,
                         onPlaybackIntent = playbackSession::dispatch,
                         playbackEvents = playbackSession.events,
-                        onOpenCachedCopies = { section = LibrarySection.CachedCopies },
-                        onOpenDownloadService = { section = LibrarySection.DownloadService },
+                        onOpenCachedCopies = { goTo(LibrarySection.CachedCopies) },
+                        onOpenDownloadService = { goTo(LibrarySection.DownloadService) },
                         themePreferences = themePreferences,
                         seedSource = coverTheme.seed.source,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
+                }
+                }
             }
         }
-        // 顶部玻璃岛（悬浮）：列表页显示；详情页隐藏（返回交给系统返回键 / 侧滑手势），上滑淡出。
+        // 顶部玻璃岛（悬浮）：列表页显示；详情页隐藏（返回交给系统返回键 / 侧滑手势）。
         AnimatedVisibility(
-            visible = !section.isDetail(),
+            visible = !section.isDetail() && !showNowPlaying,
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .fillMaxWidth(),
-            enter = slideInVertically(tween(300)) { -it } + fadeIn(tween(300)),
-            exit = slideOutVertically(tween(300)) { -it } + fadeOut(tween(300))
+                .fillMaxWidth()
+                .transitionInput(!section.isDetail() && !showNowPlaying),
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(120))
         ) {
             GlassChipBar(
                 backdrop = backdrop,
                 section = section,
-                onSelectSection = { section = it },
-                onShowSearch = { section = LibrarySection.Search },
+                onSelectSection = { goTo(it) },
+                onShowSearch = { goTo(LibrarySection.Search) },
                 onShowSettings = {
                     detailOrigin = section
-                    section = LibrarySection.Settings
+                    goTo(LibrarySection.Settings)
                 },
                 onSignOut = viewModel::signOut,
                 modifier = Modifier
@@ -1282,18 +1361,17 @@ private fun MusicLibraryScreen(
             playbackEvents = playbackSession.events,
             currentTrack = currentTrack,
             accentColor = coverAccentAnimated,
-            coverFor = viewModel::trackCover,
+            artwork = artwork,
             sharedTransitionScope = this@SharedTransitionLayout,
-            // 全屏页展开时迷你封面取反隐藏：两侧都真正参与一次进出场，sharedBounds
-            // 才会把「原地绘制」让给 overlay 里的飞行副本，否则会出现两份封面。
             fullScreenOpen = showNowPlaying,
-            onOpenFullScreen = {
-                nowPlayingSession++
-                showNowPlaying = true
-            },
+            onOpenFullScreen = { showNowPlaying = true },
             onDockHeightChange = { playerDockHeight.value = it },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
+                // 退场过程中迷你播放条可以立刻接收重开；全屏页仍按当前透明度淡出。
+                .zIndex(if (dockOnTop) 1f else 0f)
+                .graphicsLayer { alpha = if (dockOnTop) dockReveal.value else 1f }
+                .transitionInput(!showNowPlaying)
                 .navigationBarsPadding()
                 .padding(
                     horizontal = Dimens.FloatingHorizontalMargin,
@@ -1306,41 +1384,31 @@ private fun MusicLibraryScreen(
             dockHeight = playerDockHeight,
             hostState = snackbarHostState
         )
-        // 全屏播放页：盖在所有内容最上层，从底部滑入 / 滑出。
-        // session 编号作为 key：下滑手势收起时 dragOffset 停在松手位置不归零（供 exit 从松手处
-        // 无缝续滑），exit 期间重开页面会复用同一组合实例——key 变化强制重建，
-        // dragOffset 从 0 开始，页面不会停在屏外不可见。
-        // 只留一个运动：整页不再从底部滑入（那是第二套位移，与封面飞行打架、到达时间对不齐），
-        // 改成淡入淡出，让封面从迷你条飞到大封面成为唯一的位移来源。下滑手势收起时页面本就
-        // 跟着 dragOffset 位移、并随位移降 alpha，exit 淡出与松手位置衔接自然。
-        AnimatedVisibility(
-            visible = showNowPlaying,
-            enter = fadeIn(tween(NOW_PLAYING_FADE_MS)),
-            exit = fadeOut(tween(NOW_PLAYING_FADE_MS))
+        // 不重建仍在退场的组合：快速重开从画面当前值接续，页内位移回到 0。
+        nowPlayingVisibility.AnimatedVisibility(
+            visible = { it },
+            enter = fadeIn(tween(NOW_PLAYING_OPEN_MS)),
+            exit = fadeOut(tween(NOW_PLAYING_CLOSE_MS))
         ) {
-            key(nowPlayingSession) {
-                NowPlayingScreen(
-                    playback = playback,
-                    queueDrag = queueDrag,
-                    onPlaybackIntent = playbackSession::dispatch,
-                    playbackEvents = playbackSession.events,
-                    currentTrack = currentTrack,
-                    coverRequest = currentTrack?.let(viewModel::trackCover),
-                    gradientColors = animatedCoverGradient,
-                    lyrics = lyrics,
-                    // 点歌词行 seek 到该行时间（微秒 → 毫秒）。
-                    onLineSeek = { positionUs ->
-                        playbackSession.dispatch(PlaybackIntent.SeekTo(positionUs / 1000))
-                    },
-                    sharedTransitionScope = this@SharedTransitionLayout,
-                    // key(nowPlayingSession) 包着本内容，AnimatedVisibilityScope 就是本层。
-                    animatedVisibilityScope = this,
-                    onClose = {
-                        showNowPlaying = false
-                        viewModel.clearLyrics()
-                    }
-                )
-            }
+            NowPlayingScreen(
+                active = showNowPlaying,
+                playback = playback,
+                queueDrag = queueDrag,
+                onPlaybackIntent = playbackSession::dispatch,
+                currentTrack = currentTrack,
+                artwork = artwork,
+                backdropBitmap = coverTheme.backdrop,
+                gradientColors = animatedCoverGradient,
+                lyrics = lyrics,
+                // 点歌词行 seek 到该行时间（微秒 → 毫秒）。
+                onLineSeek = { positionUs ->
+                    playbackSession.dispatch(PlaybackIntent.SeekTo(positionUs / 1000))
+                },
+                sharedTransitionScope = this@SharedTransitionLayout,
+                animatedVisibilityScope = this,
+                onClose = closeNowPlaying,
+                onToggleOrientation = applyOrientation
+            )
         }
         // 音量浮窗：按音量键时从**底部**冒出来的液态玻璃胶囊（与 Snackbar 同一个底部锚点栈）。
         // 曾经挂在顶部玻璃岛下方，多选条一起来就把它完全盖住；移到底部后两者互不遮挡。
@@ -1355,7 +1423,7 @@ private fun MusicLibraryScreen(
         )
         // 多选操作条（工单 04）：固定在玻璃岛下方，材质 / 圆角 / 高度与玻璃岛一致。
         // 顶部槽位只放导航与选择，底部槽位只放瞬时反馈（Snackbar / 音量胶囊）——互不打架。
-        if (library.multiSelectIds.isNotEmpty()) {
+        if (library.multiSelectIds.isNotEmpty() && !showNowPlaying) {
             GlassPanel(
                 backdrop = backdrop,
                 // 与玻璃岛同 alpha：条下面压着滚动曲库，太透会看不清按钮文字。
@@ -2103,11 +2171,12 @@ private fun TrackContextMenu(
     val bottomInsetPx = with(density) { insets.getBottom(density).toInt() }
     // 与玻璃岛同一档表面色（0.8）：菜单同样压在滚动的曲库上，太透会看不清文字。
     val glassSurface = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
-    val menuScale = remember { Animatable(0.85f) }
+    val calmMotion = systemMotionScale() == 0f
+    val menuScale = remember { Animatable(if (calmMotion) 1f else 0.94f) }
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        menuScale.snapTo(0.85f)
-        menuScale.animateTo(1f, spring(dampingRatio = 0.7f, stiffness = 650f))
+    LaunchedEffect(calmMotion) {
+        if (calmMotion) menuScale.snapTo(1f)
+        else menuScale.animateTo(1f, tween(180, easing = PageEnterEasing))
     }
     // 等一帧再请求焦点：FocusRequester 要等节点完成布局才可寻址，立刻调用会拿不到焦点。
     LaunchedEffect(Unit) {
@@ -2168,17 +2237,12 @@ private fun TrackContextMenu(
                 Column(Modifier.fillMaxWidth()) {
                     var menuItemVisible by remember { mutableStateOf(false) }
                     LaunchedEffect(Unit) { menuItemVisible = true }
-                    val menuView = LocalView.current
-                    fun tapFeedback() = menuView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                     StaggeredMenuItem(
                         visible = menuItemVisible,
                         delayMs = 0,
                         icon = { tint -> Icon(Icons.Filled.PlaylistAdd, null, Modifier.size(20.dp), tint = tint) },
                         text = "添加到播放队列",
-                        onClick = {
-                            tapFeedback()
-                            closeAnd { onAddToQueue() }
-                        }
+                        onClick = { closeAnd { onAddToQueue() } }
                     )
                     fileOps?.let { ops ->
                         StaggeredMenuItem(
@@ -2186,10 +2250,7 @@ private fun TrackContextMenu(
                             delayMs = 40,
                             icon = { tint -> Icon(Icons.Filled.Edit, null, Modifier.size(20.dp), tint = tint) },
                             text = "改名",
-                            onClick = {
-                                tapFeedback()
-                                closeAnd { ops.onRename(track) }
-                            }
+                            onClick = { closeAnd { ops.onRename(track) } }
                         )
                         // 正在播的那首删除置灰：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
                         val deleteEnabled = track.id != currentTrackId
@@ -2200,12 +2261,7 @@ private fun TrackContextMenu(
                             text = "删除",
                             enabled = deleteEnabled,
                             destructive = true,
-                            onClick = {
-                                if (deleteEnabled) {
-                                    tapFeedback()
-                                    closeAnd { ops.onDelete(track) }
-                                }
-                            }
+                            onClick = { if (deleteEnabled) closeAnd { ops.onDelete(track) } }
                         )
                     }
                     multiSelect?.let { ms ->
@@ -2214,10 +2270,7 @@ private fun TrackContextMenu(
                             delayMs = 120,
                             icon = { tint -> Icon(Icons.Filled.Checklist, null, Modifier.size(20.dp), tint = tint) },
                             text = "多选",
-                            onClick = {
-                                tapFeedback()
-                                closeAnd { ms.onEnter(track.id) }
-                            }
+                            onClick = { closeAnd { ms.onEnter(track.id) } }
                         )
                     }
                 }
@@ -2357,9 +2410,10 @@ private fun StaggeredMenuItem(
 ) {
     val accent = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     val textColor = if (destructive) MaterialTheme.colorScheme.error else Color.Unspecified
-    val transition = updateTransition(visible, label = "menuItem")
+    val calmMotion = systemMotionScale() == 0f
+    val transition = updateTransition(visible || calmMotion, label = "menuItem")
     val offsetY by transition.animateDp(
-        transitionSpec = { spring(dampingRatio = 0.7f, stiffness = 350f) },
+        transitionSpec = { tween(180, easing = PageEnterEasing) },
         targetValueByState = { if (it) 0.dp else Dimens.SpaceMidMedium },
         label = "offsetY"
     )
@@ -3609,6 +3663,10 @@ private fun SettingsContent(
     // 变化时（且非拖拽中）同步回本地，避免滑块跳动。
     var usbVolumeLocal by remember { mutableStateOf(playback.usb.volumePercent) }
     var usbVolumeDragging by remember { mutableStateOf(false) }
+    val usbVolumeEnabled = playback.usb.enabled && playback.isConnected
+    val usbVolumeInteractions = remember { MutableInteractionSource() }
+    val usbVolumeTick = rememberSegmentTick()
+    val usbThumbDragged by usbVolumeInteractions.collectIsDraggedAsState()
     LaunchedEffect(playback.usb.volumePercent) {
         if (!usbVolumeDragging) usbVolumeLocal = playback.usb.volumePercent
     }
@@ -3672,7 +3730,11 @@ private fun SettingsContent(
                 Slider(
                     value = usbVolumeLocal.toFloat(),
                     onValueChange = {
-                        usbVolumeLocal = it.roundToInt()
+                        val next = it.roundToInt()
+                        if (usbThumbDragged && feedbackSegment(usbVolumeLocal / 100f) != feedbackSegment(next / 100f)) {
+                            usbVolumeTick()
+                        }
+                        usbVolumeLocal = next
                         usbVolumeDragging = true
                     },
                     onValueChangeFinished = {
@@ -3680,7 +3742,8 @@ private fun SettingsContent(
                         usbVolumeDragging = false
                     },
                     valueRange = 0f..100f,
-                    enabled = playback.usb.enabled && playback.isConnected,
+                    interactionSource = usbVolumeInteractions,
+                    enabled = usbVolumeEnabled,
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(Dimens.SpaceMidMedium))
@@ -4215,46 +4278,44 @@ internal fun formatBytes(bytes: Long): String = when {
     else -> "$bytes B"
 }
 
-/**
- * 迷你条封面位（固定 40dp）。单独抽一个 composable，是为了躲开 MiniPlayerBar 里同时存在的
- * Row / Column 作用域——在那里直接调 AnimatedVisibility 会同时命中 RowScope 与 ColumnScope
- * 两个重载而无法解析（编译报 cannot be called in this context with an implicit receiver）。
- *
- * [visible] 由调用方传全屏页开关的取反：迷你封面必须自己也随全屏页做一次进出场，
- * sharedBounds 才认得出这算同一次匹配、把「原地绘制」让给 overlay 里的飞行副本；
- * 若 scope 不进过渡，就会出现「小封面留在原地 + 还有一个影子在飞」的两份封面（真机已复现）。
- * 用 fade 而非默认的 expand/shrink，避免交接那一帧的尺寸跳变；固定 40dp 占位保证整行不跳。
- */
+/** 小封面始终留固定占位，与全屏共用一个封面状态；过渡时只绘制目标端。 */
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 private fun MiniPlayerCover(
-    track: Track?,
-    coverFor: (Track) -> JellyfinRequest?,
+    artwork: Transition<Bitmap?>,
+    title: String?,
     sharedTransitionScope: SharedTransitionScope,
     visible: Boolean
 ) {
     Box(Modifier.size(Dimens.PlayerDockCover)) {
-        if (track == null) {
-            // 空态直接复用 AlbumCover 的空占位（8dp 圆角 + 阴影），不再是一个直角灰块。
-            AlbumCover(request = null, contentDescription = null, modifier = Modifier.fillMaxSize())
-        } else {
-            AnimatedVisibility(visible = visible, enter = fadeIn(), exit = fadeOut()) {
-                val coverScope = this
-                with(sharedTransitionScope) {
-                    Box(
-                        Modifier
-                            .sharedBounds(
-                                rememberSharedContentState(key = NOW_PLAYING_COVER_KEY),
-                                animatedVisibilityScope = coverScope
-                            )
-                            .fillMaxSize()
-                    ) {
-                        AlbumCover(coverFor(track), track.title, Modifier.fillMaxSize())
-                    }
-                }
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(tween(NOW_PLAYING_CLOSE_MS)),
+            exit = fadeOut(tween(NOW_PLAYING_OPEN_MS))
+        ) {
+            val coverScope = this
+            with(sharedTransitionScope) {
+                PlaybackCover(
+                    artwork, title,
+                    Modifier.fillMaxSize().sharedElement(
+                        rememberSharedContentState(key = NOW_PLAYING_COVER_KEY),
+                        animatedVisibilityScope = coverScope,
+                        boundsTransform = NowPlayingCloseBounds
+                    ),
+                    cornerRadius = Dimens.SpaceSmall
+                )
             }
         }
     }
+}
+
+private fun Modifier.transitionInput(enabled: Boolean): Modifier = if (enabled) this else {
+    // 旧画面还在淡出，但不能再执行点按。
+    pointerInput(Unit) {
+        awaitPointerEventScope {
+            while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+        }
+    }.clearAndSetSemantics { hideFromAccessibility() }
 }
 
 /** 底部播放浮岛：折叠时只显示封面 + 歌名/歌手 + 播放/暂停 + 展开（切歌走整条横滑或全屏页）；点整条打开全屏播放页，右侧箭头切换小展开面板。 */
@@ -4270,7 +4331,7 @@ private fun MiniPlayerBar(
     currentTrack: Track?,
     /** 当前专辑主色（进度条填充 / 底部细线用）；无封面时为品牌靛蓝。 */
     accentColor: Color,
-    coverFor: (Track) -> JellyfinRequest?,
+    artwork: Transition<Bitmap?>,
     sharedTransitionScope: SharedTransitionScope,
     fullScreenOpen: Boolean,
     onOpenFullScreen: () -> Unit = {},
@@ -4288,6 +4349,7 @@ private fun MiniPlayerBar(
     // 播放/暂停：有媒体项（队列非空）才可用。队列为空时按钮置灰、点了没反应。
     // 不用 durationMs > 0 判断——刚起播、时长还没上报时按钮会先灰一下。
     // 队列快照在轮询与 onMediaItemTransition 两处刷新，点歌后按钮立刻可用。
+    val canTouchDock = !fullScreenOpen
     val hasMedia = playback.isConnected && playback.queue.isNotEmpty()
     // 进度条额外要求已知时长，否则 valueRange 没有意义。
     val canSeek = hasMedia && playback.durationMs > 0
@@ -4311,22 +4373,20 @@ private fun MiniPlayerBar(
         seekHoldSec = null
     }
     // 切歌放开：新歌位置从 0 起算，旧拖动值已无意义（拖到歌尾松手后正好会触发自动切歌）。
-    val currentQueueId = playback.queue.firstOrNull { it.isCurrent }?.id
+    val currentQueueId = playback.currentMediaItem?.mediaId
     LaunchedEffect(currentQueueId) { seekHoldSec = null }
     // 播放队列：显示顺序 = 会话队列（唯一真相）+ 两个面板共用的拖拽暂态。
     // 默认折叠避免歌多时占满面板；拖拽中只改暂态 id 顺序，松手才发 Reorder 交还会话。
-    val hapticFeedback = LocalHapticFeedback.current
+    val tick = rememberSegmentTick()
     var queueExpanded by remember { mutableStateOf(false) }
     val queue = queueDrag.displayed(playback.queue)
     val lazyListState = rememberLazyListState()
     val reorderableState = rememberReorderableLazyListState(lazyListState) { from, to ->
-        queueDrag.move(from.index, to.index, playback.queue)
-        hapticFeedback.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
+        if (queueDrag.move(from.index, to.index, playback.queue)) tick()
     }
     // 输出信息（设备 + 采样率 + 位深），由 PlaybackService 写入诊断单例。
     val outputInfo by PlaybackDiagnostics.info.collectAsStateWithLifecycle()
-    // 播放控制按钮（上一首/播放暂停/下一首）共用的轻触觉反馈。
-    val controlView = LocalView.current
+    val swipeTick = rememberSegmentTick()
     // 可读性表面色：非组合的 onDrawSurface 里不能读 MaterialTheme，先取出来。
     val glassSurface = MaterialTheme.colorScheme.surface
     // 上报实测高度要把像素换算成 dp。
@@ -4357,26 +4417,21 @@ private fun MiniPlayerBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     // 点击整条打开全屏播放页（连接上播放服务即可，方便未播放时也能进去操作）。
-                    .clickable(enabled = playback.isConnected) { onOpenFullScreen() }
+                    .clickable(enabled = playback.isConnected && !fullScreenOpen) { onOpenFullScreen() }
                     // 左右滑动切歌：向左滑过阈值切下一首、向右滑切上一首，松手才触发，触发时带触觉反馈。
                     // 已知取舍：歌名超宽时跑马灯（basicMarquee 支持手动滚动）会抢走文字区域上的横向拖动手势，
                     // 此时封面和右侧按钮区域仍可滑动切歌；歌名不超宽时整条都能滑。
                     // 纯点按不受影响：横向拖动超过触摸溢出距离后框架自动取消点击，tap 仍走上面的 clickable 打开全屏页。
-                    .pointerInput(playback.isConnected) {
+                    .pointerInput(playback.isConnected, fullScreenOpen) {
+                        if (!playback.isConnected || fullScreenOpen) return@pointerInput
                         val swipeThreshold = 48.dp.toPx()
                         var accumulatedDrag = 0f
                         detectHorizontalDragGestures(
                             onHorizontalDrag = { _, dragAmount -> accumulatedDrag += dragAmount },
                             onDragEnd = {
                                 when {
-                                    accumulatedDrag < -swipeThreshold -> {
-                                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                        onPlaybackIntent(PlaybackIntent.Next)
-                                    }
-                                    accumulatedDrag > swipeThreshold -> {
-                                        controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                                        onPlaybackIntent(PlaybackIntent.Previous)
-                                    }
+                                    accumulatedDrag < -swipeThreshold -> if (onPlaybackIntent(PlaybackIntent.Next)) swipeTick()
+                                    accumulatedDrag > swipeThreshold -> if (onPlaybackIntent(PlaybackIntent.Previous)) swipeTick()
                                 }
                                 accumulatedDrag = 0f
                             },
@@ -4389,11 +4444,9 @@ private fun MiniPlayerBar(
                     ),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 专辑封面：与全屏页大封面同 key 的 sharedBounds，打开/收起时跨布局飞行。
-                // 细节见 MiniPlayerCover（含为何要单独抽一个 composable）。
                 MiniPlayerCover(
-                    track = currentTrack,
-                    coverFor = coverFor,
+                    artwork = artwork,
+                    title = currentTrack?.title,
                     sharedTransitionScope = sharedTransitionScope,
                     visible = !fullScreenOpen
                 )
@@ -4430,11 +4483,8 @@ private fun MiniPlayerBar(
                 // 把点击吃掉，保证「点了确实没反应」。
                 Box {
                     IconButton(
-                        onClick = {
-                            controlView.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                            onPlaybackIntent(PlaybackIntent.TogglePlayPause)
-                        },
-                        enabled = hasMedia,
+                        onClick = { onPlaybackIntent(PlaybackIntent.TogglePlayPause) },
+                        enabled = hasMedia && !fullScreenOpen,
                         modifier = Modifier.size(Dimens.TouchTargetSmall)
                     ) {
                         Icon(
@@ -4455,7 +4505,7 @@ private fun MiniPlayerBar(
                 // 展开/收起小面板（more = 展开更多内容，less = 收起更少内容）；进全屏页走点整条或面板里的全屏按钮
                 IconButton(
                     onClick = { expanded = !expanded },
-                    enabled = playback.isConnected,
+                    enabled = playback.isConnected && canTouchDock,
                     modifier = Modifier.size(Dimens.TouchTargetSmall)
                 ) {
                     Icon(
@@ -4468,12 +4518,8 @@ private fun MiniPlayerBar(
             // 小展开面板：与 NowPlayingScreen 存在有意重复（进度/队列/输出信息两处各一份），各自独立演化。
             AnimatedVisibility(
                 visible = expanded,
-                enter = expandVertically(
-                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f)
-                ) + fadeIn(),
-                exit = shrinkVertically(
-                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f)
-                ) + fadeOut()
+                enter = expandVertically(tween(220, easing = PageEnterEasing)) + fadeIn(tween(160)),
+                exit = shrinkVertically(tween(170, easing = PageExitEasing)) + fadeOut(tween(130))
             ) {
                 Column(
                     modifier = Modifier
@@ -4501,8 +4547,9 @@ private fun MiniPlayerBar(
                         // 拖动途中切歌导致 valueRange 变化时手势会被取消：只清拖动状态，不 seek。
                         onValueChangeCancelled = { isDragging = false },
                         valueRange = 0f..durationSec,
+                        gestureKey = currentQueueId,
                         backdrop = backdrop,
-                        enabled = canSeek,
+                        enabled = canSeek && !fullScreenOpen && expanded,
                         colors = glassBarSliderColors(accentColor),
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -4568,8 +4615,8 @@ private fun MiniPlayerBar(
                     // 展开/收起动画：高度从 0 生长到内容高度 + 淡入淡出；队列长也只占固定高度，其余靠列表自己滚。
                     AnimatedVisibility(
                         visible = queueExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
+                        enter = expandVertically(tween(200, easing = PageEnterEasing)) + fadeIn(tween(150)),
+                        exit = shrinkVertically(tween(150, easing = PageExitEasing)) + fadeOut(tween(120))
                     ) {
                         if (queue.isEmpty()) {
                             Text(
@@ -4587,7 +4634,9 @@ private fun MiniPlayerBar(
                                     .wrapContentHeight()
                             ) {
                                 items(queue, key = { it.id }) { item ->
-                                    ReorderableItem(reorderableState, key = item.id) { dragging ->
+                                    ReorderableItem(
+                                        reorderableState, key = item.id, animateItemModifier = queuePlacement()
+                                    ) { dragging ->
                                         Row(
                                             modifier = Modifier
                                                 .fillMaxWidth()
@@ -4598,15 +4647,16 @@ private fun MiniPlayerBar(
                                                     else Color.Transparent,
                                                     RoundedCornerShape(8.dp)
                                                 )
-                                                // 长按整行拖动排序；拖拽只改共用暂态，松手把新顺序交回会话。
-                                                .longPressDraggableHandle(
-                                                    onDragStarted = { queueDrag.start(playback.queue) },
-                                                    onDragStopped = {
+                                                .then(queueDragHandle(
+                                                    enabled = playback.isConnected && !fullScreenOpen && expanded && queueExpanded,
+                                                    onStart = { queueDrag.start(playback.queue) },
+                                                    onDrop = {
                                                         queueDrag.drop(playback.queue) { ordered ->
                                                             onPlaybackIntent(PlaybackIntent.Reorder(ordered))
                                                         }
-                                                    }
-                                                )
+                                                    },
+                                                    onCancel = queueDrag::cancel
+                                                ))
                                                 .clickable(enabled = playback.isConnected) {
                                                     onPlaybackIntent(PlaybackIntent.PlayQueueItem(item.id))
                                                 }
@@ -4703,45 +4753,47 @@ internal fun AlbumCover(
     request: JellyfinRequest?,
     contentDescription: String?,
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 8.dp
+    cornerRadius: Dp = Dimens.SpaceSmall
+) {
+    CoverImageFrame(modifier, cornerRadius, hasArtwork = request != null) {
+        if (request != null) {
+            val context = LocalContext.current
+            val crossfadeMs = (180f * systemMotionScale()).roundToInt()
+            val model = remember(context, request, crossfadeMs) {
+                ImageRequest.Builder(context)
+                    .data(request.url)
+                    .addHeader("Authorization", request.headers["Authorization"].orEmpty())
+                    .crossfade(crossfadeMs)
+                    .build()
+            }
+            AsyncImage(
+                model = model,
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+/** 保留封面原有的玻璃阴影、占位和渐变，列表与播放端点共用。 */
+@Composable
+internal fun CoverImageFrame(
+    modifier: Modifier,
+    cornerRadius: Dp,
+    hasArtwork: Boolean,
+    content: @Composable () -> Unit
 ) {
     val shape = RoundedCornerShape(cornerRadius)
-    val placeholder = ColorPainter(MaterialTheme.colorScheme.surfaceVariant)
-    // 阴影用色板 scrim（恒黑）加透明度，不写死 0x1A000000 / 0x26000000。
-    val shadowColor = MaterialTheme.colorScheme.scrim
-    if (request == null) {
-        Box(
-            modifier
-                .clip(shape)
-                .shadow(
-                    2.dp, shape,
-                    ambientColor = shadowColor.copy(alpha = 0.10f),
-                    spotColor = shadowColor.copy(alpha = 0.10f)
-                )
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-        )
-        return
-    }
-    val model = ImageRequest.Builder(LocalContext.current)
-        .data(request.url)
-        .addHeader("Authorization", request.headers["Authorization"].orEmpty())
-        .crossfade(true)
-        .build()
+    val shadowColor = MaterialTheme.colorScheme.scrim.copy(alpha = if (hasArtwork) 0.15f else 0.10f)
     Box(
         modifier.clip(shape).shadow(
-            3.dp, shape,
-            ambientColor = shadowColor.copy(alpha = 0.15f),
-            spotColor = shadowColor.copy(alpha = 0.15f)
-        )
+            if (hasArtwork) 3.dp else 2.dp, shape,
+            ambientColor = shadowColor, spotColor = shadowColor
+        ).background(MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        AsyncImage(
-            model = model,
-            contentDescription = contentDescription,
-            contentScale = ContentScale.Crop,
-            placeholder = placeholder,
-            error = placeholder,
-            modifier = Modifier.fillMaxSize()
-        )
+        content()
+        if (!hasArtwork) return@Box
         // 底部微渐变：营造封面嵌入感，提升视觉层次。用色板的 scrim（恒黑）而不是
         // onSurface——onSurface 在深色模式下是浅色，压在封面上会变成一道白雾。
         val scrimColor = MaterialTheme.colorScheme.scrim.copy(

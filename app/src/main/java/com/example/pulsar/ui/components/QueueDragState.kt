@@ -43,12 +43,13 @@ internal class QueueDragState {
         order = displayed(sessionQueue).map { it.id }
     }
 
-    /** 拖拽中的一次移动：把显示列表 [from] 位置的 id 挪到 [to]。越界时忽略。 */
-    fun move(from: Int, to: Int, sessionQueue: List<QueueTrack>) {
+    /** 有效跨位才返回 true（给界面触感用）；忽略取消／松手后迟到的回调。 */
+    fun move(from: Int, to: Int, sessionQueue: List<QueueTrack>): Boolean {
+        if (!isDragging || from == to) return false
         val current = displayed(sessionQueue).map { it.id }
-        if (from !in current.indices || to !in current.indices) return
-        if (from == to) return
+        if (from !in current.indices || to !in current.indices) return false
         order = current.toMutableList().apply { add(to, removeAt(from)) }
+        return true
     }
 
     /**

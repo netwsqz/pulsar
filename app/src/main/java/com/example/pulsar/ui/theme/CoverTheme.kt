@@ -1,6 +1,7 @@
 package com.example.pulsar.ui.theme
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -11,42 +12,53 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.graphics.drawable.toBitmap
+import androidx.core.graphics.scale
 import androidx.palette.graphics.Palette
 import coil.imageLoader
 import coil.request.ImageRequest
+import coil.request.SuccessResult
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
+import kotlin.math.roundToInt
 
-/** 一次封面取色的结果：全屏播放页的三色渐变 + 推导主题用的种子色。 */
-data class CoverTheme(val gradient: CoverGradient, val seed: ThemeSeed)
+/** 主题种子、全屏渐变和模糊底图来自同一次取样，不会各自追一张封面。 */
+internal data class CoverTheme(
+    val gradient: CoverGradient,
+    val seed: ThemeSeed,
+    val backdrop: Bitmap?,
+    val artwork: Bitmap?
+)
 
 /**
- * 跟随当前封面取色：封面请求变化时用 Coil 加载 96px 小图（与界面封面共用
- * ImageLoader 缓存，不重复下载），androidx.palette 提取色板后同时产出
- * 主题种子色（vibrant → dominant → 用户预设色 [preset] → 品牌靛蓝）
- * 和三色渐变。渐变与强调色都从**同一个种子**推导，保证一张封面只有一个主色。
- * 取色期间沿用上一次的结果（切歌直接旧色过渡到新色，不闪回默认色）；
- * 失败 / 无封面回退预设色或默认色板。darkTheme 只影响柔化方向，切换深浅模式不会重新取色。
+ * 等待新图时沿用当前结果；取不到图就回到原有兜底。普通详情只取 96px 小图，
+ * 播放页传入 [artworkSizePx] 时，从同一张较清晰的图缩小取色和做模糊背景。
  */
 @Composable
-fun rememberCoverGradient(
+internal fun rememberCoverGradient(
     coverRequest: JellyfinRequest?,
     darkTheme: Boolean,
-    preset: Color? = null
+    preset: Color? = null,
+    sessionIdentity: Any? = null,
+    artworkSizePx: Int? = null
 ): CoverTheme {
-    var swatches by remember { mutableStateOf<CoverSwatches?>(null) }
+    // 只保留同次登录的上一次结果；登出 / 换账号同步丢弃，不能把旧账号的底图带过去。
+    var sample by remember(sessionIdentity) { mutableStateOf<CoverSample?>(null) }
     val context = LocalContext.current
-    // key 同时含 URL 与 Authorization：重新登录换 token 但曲目未变时（URL 不变）也能重新取色。
-    LaunchedEffect(coverRequest?.url, coverRequest?.headers["Authorization"]) {
-        val request = coverRequest
-        if (request == null) {
-            swatches = null // 无封面：立刻回默认
-        } else {
-            swatches = withContext(Dispatchers.IO) { extractCoverSwatches(context, request) }
+    LaunchedEffect(sessionIdentity, coverRequest, artworkSizePx) {
+        val result = coverRequest?.let {
+            withContext(Dispatchers.IO) { extractCoverSample(context, it, artworkSizePx) }
         }
+        coroutineContext.ensureActive()
+        sample = result
     }
+    // 有新请求在等时沿用已显示的样本；明确没有封面则这一帧就切到既有兜底。
+    val shown = sample.takeIf { coverRequest != null }
+    val swatches = shown?.swatches
     // 渐变与种子必须取**同一个** swatch：palette 有饱和色但没有 vibrantSwatch 时，
     // 渐变若直接落到 fallback（预设/默认），种子却取了 dominant，控件与背景就会两个色。
     val dominant = swatches?.vibrant ?: swatches?.all?.let(::selectCoverSwatch)
@@ -59,7 +71,9 @@ fun rememberCoverGradient(
             // ADR-0005：种子、强调色、渐变必须取同一个主色，否则切页面会跳色。
             dominant = dominant
         ),
-        seed = selectThemeSeed(swatches?.vibrant, swatches?.all, preset = preset)
+        seed = selectThemeSeed(swatches?.vibrant, swatches?.all, preset = preset),
+        backdrop = shown?.small,
+        artwork = shown?.artwork
     )
 }
 
@@ -77,25 +91,37 @@ internal fun presetGradient(preset: Color?, darkTheme: Boolean): CoverGradient {
 
 /** 一次取色的原始样本：vibrant（androidx.palette 认定的鲜艳色）与完整色板。 */
 private class CoverSwatches(val vibrant: CoverSwatch?, val all: List<CoverSwatch>)
+private class CoverSample(val small: Bitmap, val swatches: CoverSwatches, val artwork: Bitmap?)
 
-/** 取小图提取色板；任何失败都返回 null（界面回退默认色板），不抛异常。 */
-private suspend fun extractCoverSwatches(context: Context, request: JellyfinRequest): CoverSwatches? {
+/** 任一请求失败就显示同一套既有兜底；仍遵守协程取消。 */
+private suspend fun extractCoverSample(context: Context, request: JellyfinRequest, artworkSizePx: Int?): CoverSample? {
     return try {
         val result = context.imageLoader.execute(
             ImageRequest.Builder(context)
                 .data(request.url)
                 .addHeader("Authorization", request.headers["Authorization"].orEmpty())
-                .size(96) // 取色只需要小图：解码快、省内存
-                .allowHardware(false) // palette 要读像素，必须是软件位图
+                .size(artworkSizePx ?: 96)
+                .allowHardware(false) // Palette 要读像素。
                 .build()
-        )
-        val bitmap = (result.drawable as? BitmapDrawable)?.bitmap ?: return null
-        val palette = Palette.from(bitmap)
+        ) as? SuccessResult ?: return null
+        val image = (result.drawable as? BitmapDrawable)?.bitmap ?: if (artworkSizePx != null) {
+            result.drawable.toBitmap()
+        } else return null
+        val largest = maxOf(image.width, image.height)
+        val small = if (largest > 96) {
+            val scale = 96f / largest
+            image.scale((image.width * scale).roundToInt().coerceAtLeast(1), (image.height * scale).roundToInt().coerceAtLeast(1))
+        } else image
+        val palette = Palette.from(small)
             .maximumColorCount(24)
             .generate()
-        CoverSwatches(
-            vibrant = palette.vibrantSwatch?.let { CoverSwatch(it.rgb, it.population) },
-            all = palette.swatches.map { CoverSwatch(it.rgb, it.population) }
+        CoverSample(
+            small = small,
+            swatches = CoverSwatches(
+                vibrant = palette.vibrantSwatch?.let { CoverSwatch(it.rgb, it.population) },
+                all = palette.swatches.map { CoverSwatch(it.rgb, it.population) }
+            ),
+            artwork = image.takeIf { artworkSizePx != null }
         )
     } catch (e: CancellationException) {
         throw e

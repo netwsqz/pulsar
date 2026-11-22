@@ -106,10 +106,10 @@ fun PulsarTheme(
 }
 
 /** 主题切换的过渡时长：与主界面背景渐变同步（`MainActivity` 也用这个值）。 */
-internal const val THEME_TRANSITION_MS = 800
+internal const val THEME_TRANSITION_MS = 320
 
 /**
- * 切歌换色时只动画实际用到的角色，800ms 平滑过渡；其余角色（container 系列、
+ * 切歌换色时给常用角色做短过渡；其余角色（container 系列、
  * inverse 系列等）直接瞬切——界面没有在动画中途观察它们的需求。
  * `animateColorAsState` 自带「从当前值出发」的行为，连续切歌不会跳回起点。
  */

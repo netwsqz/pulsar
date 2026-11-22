@@ -111,6 +111,27 @@ internal fun LibrarySection.navIndex(): Int =
 internal fun LibrarySection.navLabel(): String? =
     TopLevelSections.firstOrNull { it.first == this }?.second
 
+internal enum class LibraryMotion { TabForward, TabBack, Forward, Back, None }
+
+/** 方向由操作决定；同层页签用顺序，进详情和返回不靠猜目标页面的类型。 */
+internal fun libraryMotion(from: LibrarySection, to: LibrarySection, isBack: Boolean): LibraryMotion {
+    if (from == to) return LibraryMotion.None
+    val fromTab = from.navIndex()
+    val toTab = to.navIndex()
+    if (fromTab >= 0 && toTab >= 0) {
+        return if (fromTab < toTab) LibraryMotion.TabForward else LibraryMotion.TabBack
+    }
+    return if (isBack) LibraryMotion.Back else LibraryMotion.Forward
+}
+
+/** 让退场后再进入的列表找回滚动位置；详情按 id 区分，存的不是整份曲目数据。 */
+internal fun LibrarySection.saveablePageKey(): String = when (this) {
+    is LibrarySection.AlbumDetail -> "album:${album.id}"
+    is LibrarySection.PlaylistDetail -> "playlist:${playlist.id}"
+    is LibrarySection.GroupDetail -> "artist:$name"
+    else -> SavedSection.from(this).kind
+}
+
 internal fun LibrarySection.isDetail(): Boolean =
     this is LibrarySection.AlbumDetail ||
         this is LibrarySection.PlaylistDetail ||

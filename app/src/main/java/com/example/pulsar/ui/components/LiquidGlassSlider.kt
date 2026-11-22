@@ -1,7 +1,7 @@
 package com.example.pulsar.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -16,6 +16,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -25,9 +26,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.kyant.backdrop.Backdrop
@@ -167,18 +166,28 @@ internal fun LiquidGlassSlider(
     colors: LiquidGlassSliderColors,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    height: Dp = LiquidGlassSliderHeight
+    height: Dp = LiquidGlassSliderHeight,
+    // 进度滑块还随当前曲目取消；两首长度相同时仅用 valueRange 当 key 不够。
+    gestureKey: Any? = null
 ) {
     // 组件内部的按压态：只用来驱动前端柔光的强弱，父层的 isDragging 仍由 onValueChange 自己维护。
     var dragging by remember { mutableStateOf(false) }
-    val haptics = LocalHapticFeedback.current
+    val tick = rememberSegmentTick()
+    val preview by rememberUpdatedState(onValueChange)
+    val finish by rememberUpdatedState(onValueChangeFinished)
+    val cancel by rememberUpdatedState(onValueChangeCancelled)
     val fraction = sliderFraction(value, valueRange.start, valueRange.endInclusive)
-    // 拖动强度 0..1：按下爬到 1、松手落回 0，低阻尼弹簧让松手那一下带点回弹。
-    val dragIntensity by animateFloatAsState(
-        targetValue = if (dragging) 1f else 0f,
-        animationSpec = spring(dampingRatio = 0.5f, stiffness = 900f),
+    val pressed = enabled && dragging
+    val releaseGlow by animateFloatAsState(
+        targetValue = if (pressed) 1f else 0f,
+        animationSpec = tween(if (pressed) 0 else 120),
         label = "liquidGlassDragIntensity"
     )
+    val dragIntensity = when {
+        pressed -> 1f
+        !enabled -> 0f
+        else -> releaseGlow
+    }
     // 在这里（组合作用域内）算出柔光透明度：只把结果传进 drawBehind，而不是让 draw 块去读动画状态。
     // 前者每一帧都会让本函数重组、进而重画；后者在 Compose 里是靠不住的（同 SkeletonBox 那个坑）。
     // 与 colors.glow 自带的 alpha **相乘**（不是覆盖）：这样传 Color.Transparent 真的等于关灯，
@@ -191,54 +200,49 @@ internal fun LiquidGlassSlider(
     // 会糊成一片；模糊不跟着收 —— 全 App 统一，玻璃才像同一种材质。
     GlassPanel(
         backdrop = backdrop,
-        surface = colors.trackSurface,
+        surface = if (pressed) colors.trackSurface.copy(alpha = (colors.trackSurface.alpha + 0.08f).coerceAtMost(1f))
+        else colors.trackSurface,
         modifier = modifier
             .fillMaxWidth()
             .height(height)
             .alpha(if (enabled) 1f else 0.45f)
-            .pointerInput(enabled, valueRange) {
+            .pointerInput(enabled, valueRange, gestureKey, tick) {
                 if (!enabled) return@pointerInput
-                // 本次手势是否还没走到正常结束（抬手回调还没发出去）。
                 var pendingFinish = false
                 try {
                     awaitEachGesture {
-                        val down = awaitFirstDown(requireUnconsumed = false)
-                        // 宽度在**每次手势开始时**取（而不是协程启动时取一次）：旋转 / 分屏后
-                        // pointerInput 的 key 没变、协程不会重启，启动时取的那份宽度会是过期的。
+                        val down = awaitFirstDown()
                         val width = size.width.toFloat()
-                        // 按下就吃掉事件：祖先的下滑收起 / 纵向滚动不会在进度条上启动（拖滑块不该收起页面）。
-                        down.consume()
+                        down.consume() // 父层的下滑和滚动不能抢走进度条。
                         dragging = true
                         pendingFinish = true
-                        haptics.performHapticFeedback(HapticFeedbackType.SegmentFrequentTick)
-                        onValueChange(
-                            sliderValueForDragX(
-                                down.position.x, width, valueRange.start, valueRange.endInclusive
-                            )
-                        )
+                        var segment = feedbackSegment(sliderFraction(down.position.x, 0f, width))
+                        preview(sliderValueForDragX(down.position.x, width, valueRange.start, valueRange.endInclusive))
                         while (true) {
-                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                            if (change == null || change.isConsumed) {
+                                cancel()
+                                break
+                            }
                             change.consume()
-                            if (!change.pressed) break
-                            onValueChange(
-                                sliderValueForDragX(
-                                    change.position.x, width, valueRange.start, valueRange.endInclusive
-                                )
-                            )
+                            if (!change.pressed) {
+                                finish()
+                                break
+                            }
+                            val nextSegment = feedbackSegment(sliderFraction(change.position.x, 0f, width))
+                            if (nextSegment != segment) {
+                                segment = nextSegment
+                                tick()
+                            }
+                            preview(sliderValueForDragX(change.position.x, width, valueRange.start, valueRange.endInclusive))
                         }
-                        dragging = false
                         pendingFinish = false
-                        onValueChangeFinished()
+                        dragging = false
                     }
                 } finally {
-                    // 正常结束已在上面清过 pendingFinish；到这里还挂着，说明手势协程是**被取消**的
-                    // （key 变化 / 组件被移出组合）——抬手回调永远不会来，必须通知调用方清掉拖动状态，
-                    // 否则父层的 isDragging 会永远卡在 true。取消路径**只清状态、不 seek**。
+                    // key 改变、系统取消或组件离场时没有抬手事件：只清预览，不 seek。
                     dragging = false
-                    if (pendingFinish) {
-                        pendingFinish = false
-                        onValueChangeCancelled()
-                    }
+                    if (pendingFinish) cancel()
                 }
             },
         shape = capsuleShape,

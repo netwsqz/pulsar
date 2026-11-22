@@ -6,6 +6,7 @@ import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.ContentMetadata
+import androidx.media3.datasource.cache.SimpleCache
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -72,6 +73,34 @@ interface MediaDownloads {
  */
 internal fun isCompleteCopy(totalLength: Long, isCached: Boolean): Boolean =
     totalLength > 0 && isCached
+
+internal enum class DownloadCopyEvidence { COMPLETE, UNFINISHED, UNKNOWN }
+
+/** 只读核对，不打开数据源；找不到有字节的缓存键时不假定是「未下完」。 */
+internal suspend fun Cache.readDownloadCopies(acceptsKey: (String) -> Boolean): Map<String, DownloadCopyEvidence> =
+    withContext(Dispatchers.IO) {
+        (this@readDownloadCopies as? SimpleCache)?.checkInitialization()
+        val cachedKeys = keys
+        buildMap {
+            for (key in cachedKeys) {
+                if (!acceptsKey(key)) continue
+                val spans = getCachedSpans(key)
+                if (spans.isEmpty()) continue
+                // Media3 播放时要求文件长度与片段索引严格一致。
+                val filesPresent = spans.all { span ->
+                    val file = span.file
+                    file != null && file.isFile && file.length() == span.length
+                }
+                val total = ContentMetadata.getContentLength(getContentMetadata(key))
+                val evidence = when {
+                    total <= 0 || !filesPresent -> DownloadCopyEvidence.UNKNOWN
+                    isCompleteCopy(total, isCached(key, 0, total)) -> DownloadCopyEvidence.COMPLETE
+                    else -> DownloadCopyEvidence.UNFINISHED
+                }
+                put(key, evidence)
+            }
+        }
+    }
 
 /**
  * 下载/快照这类「手机本地落盘」操作的公共兜底：挪到 IO 线程、吞掉一切异常只回

@@ -17,6 +17,7 @@ import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.download.OldDownloadPreviewer
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
 import io.ktor.client.HttpClient
@@ -126,11 +127,26 @@ class PulsarApplication : Application() {
      * 淘汰器是 `NoOpCacheEvictor`：**不自动淘汰任何东西**，没有总量上限（ADR-0007）。
      * 用户的下载只有用户能删。
      */
-    val mediaCacheStore: Cache by lazy {
+    private val mediaCache = lazy<Cache> {
         SimpleCache(
             File(filesDir, kMediaDownloadsDirName),
             NoOpCacheEvictor(),
             StandaloneDatabaseProvider(this)
+        )
+    }
+    val mediaCacheStore: Cache by mediaCache
+
+    internal val oldDownloadPreviewer by lazy {
+        val ledger = DataStoreDownloadLedgerStore(pulsarPreferencesDataStore)
+        OldDownloadPreviewer(
+            savedAccount = { sessionManager.savedDownloadAccount() },
+            readLedger = ledger::readForPreview,
+            snapshot = librarySnapshotRepository(),
+            readCopies = { acceptsKey ->
+                // 预览不为自己初始化 SimpleCache：首次打开会创建目录并整理索引。
+                if (!mediaCache.isInitialized()) throw java.io.IOException("音频索引尚未就绪")
+                mediaCacheStore.readDownloadCopies(acceptsKey)
+            },
         )
     }
 

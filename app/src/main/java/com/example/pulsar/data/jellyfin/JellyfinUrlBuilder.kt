@@ -3,6 +3,7 @@ package com.example.pulsar.data.jellyfin
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
+import java.net.URLDecoder
 
 /** Builds Jellyfin request URLs while keeping credentials out of URLs. */
 class JellyfinUrlBuilder(baseUrl: String) {
@@ -26,11 +27,28 @@ class JellyfinUrlBuilder(baseUrl: String) {
     fun mediaStreamRequest(mediaId: String, token: String, deviceId: String): JellyfinRequest {
         require(token.isNotBlank()) { "Token must not be blank" }
         require(deviceId.isNotBlank()) { "Device ID must not be blank" }
-        val url = appendPath("Videos", pathSegment(mediaId), "stream") + "?static=true"
         return JellyfinRequest(
-            url = url,
+            url = mediaStreamUrl(mediaId),
             headers = headersWithToken(deviceId, token)
         )
+    }
+
+    /** 旧下载的缓存键就是原播放地址；查本地副本不需要令牌。 */
+    internal fun mediaStreamUrl(mediaId: String): String =
+        appendPath("Videos", pathSegment(mediaId), "stream") + "?static=true"
+
+    /** 仅识别这个服务器按旧播放规则生成的键，不靠名字、同源 URL 或路径相似来猜。 */
+    internal fun mediaIdFromStreamKey(key: String): String? {
+        val prefix = appendPath("Videos") + "/"
+        val suffix = "/stream?static=true"
+        if (!key.startsWith(prefix) || !key.endsWith(suffix)) return null
+        val encoded = key.removePrefix(prefix).removeSuffix(suffix)
+        val id = try {
+            URLDecoder.decode(encoded, Charsets.UTF_8.name())
+        } catch (_: IllegalArgumentException) {
+            return null
+        }
+        return id.takeIf { it.isNotBlank() && mediaStreamUrl(it) == key }
     }
 
     fun imageRequest(itemId: String, imageTag: String?, token: String, deviceId: String): JellyfinRequest {

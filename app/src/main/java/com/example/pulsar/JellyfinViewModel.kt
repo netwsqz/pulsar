@@ -201,17 +201,6 @@ class JellyfinViewModel(
             val loaded = serverUrlHistory?.load().orEmpty()
             updateSession { it.copy(serverUrlHistory = loaded) }
         }
-        // 剔除历史遗留的「无归属」下载名单条目（serverUrl 为空，永远匹配不上任何账号，
-        // 界面上看不见却占着名单）。正常情况这里是一次纯读，只有真存在坏条目才写回。
-        viewModelScope.launch(dispatcher) {
-            try {
-                downloadLedgerStore?.pruneUnattributed()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                // 清理失败不影响任何事：坏条目本来就匹配不上，顶多下次启动再试
-            }
-        }
     }
 
     fun updateServerUrl(value: String) { updateSession { it.copy(serverUrl = value, errorMessage = null) } }

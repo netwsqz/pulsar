@@ -720,6 +720,7 @@ private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel) {
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(Dimens.SpaceLarge),
         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceMedium)
     ) {
@@ -763,6 +764,7 @@ private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel) {
             ) {
                 if (session.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
             }
+            OldDownloadPreviewButton(Modifier.fillMaxWidth())
     }
 }
 
@@ -4260,6 +4262,7 @@ private fun DownloadsSection(
                 enabled = stats.completeCount > 0
             ) { Text("已下载") }
         }
+        OldDownloadPreviewButton()
         if (failedTracks > 0) {
             Text(
                 "有 $failedTracks 首下载失败 · 去专辑页点「重试」",

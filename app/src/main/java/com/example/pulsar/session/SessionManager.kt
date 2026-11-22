@@ -3,6 +3,7 @@ package com.example.pulsar.session
 import com.example.pulsar.SessionRepository
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.data.jellyfin.SessionScopedJellyfinApi
+import com.example.pulsar.download.AccountScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,6 +68,11 @@ class SessionManager(
 
     /** 当前会话与 API 的原子快照；未登录时为 null。 */
     fun currentConnection(): SessionConnection? = connection
+
+    /** 预览旧下载只用落盘归属，不恢复会话、不创建 API，也不把凭据交给调用方。 */
+    internal suspend fun savedDownloadAccount(): AccountScope? = storeMutex.withLock {
+        store.load()?.let { AccountScope(it.serverUrl, it.userId) }
+    }
 
     /**
      * 恢复上次保存的会话。读失败、没有会话或建不出 API 时返回 false 且不发布任何状态；

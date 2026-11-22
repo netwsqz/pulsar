@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import java.io.IOException
 
 /**
  * 下载名单：记住「这张专辑 / 这个列表当初下了哪几首」。
@@ -158,9 +159,12 @@ private suspend fun <T> guardedSuspendIo(fallback: T, block: suspend () -> T): T
 /** DataStore 实现：整张名单序列化成一段 JSON 存在一个键里。 */
 class DataStoreDownloadLedgerStore(private val dataStore: DataStore<Preferences>) : DownloadLedgerStore {
 
-    override suspend fun load(): DownloadLedger = guardedSuspendIo(DownloadLedger()) {
-        val text = dataStore.data.first()[ledgerJsonKey] ?: return@guardedSuspendIo DownloadLedger()
-        DownloadLedgerCodec.decode(text) ?: DownloadLedger()
+    override suspend fun load(): DownloadLedger = guardedSuspendIo(DownloadLedger()) { readForPreview() }
+
+    /** 预览必须区分「确实没有名单」和「名单读坏了」，不修复、不改写。 */
+    internal suspend fun readForPreview(): DownloadLedger {
+        val text = dataStore.data.first()[ledgerJsonKey] ?: return DownloadLedger()
+        return DownloadLedgerCodec.decode(text) ?: throw IOException("无法读取下载名单")
     }
 
     override suspend fun replaceAll(entries: List<DownloadEntry>) {

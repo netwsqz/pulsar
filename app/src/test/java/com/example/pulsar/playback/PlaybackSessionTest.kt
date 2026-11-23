@@ -356,6 +356,21 @@ class PlaybackSessionTest {
     }
 
     @Test
+    fun `已有下载正在播放时不混入在线曲目 用户仍能直接点播换队列`() = runTest {
+        remote.snapshot = connected().copy(queue = listOf(queueTrack("existing:account:a", current = true)))
+        val session = newSession(FakePlaybackGate())
+        remote.connect()
+        val events = collectEvents(session)
+
+        assertTrue(session.dispatch(PlaybackIntent.AddToQueue(track("b"))))
+        runCurrent()
+        assertEquals(emptyList<String>(), remote.insertedItems.map { it.mediaId })
+        assertTrue(events.single() is PlaybackEvent.Unplayable)
+        assertTrue(session.dispatch(PlaybackIntent.Play(listOf(track("b")), "b")))
+        assertEquals(listOf("b"), remote.setQueueCalls.single().items.map { it.mediaId })
+    }
+
+    @Test
     fun `删除队列项倒序摘并跳过当前项`() = runTest {
         remote.snapshot = connected().copy(
             queue = listOf(

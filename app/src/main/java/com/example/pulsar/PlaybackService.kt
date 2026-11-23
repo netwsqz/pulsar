@@ -14,6 +14,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -32,9 +33,11 @@ import androidx.media3.session.SessionCommands
 import androidx.media3.session.SessionResult
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
-import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.example.pulsar.data.companion.companionPlaybackHttpClient
+import com.example.pulsar.download.existingDownloadBelongsTo
+import com.example.pulsar.download.isExistingDownloadMediaId
+import com.example.pulsar.download.isExistingDownloadPlaybackUri
 import com.example.pulsar.playback.DeviceVolumeSource
 import com.example.pulsar.playback.LoudnessGainAudioSink
 import com.example.pulsar.playback.LoudnessGainProvider
@@ -69,6 +72,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -165,6 +169,21 @@ class PlaybackService : MediaSessionService() {
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(commands)
                 .build()
+        }
+
+        override fun onAddMediaItems(
+            session: MediaSession,
+            controller: ControllerInfo,
+            mediaItems: List<MediaItem>,
+        ): ListenableFuture<List<MediaItem>> {
+            // 外部控制器仍能操作队列和进度，但不能要求读取应用私有的旧副本。
+            if (controller.uid != applicationInfo.uid && mediaItems.any { item ->
+                    isExistingDownloadMediaId(item.mediaId) ||
+                        item.localConfiguration?.uri?.toString()?.let(::isExistingDownloadPlaybackUri) == true
+                }) {
+                return com.google.common.util.concurrent.Futures.immediateFailedFuture(SecurityException())
+            }
+            return super.onAddMediaItems(session, controller, mediaItems)
         }
 
         override fun onCustomCommand(
@@ -304,6 +323,21 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         observeUsbAudioOutput()
+        serviceScope.launch {
+            val app = application as PulsarApplication
+            app.sessionManager.savedDownloadAccountChanges
+                .catch { emit(null) }
+                .collect { account ->
+                    val activePlayer = player ?: return@collect
+                    if ((0 until activePlayer.mediaItemCount).any { index ->
+                            val id = activePlayer.getMediaItemAt(index).mediaId
+                            isExistingDownloadMediaId(id) && !existingDownloadBelongsTo(id, account)
+                        }) {
+                        // 账号切换或清除后立即撤回旧副本的队列，包括已预读的内容。
+                        activePlayer.clearMediaItems()
+                    }
+                }
+        }
         serviceScope.launch {
             usbExclusivePreferences.volumePercent.collect { percent ->
                 applyUsbVolume(percent)
@@ -526,6 +560,13 @@ class PlaybackService : MediaSessionService() {
                 observeOutputDiagnostics(it)
                 observeLoudnessGain(it)
                 observePlaybackReporting(it)
+                val app = application as PulsarApplication
+                it.addListener(object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        val mediaId = it.currentMediaItem?.mediaId ?: return
+                        if (isExistingDownloadMediaId(mediaId)) app.downloadLibrary.recordExistingPlaybackFailure(mediaId)
+                    }
+                })
             }
     }
 
@@ -573,28 +614,14 @@ class PlaybackService : MediaSessionService() {
         })
     }
 
-    /**
-     * 播放数据源：已下载的副本套在原始网络源外面——命中读本地、未命中直接走网络。
-     *
-     * **纯只读**（ADR-0007）：`setCacheWriteDataSinkFactory(null)` 让 `CacheDataSource`
-     * 进入只读模式，播放一个字节都不写盘。想存东西只有一条路——下载
-     * （`CacheWriter` + `createDataSourceForDownloading()`，它不受这里的只读标记影响）。
-     *
-     * [CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR] 是 spec 铁律 1 的落点：读缓存出错就
-     * 退回网络。缓存层的问题绝不能变成播不了歌。
-     *
-     * 缓存实例在 [PulsarApplication] 里（进程级单例，界面也在用它查完整副本），
-     * 这里只取用不释放——释放会让界面的查询全变成异常。
-     */
+    /** 下载缓存是 App 的进程级单例；播放服务只读、不释放。 */
     private fun cacheDataSourceFactory(): DataSource.Factory {
         val app = application as PulsarApplication
         val jellyfin = AuthHttpDataSourceFactory { app.sessionManager.authorizationHeader }
         val companion = OkHttpDataSource.Factory(companionPlaybackHttpClient(app.companionLibrary))
-        return CacheDataSource.Factory()
-            .setCache(app.mediaCacheStore)
-            .setUpstreamDataSourceFactory(PlaybackUpstreamFactory(jellyfin, companion))
-            .setCacheWriteDataSinkFactory(null)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        return playbackDataSourceFactory(app.mediaCacheStore, jellyfin, companion) { mediaId ->
+            app.downloadLibrary.existingPlaybackKey(mediaId)
+        }
     }
 
     private fun capturePlayerState(oldPlayer: ExoPlayer): PlayerRebuildState {

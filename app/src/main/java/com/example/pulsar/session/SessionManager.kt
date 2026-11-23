@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -66,12 +67,15 @@ class SessionManager(
     val authorizationHeader: String?
         get() = header
 
+    /** 只观察落盘归属；断网只撤内存会话时，不会清掉已有下载的播放资格。 */
+    internal val savedDownloadAccountChanges = store.downloadAccounts()
+
     /** 当前会话与 API 的原子快照；未登录时为 null。 */
     fun currentConnection(): SessionConnection? = connection
 
     /** 预览旧下载只用落盘归属，不恢复会话、不创建 API，也不把凭据交给调用方。 */
     internal suspend fun savedDownloadAccount(): AccountScope? = storeMutex.withLock {
-        store.load()?.let { AccountScope(it.serverUrl, it.userId) }
+        savedDownloadAccountChanges.first()
     }
 
     /**
@@ -163,7 +167,7 @@ class SessionManager(
         clearSession()
         scope.launch {
             storeMutex.withLock {
-                if (_current.value == null) store.clear()
+                if (_current.value == null) store.clearExpired()
             }
         }
     }

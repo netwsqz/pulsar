@@ -8,6 +8,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.example.pulsar.QueueTrack
+import com.example.pulsar.download.isExistingDownloadMediaId
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
@@ -53,7 +54,10 @@ internal class MediaControllerPlaybackRemote(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            notify { it.onPlayerError(friendlyPlaybackError(error)) }
+            val isExisting = controller?.currentMediaItem?.mediaId?.let(::isExistingDownloadMediaId) == true
+            val message = if (isExisting) "已有下载播放失败：原副本暂不可用或音频格式不受支持"
+                else friendlyPlaybackError(error)
+            notify { it.onPlayerError(message) }
         }
     }
 

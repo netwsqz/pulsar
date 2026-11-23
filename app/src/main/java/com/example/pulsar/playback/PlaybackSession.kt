@@ -6,8 +6,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.SessionCommand
 import com.example.pulsar.QueueTrack
-import com.example.pulsar.data.companion.isCompanionMediaId
-import com.example.pulsar.data.companion.playbackLibraryIdentity
 import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -439,7 +437,7 @@ internal class PlaybackSession(
         }
         val source = playbackLibraryIdentity(track.id)
         if (snapshot.queue.any { queued ->
-                (isCompanionMediaId(track.id) || isCompanionMediaId(queued.id)) &&
+                (isScopedLibraryTrack(track.id) || isScopedLibraryTrack(queued.id)) &&
                     playbackLibraryIdentity(queued.id) != source
             }) {
             _events.tryEmit(PlaybackEvent.Unplayable("当前队列来自其他曲库，直接点播一首歌曲即可换队列"))

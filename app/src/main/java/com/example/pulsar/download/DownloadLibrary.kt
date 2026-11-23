@@ -6,13 +6,13 @@ import com.example.pulsar.DownloadScheduler
 import com.example.pulsar.DownloadState
 import com.example.pulsar.DownloadTarget
 import com.example.pulsar.DownloadTargetId
-import com.example.pulsar.DownloadTrack
 import com.example.pulsar.MediaDownloads
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.targetId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,15 +41,31 @@ import kotlinx.coroutines.launch
  * - 字节层读失败 → 空集合 / 0 统计 / 按钮「检查中…」，绝不把异常抛给界面；
  * - `CancellationException` 一律重新抛出。
  */
-class DownloadLibrary(
+class DownloadLibrary internal constructor(
     private val downloads: MediaDownloads,
     /** null = 没有名单（未注入）。此时可见性与按钮状态退化成「只看字节真相」。 */
     private val ledger: DownloadLedgerStore?,
     private val scheduler: DownloadScheduler,
     private val scope: CoroutineScope,
+    private val existingDownloads: ExistingDownloads? = null,
 ) {
     private val _state = MutableStateFlow(DownloadSnapshot())
     val state: StateFlow<DownloadSnapshot> = _state.asStateFlow()
+
+    /** #45 的可播资格来自本机证据，不需要内存在线账号或曲库。 */
+    internal suspend fun confirmExistingDownloads(report: OldDownloadPreview.Report): ExistingDownloadApply =
+        existingDownloads?.confirm(report) ?: ExistingDownloadApply.Unavailable
+
+    internal suspend fun loadExistingDownloads(): ExistingDownloadView =
+        existingDownloads?.load() ?: ExistingDownloadView.Unavailable
+
+    internal suspend fun existingPlaybackKey(mediaId: String): String? = existingDownloads?.playbackKey(mediaId)
+
+    internal val existingPlaybackFailures get() = existingDownloads?.failedPlaybackIds
+
+    internal fun recordExistingPlaybackFailure(mediaId: String) { existingDownloads?.recordPlaybackFailure(mediaId) }
+
+    internal fun resetExistingPlaybackFailures() { existingDownloads?.resetPlaybackFailures() }
 
     /** 当前账号作用域。登录 / 切号 / 退出时由 ViewModel 更新，来源是当前会话。 */
     @Volatile
@@ -347,12 +363,15 @@ class DownloadLibrary(
         }
         val entry = findLedgerEntry(target)
         val trackIds = entry?.trackIds ?: fallbackTrackIds(target)
-        val keys = downloadKeysToDelete(trackIds, target.tracks, playingTrackId)
+        val keysById = target.tracks.associate { it.id to it.key }
+        val (keepTrackIds, deleteTrackIds) = trackIds.partition { id ->
+            isPlayingDownloadCopy(playingTrackId, id, keysById[id].orEmpty())
+        }
+        val keys = deleteTrackIds.mapNotNull(keysById::get)
         keys.forEach { downloads.remove(it) }
 
         // 名单跟着改：删干净就整条去掉，留了正在播的那首就只留它。
         // 写不进去不影响删除本身（字节已经删了），跟改前同一口径。
-        val keepTrackIds = trackIds.filter { it == playingTrackId }
         val ledgerUpdated = entry != null && updateLedgerAfterDelete(entry, keepTrackIds)
 
         // 删完立刻重算按钮状态与统计：不让「已下载」和占用数字多撑几帧。
@@ -368,8 +387,7 @@ class DownloadLibrary(
      * @return 是否真的删掉了一份完整副本。
      */
     suspend fun deleteTrack(track: Track, key: String, playingTrackId: String?): Boolean {
-        if (track.id == playingTrackId) return false
-        if (key.isBlank()) return false
+        if (key.isBlank() || isPlayingDownloadCopy(playingTrackId, track.id, key)) return false
         // 没人登录（或还在切换）时不删共享字节：谁都不拥有这批下载。
         if (account == null) return false
         val hasCopy = try {
@@ -568,17 +586,4 @@ internal fun downloadStateSignature(state: DownloadState?): String = when (state
     DownloadState.Downloaded -> "downloaded"
     is DownloadState.PartiallyFailed -> "failed:${state.failed}"
     DownloadState.Canceled -> "canceled"
-}
-
-/** 按名单算出要删的缓存键：只删 [trackIds] 里点名的那些，**跳过正在播放的那首**。 */
-internal fun downloadKeysToDelete(
-    trackIds: List<String>,
-    tracks: List<DownloadTrack>,
-    playingTrackId: String?
-): List<String> {
-    val byId = tracks.associateBy { it.id }
-    return trackIds.mapNotNull { trackId ->
-        if (trackId == playingTrackId) return@mapNotNull null
-        byId[trackId]?.key
-    }
 }

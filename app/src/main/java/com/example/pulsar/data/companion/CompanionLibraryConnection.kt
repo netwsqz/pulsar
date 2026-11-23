@@ -132,13 +132,6 @@ private val accessKeyPattern = Regex("[A-Za-z0-9_-]+")
 
 internal fun isCompanionMediaId(id: String): Boolean = id.startsWith(MEDIA_ID_PREFIX)
 
-/** 电脑曲目的 ID 带着服务归属；其他曲库仍用原来的 ID。 */
-internal fun playbackLibraryIdentity(mediaId: String): String = if (isCompanionMediaId(mediaId)) {
-    mediaId.substringBeforeLast(':')
-} else {
-    if (':' in mediaId) "local" else "jellyfin"
-}
-
 internal fun isCompanionStreamUrl(url: String): Boolean =
     url.toHttpUrlOrNull()?.let { audioPathPattern.matches(it.encodedPath) } == true
 

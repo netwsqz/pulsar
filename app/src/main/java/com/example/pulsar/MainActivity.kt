@@ -278,6 +278,8 @@ import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.pulsar.data.companion.isCompanionMediaId
+import com.example.pulsar.download.existingDownloadPlaybackUri
+import com.example.pulsar.download.isExistingDownloadMediaId
 import com.example.pulsar.library.CompanionLibraryTrial
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
@@ -378,6 +380,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     val application = LocalContext.current.applicationContext as PulsarApplication
     var showCompanionLibrary by rememberSaveable { mutableStateOf(false) }
     var showPairing by rememberSaveable { mutableStateOf(false) }
+    var showLocalDownloads by rememberSaveable { mutableStateOf(false) }
     val pageState = rememberSaveableStateHolder()
     val viewModelFactory = remember(application) { JellyfinViewModelFactory(application, !showCompanionLibrary) }
     val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
@@ -399,7 +402,11 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     val trialActive = showCompanionLibrary
     val mediaItems = remember(viewModel, trial) {
         TrackMediaItemFactory { track ->
-            val url = if (isCompanionMediaId(track.id)) trial.streamUrl(track) else viewModel.streamUrl(track)
+            val url = when {
+                isExistingDownloadMediaId(track.id) -> existingDownloadPlaybackUri(track.id)
+                isCompanionMediaId(track.id) -> trial.streamUrl(track)
+                else -> viewModel.streamUrl(track)
+            }
             url?.let { buildMediaItem(track, it) }
         }
     }
@@ -407,12 +414,11 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
         object : PlaybackGate {
             override fun isPlayable(track: Track): Boolean = unplayableReason(track) == null
 
-            override fun unplayableReason(track: Track): String? = if (showCompanionLibrary) {
-                trial.unplayableReason(track)
-            } else if (isCompanionMediaId(track.id)) {
-                "请从当前曲库重新选择歌曲"
-            } else {
-                viewModel.unplayableReason(track)
+            override fun unplayableReason(track: Track): String? = when {
+                isExistingDownloadMediaId(track.id) -> null // 播放数据源打开时重新核对落盘归属与原字节。
+                showCompanionLibrary -> trial.unplayableReason(track)
+                isCompanionMediaId(track.id) -> "请从当前曲库重新选择歌曲"
+                else -> viewModel.unplayableReason(track)
             }
         }
     }
@@ -444,7 +450,29 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     )
     val seed = coverTheme.seed.color.takeIf { coverTheme.seed.source != ThemeSeedSource.Default }
     PulsarTheme(darkTheme = darkTheme, seed = seed) {
-        if (trialActive && (showPairing || trialState.needsPairing)) {
+        val openLocalDownloads = { showLocalDownloads = true }
+        if (showLocalDownloads) {
+            pageState.SaveableStateProvider("local-downloads") {
+                MusicLibraryScreen(
+                    library = LibraryState(),
+                    session = SessionState(),
+                    downloads = DownloadsState(cachedAlbums = emptyList()),
+                    viewModel = viewModel,
+                    playbackSession = playbackSession,
+                    qqState = QQDownloadUiState(),
+                    qqViewModel = null,
+                    currentTrack = currentTrack,
+                    artworkSessionIdentity = null,
+                    coverTheme = coverTheme,
+                    themePreferences = themePreferences,
+                    onOpenCompanionLibrary = {},
+                    companionTrial = null,
+                    onRePair = {},
+                    onExitTrial = {},
+                    onCloseLocalDownloads = { showLocalDownloads = false },
+                )
+            }
+        } else if (trialActive && (showPairing || trialState.needsPairing)) {
             pageState.SaveableStateProvider("companion-pairing") {
                 CompanionPairingScreen(
                     trial = trial,
@@ -457,7 +485,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
             }
         } else if (!trialActive && !state.session.isRestoring && state.library.tracks == null) {
             pageState.SaveableStateProvider("jellyfin-library") {
-                LoginScreen(state.session, viewModel) { setTrial(true) }
+                LoginScreen(state.session, viewModel, openLocalDownloads) { setTrial(true) }
             }
         } else {
             val sourceKey = if (trialActive) "companion-library" else "jellyfin-library"
@@ -789,7 +817,12 @@ private enum class SkeletonLeading { Cover, Number }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel, onOpenCompanionLibrary: () -> Unit) {
+private fun LoginScreen(
+    session: SessionState,
+    viewModel: JellyfinViewModel,
+    onOpenLocalDownloads: () -> Unit,
+    onOpenCompanionLibrary: () -> Unit,
+) {
     Column(
         // edge-to-edge 后登录页同样要躲开状态栏 / 导航栏（工单 14）。
         modifier = Modifier
@@ -840,7 +873,7 @@ private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel, onO
             ) {
                 if (session.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
             }
-            OldDownloadPreviewButton(Modifier.fillMaxWidth())
+            TextButton(onClick = onOpenLocalDownloads, modifier = Modifier.fillMaxWidth()) { Text("已下载") }
             TextButton(onClick = onOpenCompanionLibrary, modifier = Modifier.fillMaxWidth()) {
                 Text("连接电脑曲库（试用）")
             }
@@ -856,7 +889,7 @@ private fun MusicLibraryScreen(
     viewModel: JellyfinViewModel,
     playbackSession: PlaybackSession,
     qqState: QQDownloadUiState,
-    qqViewModel: QQDownloadViewModel,
+    qqViewModel: QQDownloadViewModel?,
     currentTrack: Track?,
     artworkSessionIdentity: Any?,
     coverTheme: CoverTheme,
@@ -865,9 +898,15 @@ private fun MusicLibraryScreen(
     companionTrial: CompanionLibraryTrial?,
     onRePair: () -> Unit,
     onExitTrial: () -> Unit,
+    onCloseLocalDownloads: (() -> Unit)? = null,
 ) {
     val trialActive = companionTrial != null
-    val defaultSection = if (trialActive) LibrarySection.Tracks else LibrarySection.Discover
+    val localDownloadsOnly = onCloseLocalDownloads != null
+    val defaultSection = when {
+        localDownloadsOnly -> LibrarySection.CachedCopies
+        trialActive -> LibrarySection.Tracks
+        else -> LibrarySection.Discover
+    }
     val context = LocalContext.current
     val playback by playbackSession.state.collectAsStateWithLifecycle()
     // 队列的拖拽暂态（#28）：迷你条与全屏页**共用同一个实例**，队列真相仍是会话状态。
@@ -921,12 +960,12 @@ private fun MusicLibraryScreen(
     // `LibraryCache` 里；会话就绪、离线翻转、切歌后的补跑由 module 自己触发，
     // 所以这里不再把 sessionReady / isOffline / historyEpoch 当 key。
     LaunchedEffect(section) {
-        if (!trialActive) viewModel.onSectionEntered(section)
-        if (section == LibrarySection.DownloadService) qqViewModel.refreshJobs()
+        if (!trialActive && !localDownloadsOnly) viewModel.onSectionEntered(section)
+        if (section == LibrarySection.DownloadService) qqViewModel?.refreshJobs()
     }
     // 配对成功或换到新地址时，新的 QQ 会话接续当前查询，不显示上一台电脑的结果。
     LaunchedEffect(qqViewModel) {
-        if (companionTrial != null) qqViewModel.updateSearchQuery(companionTrial.state.value.search.query)
+        if (companionTrial != null) qqViewModel?.updateSearchQuery(companionTrial.state.value.search.query)
     }
     // 离线可见性（ADR-0008）：离线时各屏只显示已下载的东西，不再「全量 + 标灰」。
     // 判据全部收在 OfflinePolicy 里——这里只把原始 state 喂进去、读回渲染用的视图，
@@ -988,7 +1027,7 @@ private fun MusicLibraryScreen(
     LaunchedEffect(qqState.download.actionMessage, qqViewModel) {
         val message = qqState.download.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
-        qqViewModel.dismissActionMessage()
+        qqViewModel?.dismissActionMessage()
     }
     // 播放会话的一次性事件统一出口：不可播提示、入队成功、起播队列、USB 音量浮窗。
     // 界面只消费会话的结论，不再自己判断 gate / 拼提示文案。
@@ -998,7 +1037,9 @@ private fun MusicLibraryScreen(
                 is PlaybackEvent.Unplayable -> snackbarHostState.showSnackbar(event.reason)
                 is PlaybackEvent.Message -> snackbarHostState.showSnackbar(event.text)
                 is PlaybackEvent.PlaybackQueuePrepared -> {
-                    if (!trialActive) viewModel.setPlaybackQueue(event.tracks, event.startTrackId)
+                    if (!trialActive && !localDownloadsOnly && event.tracks.none { isExistingDownloadMediaId(it.id) }) {
+                        viewModel.setPlaybackQueue(event.tracks, event.startTrackId)
+                    }
                 }
                 is PlaybackEvent.VolumeApplied -> VolumeFeedback.show(event.percent)
             }
@@ -1047,7 +1088,11 @@ private fun MusicLibraryScreen(
     val currentListTracks: List<Track> = currentListTracks(section, visible, discoverPicks)
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
-    BackHandler(trialActive || section != defaultSection) {
+    BackHandler(trialActive || localDownloadsOnly || section != defaultSection) {
+        if (onCloseLocalDownloads != null) {
+            onCloseLocalDownloads()
+            return@BackHandler
+        }
         when (val s = section) {
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
@@ -1072,8 +1117,8 @@ private fun MusicLibraryScreen(
                 detailOrigin = LibrarySection.Discover
             }
             // 已下载和 QQ 音乐导入都是设置里的二级页。
-            LibrarySection.CachedCopies, LibrarySection.DownloadService ->
-                goTo(LibrarySection.Settings, isBack = true)
+            LibrarySection.CachedCopies -> goTo(if (trialActive) defaultSection else LibrarySection.Settings, isBack = true)
+            LibrarySection.DownloadService -> goTo(LibrarySection.Settings, isBack = true)
             else -> if (trialActive && section == defaultSection) onExitTrial() else goTo(defaultSection, isBack = true)
         }
     }
@@ -1222,7 +1267,7 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search) {
+                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search && s != LibrarySection.CachedCopies) {
                     LibraryScreenScaffold(
                         title = s.navLabel().orEmpty(),
                         loadState = LoadState.Empty("电脑曲库试用目前支持歌曲和搜索"),
@@ -1315,7 +1360,7 @@ private fun MusicLibraryScreen(
                         ),
                         actions = searchActions(
                             onLibraryQuery = if (companionTrial != null) companionTrial::updateSearchQuery else viewModel::updateSearchQuery,
-                            qqViewModel = qqViewModel,
+                            qqViewModel = checkNotNull(qqViewModel),
                             onRetryLibrary = if (companionTrial != null) companionTrial::retry else {
                                 { viewModel.updateSearchQuery(library.search.query) }
                             },
@@ -1326,16 +1371,19 @@ private fun MusicLibraryScreen(
                         ),
                         modifier = Modifier.fillMaxSize()
                     )
-                    LibrarySection.DownloadService -> DownloadServiceScreen(
-                        state = qqState,
-                        onQualityChange = qqViewModel::updateQuality,
-                        onRetryCredential = qqViewModel::retryCredential,
-                        onRefreshCredential = qqViewModel::refreshCredential,
-                        onRefreshJobs = qqViewModel::refreshJobs,
-                        onFileOpsKeyInput = qqViewModel::updateFileOpsKeyInput,
-                        onSaveFileOpsKey = qqViewModel::saveFileOpsKey,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    LibrarySection.DownloadService -> {
+                        val downloadViewModel = checkNotNull(qqViewModel)
+                        DownloadServiceScreen(
+                            state = qqState,
+                            onQualityChange = downloadViewModel::updateQuality,
+                            onRetryCredential = downloadViewModel::retryCredential,
+                            onRefreshCredential = downloadViewModel::refreshCredential,
+                            onRefreshJobs = downloadViewModel::refreshJobs,
+                            onFileOpsKeyInput = downloadViewModel::updateFileOpsKeyInput,
+                            onSaveFileOpsKey = downloadViewModel::saveFileOpsKey,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         session = session,
                         album = s.album,
@@ -1384,6 +1432,12 @@ private fun MusicLibraryScreen(
                         downloads = downloads,
                         viewModel = viewModel,
                         albumCoverFor = viewModel::albumCover,
+                        playback = playback,
+                        onPlay = onPlayTrack,
+                        onBack = onCloseLocalDownloads ?: {
+                            goTo(if (trialActive) defaultSection else LibrarySection.Settings, isBack = true)
+                        },
+                        showOriginalGroups = !localDownloadsOnly && !trialActive,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -1406,7 +1460,7 @@ private fun MusicLibraryScreen(
         }
         // 顶部玻璃岛（悬浮）：列表页显示；详情页隐藏（返回交给系统返回键 / 侧滑手势）。
         AnimatedVisibility(
-            visible = !section.isDetail() && !showNowPlaying,
+            visible = !localDownloadsOnly && !section.isDetail() && !showNowPlaying,
             modifier = Modifier
                 .align(Alignment.TopCenter)
                 .fillMaxWidth()
@@ -1423,6 +1477,7 @@ private fun MusicLibraryScreen(
                     detailOrigin = section
                     goTo(LibrarySection.Settings)
                 },
+                onOpenTrialDownloads = { goTo(LibrarySection.CachedCopies) }.takeIf { trialActive },
                 onSignOut = viewModel::signOut,
                 onRePair = onRePair.takeIf { trialActive },
                 onExitTrial = onExitTrial.takeIf { trialActive },
@@ -1684,6 +1739,7 @@ private fun GlassChipBar(
     onSelectSection: (LibrarySection) -> Unit,
     onShowSearch: () -> Unit,
     onShowSettings: () -> Unit,
+    onOpenTrialDownloads: (() -> Unit)? = null,
     onSignOut: () -> Unit,
     onRePair: (() -> Unit)? = null,
     onExitTrial: (() -> Unit)? = null,
@@ -1809,6 +1865,15 @@ private fun GlassChipBar(
                             }
                         )
                     } else {
+                        if (onOpenTrialDownloads != null) {
+                            DropdownMenuItem(
+                                text = { Text("已下载") },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    onOpenTrialDownloads()
+                                },
+                            )
+                        }
                         if (onRePair != null) {
                             DropdownMenuItem(
                                 text = { Text("更换配对") },
@@ -1948,7 +2013,9 @@ internal fun LazyListScope.trackList(
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: ((Track) -> Unit)? = null,
     leadingNumbers: Boolean = false,
-    keyPrefix: String = ""
+    keyPrefix: String = "",
+    enabled: Boolean = true,
+    allowMenu: Boolean = true,
 ) {
     itemsIndexed(tracks, key = { _, track -> "$keyPrefix${track.id}" }) { index, track ->
         TrackRow(
@@ -1960,6 +2027,8 @@ internal fun LazyListScope.trackList(
             isCurrent = currentTrackId == track.id,
             isPlaying = isPlaying,
             leadingNumber = if (leadingNumbers) index + 1 else null,
+            enabled = enabled,
+            allowMenu = allowMenu,
             modifier = Modifier.fillMaxWidth()
         )
     }
@@ -2036,12 +2105,14 @@ private fun TrackRow(
     onAddToQueue: (() -> Unit)? = null,
     /** 专辑详情页用：行首显示曲目序号而不是小封面（Apple Music 列表语言）。null = 保持封面。 */
     leadingNumber: Int? = null,
+    enabled: Boolean = true,
+    allowMenu: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     var rowWindowOffset by remember { mutableStateOf(Offset.Zero) }
     var rowSize by remember { mutableStateOf(IntSize.Zero) }
     var lastDownOffset by remember { mutableStateOf(Offset.Zero) }
-    val multiSelect = LocalMultiSelect.current
+    val multiSelect = LocalMultiSelect.current.takeIf { allowMenu }
     val multiSelectActive = multiSelect?.active == true
     // 分隔线起点跟着实际前槽走（spec §5）：多选 = 勾选框 48 + 4 + 封面 48 + 12 = 112dp，
     // 从文字左缘开始、不穿过勾选框；无多选 / 序号槽 = 48 + 12 = 60dp，从封面右缘开始。
@@ -2086,15 +2157,18 @@ private fun TrackRow(
         rowModifier = Modifier
             // combinedClickable 提供 Material 水波纹 + 长按；长按触觉（LongPress）由其内部默认开启。
             .combinedClickable(
+                enabled = enabled,
                 // 多选模式下点击整行 = 勾选，不再触发播放（工单 05）。
                 onClick = {
                     if (multiSelectActive) multiSelect?.onToggle(track.id) else onClick()
                 },
-                onLongClick = {
-                    // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
-                    val windowOffset = rowWindowOffset + lastDownOffset
-                    openMenuAt(IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt()))
-                }
+                onLongClick = if (allowMenu) {
+                    {
+                        // 触点坐标已在旁挂 pointerInput 里记录为最近一次按下位置，这里直接取用。
+                        val windowOffset = rowWindowOffset + lastDownOffset
+                        openMenuAt(IntOffset(windowOffset.x.toInt(), windowOffset.y.toInt()))
+                    }
+                } else null
             )
             // 轻量触点观察：只记下最近一次按下的局部坐标，不消费事件，不干扰 combinedClickable 的手势判定。
             .pointerInput(Unit) {
@@ -4187,6 +4261,10 @@ private fun CachedCopiesContent(
     downloads: DownloadsState,
     viewModel: JellyfinViewModel,
     albumCoverFor: (Album) -> JellyfinRequest?,
+    playback: PlaybackUiState,
+    onPlay: (List<Track>, String) -> Unit,
+    onBack: () -> Unit,
+    showOriginalGroups: Boolean,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -4195,81 +4273,68 @@ private fun CachedCopiesContent(
             .padding(horizontal = Dimens.SpaceMedium)
             .padding(top = Dimens.SpaceSmall)
     ) {
-        SectionHeader(
-            "已下载",
-            style = SectionHeaderStyle.Page,
-            modifier = Modifier.fillMaxWidth().padding(bottom = Dimens.SpaceMidMedium)
-        )
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("返回") }
+            SectionHeader("已下载", style = SectionHeaderStyle.Page)
+        }
         val cachedAlbums = downloads.cachedAlbums
-        when {
-            cachedAlbums == null -> Box(
-                Modifier.weight(1f).fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) { CircularProgressIndicator() }
-            cachedAlbums.isEmpty() -> Box(
-                Modifier.weight(1f).fillMaxWidth(),
-                contentAlignment = Alignment.Center
-            ) { EmptyState("还没有下载的音乐\n点专辑或播放列表上的「下载」，就能离线听") }
-            else -> {
-                var deleteTarget by remember { mutableStateOf<CachedAlbum?>(null) }
-                val playingTrackId = viewModel.currentTrack.collectAsStateWithLifecycle().value?.id
-                LazyColumn(
-                    Modifier.weight(1f).fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
-                    contentPadding = PaddingValues(bottom = Dimens.BottomContentInset)
-                ) {
-                    items(cachedAlbums, key = { it.album.id }) { entry ->
-                        DownloadedAlbumRow(
-                            entry = entry,
-                            cover = albumCoverFor(entry.album),
-                            trackCoverFor = viewModel::trackCover,
-                            playingTrackId = playingTrackId,
-                            onDeleteTrack = viewModel::deleteDownloadedTrack,
-                            onDeleteAlbum = { deleteTarget = entry }
-                        )
-                    }
-                }
-                deleteTarget?.let { target ->
-                    // 删除跑在 ViewModel 里（导航切走也不中断，破坏性操作不能删一半）：忙碌位落回
-                    // false 才算删完，这时才关框。关完由 MainActivity 统一弹「已删除 N 首」（工单 13）。
-                    val deleting = downloads.isDeleting
-                    var deleteStarted by remember { mutableStateOf(false) }
-                    // 两个 key 都要：只看 deleting 的话，删除在一帧内跑完（或 ViewModel 直接
-                    // 提前返回、忙碌位从未变过）时本 effect 不会重跑，对话框就永远关不上了。
-                    LaunchedEffect(deleting, deleteStarted) {
-                        if (deleteStarted && !deleting) deleteTarget = null
-                    }
-                    AlertDialog(
-                        onDismissRequest = { if (!deleting) deleteTarget = null },
-                        title = { Text("删掉这张专辑的下载？") },
-                        text = {
-                            Column {
-                                Text(
-                                    "将删掉《${target.album.name}》在手机上下载的 ${target.tracks.size} 首。\n" +
-                                        "歌还在电脑上一首没动；服务器后来新增的歌不会跟着删，正在播的那首会跳过。"
-                                )
-                                // 删除进度（用户故事 62）：逐首删要时间，只把按钮变灰没人看得懂。
-                                if (deleting) DeleteProgressNotice()
-                            }
-                        },
-                        confirmButton = {
-                            TextButton(
-                                enabled = !deleting,
-                                colors = ButtonDefaults.textButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.error
-                                ),
-                                onClick = {
-                                    deleteStarted = true
-                                    viewModel.deleteAlbumCopies(target.album)
-                                }
-                            ) { Text("删除") }
-                        },
-                        dismissButton = {
-                            TextButton(enabled = !deleting, onClick = { deleteTarget = null }) { Text("取消") }
-                        }
+        var deleteTarget by remember { mutableStateOf<CachedAlbum?>(null) }
+        val application = LocalContext.current.applicationContext as PulsarApplication
+        val (existing, reloadExisting) = rememberExistingDownloads(application, cachedAlbums)
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
+            contentPadding = PaddingValues(bottom = Dimens.BottomContentInset)
+        ) {
+            existingDownloadGroup(existing, playback, onPlay, reloadExisting)
+            if (showOriginalGroups) when {
+                cachedAlbums == null -> item { CircularProgressIndicator() }
+                cachedAlbums.isEmpty() -> item { Text("还没有按专辑分组的下载") }
+                else -> items(cachedAlbums, key = { "album:${it.album.id}" }) { entry ->
+                    DownloadedAlbumRow(
+                        entry = entry,
+                        cover = albumCoverFor(entry.album),
+                        trackCoverFor = viewModel::trackCover,
+                        isPlayingCopy = viewModel::isCurrentCopy,
+                        onDeleteTrack = viewModel::deleteDownloadedTrack,
+                        onDeleteAlbum = { deleteTarget = entry }
                     )
                 }
             }
+        }
+        deleteTarget?.let { target ->
+            val deleting = downloads.isDeleting
+            var deleteStarted by remember { mutableStateOf(false) }
+            // 删除跑在 ViewModel 里，忙碌位落回 false 才关框；也处理发起后立即返回的情形。
+            LaunchedEffect(deleting, deleteStarted) {
+                if (deleteStarted && !deleting) deleteTarget = null
+            }
+            AlertDialog(
+                onDismissRequest = { if (!deleting) deleteTarget = null },
+                title = { Text("删掉这张专辑的下载？") },
+                text = {
+                    Column {
+                        Text(
+                            "将删掉《${target.album.name}》在手机上下载的 ${target.tracks.size} 首。\n" +
+                                "歌还在电脑上一首没动；服务器后来新增的歌不会跟着删，正在播的那首会跳过。"
+                        )
+                        if (deleting) DeleteProgressNotice()
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = !deleting,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        onClick = {
+                            deleteStarted = true
+                            viewModel.deleteAlbumCopies(target.album)
+                        }
+                    ) { Text("删除") }
+                },
+                dismissButton = {
+                    TextButton(enabled = !deleting, onClick = { deleteTarget = null }) { Text("取消") }
+                }
+            )
         }
     }
 }
@@ -4281,7 +4346,7 @@ private fun DownloadedAlbumRow(
     entry: CachedAlbum,
     cover: JellyfinRequest?,
     trackCoverFor: (Track) -> JellyfinRequest?,
-    playingTrackId: String?,
+    isPlayingCopy: (Track) -> Boolean,
     onDeleteTrack: (Track) -> Unit,
     onDeleteAlbum: () -> Unit
 ) {
@@ -4317,6 +4382,7 @@ private fun DownloadedAlbumRow(
         if (expanded) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             entry.tracks.forEach { track ->
+                val playing = isPlayingCopy(track)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     AlbumCover(trackCoverFor(track), track.title, Modifier.size(Dimens.TouchTargetSmall))
                     Spacer(Modifier.width(Dimens.SpaceMidMedium))
@@ -4324,7 +4390,7 @@ private fun DownloadedAlbumRow(
                         Text(
                             track.title,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = if (track.id == playingTrackId) {
+                            color = if (playing) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 Color.Unspecified
@@ -4333,7 +4399,7 @@ private fun DownloadedAlbumRow(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            if (track.id == playingTrackId) "正在播放 · 不能删" else track.artist,
+                            if (playing) "正在播放 · 不能删" else track.artist,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -4343,7 +4409,7 @@ private fun DownloadedAlbumRow(
                     // 正在播的那首删不了：从播放流底下抽走会让声音当场断掉。
                     IconButton(
                         onClick = { onDeleteTrack(track) },
-                        enabled = track.id != playingTrackId
+                        enabled = !playing
                     ) {
                         Icon(Icons.Filled.Delete, contentDescription = "删除这首的下载")
                     }
@@ -4383,10 +4449,7 @@ private fun DownloadsSection(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TextButton(
-                onClick = onOpenCachedCopies,
-                enabled = stats.completeCount > 0
-            ) { Text("已下载") }
+            TextButton(onClick = onOpenCachedCopies) { Text("已下载") }
         }
         OldDownloadPreviewButton()
         if (failedTracks > 0) {

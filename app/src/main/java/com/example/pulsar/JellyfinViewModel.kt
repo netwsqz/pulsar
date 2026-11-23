@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
-import com.example.pulsar.data.companion.isCompanionMediaId
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
@@ -14,6 +13,7 @@ import com.example.pulsar.download.AccountScope
 import com.example.pulsar.download.DownloadLibrary
 import com.example.pulsar.download.buildDownloadTarget
 import com.example.pulsar.download.downloadDeletedMessage
+import com.example.pulsar.download.isPlayingDownloadCopy
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -21,6 +21,7 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
+import com.example.pulsar.playback.isScopedLibraryTrack
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionConnection
 import com.example.pulsar.session.SessionManager
@@ -438,7 +439,7 @@ class JellyfinViewModel(
     }
 
     fun streamUrl(track: Track): String? {
-        if (isCompanionMediaId(track.id)) return null
+        if (isScopedLibraryTrack(track.id)) return null
         val src = activeConnection()?.api ?: return null
         return src.streamUrl(track.id)
     }
@@ -470,7 +471,7 @@ class JellyfinViewModel(
     fun playlistCover(playlist: Playlist): JellyfinRequest? = coverRequest(playlist.id, playlist.imageTag)
 
     fun trackCover(track: Track): JellyfinRequest? {
-        if (track.id.isBlank() || isCompanionMediaId(track.id)) return null
+        if (track.id.isBlank() || isScopedLibraryTrack(track.id)) return null
         val src = activeConnection()?.api ?: return null
         return src.imageRequest(track.id, track.imageTag)
     }
@@ -491,7 +492,7 @@ class JellyfinViewModel(
         _currentTrack.value = mediaItem?.let { item ->
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
-        if (!libraryActive || mediaItem?.mediaId?.let(::isCompanionMediaId) == true) {
+        if (!libraryActive || mediaItem?.mediaId?.let(::isScopedLibraryTrack) == true) {
             clearLyrics()
             return
         }
@@ -511,7 +512,7 @@ class JellyfinViewModel(
      */
     fun loadLyricsForCurrentTrack() {
         val track = _currentTrack.value ?: return
-        if (!libraryActive || isCompanionMediaId(track.id)) return
+        if (!libraryActive || isScopedLibraryTrack(track.id)) return
         val src = activeConnection()?.api ?: return
         val generation = ++lyricsGeneration
         _lyrics.value = Lyrics.NONE
@@ -715,7 +716,7 @@ class JellyfinViewModel(
         if (_state.value.library.fileOps.isBusy) return false
         val fileOps = libraryFilesFactory ?: return falseWithMessage("电脑端服务未配置")
         // 正在播的那首删不得：文件没了播放器缓冲还在，是诡异 bug 高发区（spec 铁律 3）
-        if (_currentTrack.value?.id == track.id) return falseWithMessage("正在播放的歌曲不能删除")
+        if (isCurrentCopy(track)) return falseWithMessage("正在播放的歌曲不能删除")
         val path = track.filePath?.takeIf { it.isNotBlank() }
             ?: return falseWithMessage("拿不到这首歌的文件路径，无法操作")
         updateFileOps { it.copy(isBusy = true, message = null) }
@@ -973,11 +974,10 @@ class JellyfinViewModel(
     suspend fun deleteTracks(tracks: List<Track>): Int {
         if (_state.value.library.fileOps.isBusy) return 0
         val fileOps = libraryFilesFactory ?: return 0
-        val currentId = _currentTrack.value?.id
-        val deletable = tracks.filter { it.id != currentId && !it.filePath.isNullOrBlank() }
+        val deletable = tracks.filter { !isCurrentCopy(it) && !it.filePath.isNullOrBlank() }
         if (deletable.isEmpty()) {
             falseWithMessage(
-                if (tracks.any { it.id == currentId }) "正在播放的歌曲不能删除" else "拿不到歌曲的文件路径，无法操作"
+                if (tracks.any(::isCurrentCopy)) "正在播放的歌曲不能删除" else "拿不到歌曲的文件路径，无法操作"
             )
             return 0
         }
@@ -1046,6 +1046,9 @@ class JellyfinViewModel(
     // 绝不冒泡成播放失败或界面报错。
 
     /** 下载键 = 播放流 URL（token 只走 header 不进 URL，所以键里没有凭据）。 */
+    internal fun isCurrentCopy(track: Track): Boolean =
+        isPlayingDownloadCopy(_currentTrack.value?.id, track.id, cacheKey(track).orEmpty())
+
     private fun cacheKey(track: Track): String? = streamUrl(track)
 
     /** 曲库快照：第一次用到时读盘，之后走内存副本。 */
@@ -1288,7 +1291,9 @@ class JellyfinViewModel(
     private fun removeCachedCopy(track: Track) {
         val downloads = mediaDownloads ?: return
         val key = cacheKey(track) ?: return
-        viewModelScope.launch(dispatcher) { downloads.remove(key) }
+        viewModelScope.launch(dispatcher) {
+            if (!isPlayingDownloadCopy(_currentTrack.value?.id, track.id, key)) downloads.remove(key)
+        }
     }
 
     /**
@@ -1321,7 +1326,7 @@ class JellyfinViewModel(
     fun deleteDownloadedTrack(track: Track) {
         val library = downloadLibrary ?: return
         val tracks = _state.value.library.tracks ?: return
-        if (_currentTrack.value?.id == track.id) return
+        if (isCurrentCopy(track)) return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
             // module 内部会再挡一道「正在播的不删」，并顺手把名单里的这一首去掉；

@@ -569,6 +569,22 @@ class DownloadLibraryTest {
     }
 
     @Test
+    fun `已有下载正在读同一个原副本时 原入口也不能删除这个副本`() = runTest {
+        val oldKey = "https://server.test/Videos/t2/stream?static=true"
+        val downloads = FakeMediaDownloads().apply { completeKeys += setOf("stream/t1", oldKey) }
+        val ledger = FakeDownloadLedgerStore().apply { entries = listOf(entry(trackIds = listOf("t1", "t2"))) }
+        val library = library(downloads, ledger)
+        library.setAccount(user1)
+        val playingId = existingDownloadMediaId(user1, oldKey)
+        val album = target().copy(tracks = listOf(DownloadTrack("t1", "stream/t1", "stream/t1"), DownloadTrack("t2", oldKey, oldKey)))
+
+        assertFalse(library.deleteTrack(track("t2"), key = oldKey, playingTrackId = playingId))
+        assertEquals(1, library.delete(album, playingTrackId = playingId).deletedCount)
+        assertEquals(setOf(oldKey), downloads.completeKeys)
+        assertEquals(listOf("t2"), ledger.entries.single().trackIds)
+    }
+
+    @Test
     fun `删除时名单里认不出的 id 忽略，不按专辑名一锅端`() = runTest {
         val downloads = FakeMediaDownloads().apply {
             completeKeys += setOf("stream/t1", "stream/t2", "stream/t3")

@@ -1,6 +1,7 @@
 package com.example.pulsar.download
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.media3.common.MediaItem
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.ContentMetadata
@@ -13,6 +14,12 @@ import com.example.pulsar.LibrarySnapshot
 import com.example.pulsar.SessionStore
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.playback.FakePlaybackGate
+import com.example.pulsar.playback.FakePlaybackRemote
+import com.example.pulsar.playback.PlaybackIntent
+import com.example.pulsar.playback.PlaybackSession
+import com.example.pulsar.playback.RemoteSnapshot
+import com.example.pulsar.playback.TrackMediaItemFactory
 import com.example.pulsar.readDownloadCopies
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
@@ -135,9 +142,171 @@ class OldDownloadPreviewTest {
         assertEquals(OldDownloadPreview.NoSavedAccount, fixture.previewer.preview())
     }
 
+    @Test
+    fun `单独确认前没有已有下载 重开后只列出原账号按专辑和播放列表下载的完整副本`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        val entries = listOf(
+            entry("我的专辑", listOf("album-track", "partial")),
+            entry("通勤列表", listOf("album-track", "playlist-track"), DownloadKind.PLAYLIST),
+            entry("别的账号", listOf("other")).copy(userId = "其他账号"),
+        )
+        fixture.ledger.replaceAll(entries)
+        val album = fixture.copyAt("$base/Videos/album-track/stream?static=true")
+        val playlist = fixture.copyAt("$base/Videos/playlist-track/stream?static=true")
+        fixture.copyAt("$base/Videos/partial/stream?static=true", cached = 2)
+        fixture.copyAt("$base/Videos/other/stream?static=true")
+        val report = fixture.previewer.preview() as OldDownloadPreview.Report
+        assertEquals(ExistingDownloadView.NeedsConfirmation, fixture.existingDownloads().load())
+
+        assertEquals(ExistingDownloadApply.Partial, fixture.existingDownloads().confirm(report))
+        assertEquals(ExistingDownloadApply.Partial, fixture.existingDownloads().confirm(report))
+        val reopened = fixture.existingDownloads().load() as ExistingDownloadView.Ready
+        assertEquals(listOf("album-track", "playlist-track"), reopened.playable.map { it.item.trackId })
+        assertEquals(listOf("partial"), reopened.unfinished.map { it.trackId })
+        assertEquals(entries, fixture.ledger.load().entries)
+        assertEquals(listOf<Byte>(1, 2, 3, 4), album.readBytes().toList())
+        assertEquals(listOf<Byte>(1, 2, 3, 4), playlist.readBytes().toList())
+
+        fixture.saveAccount("其他账号")
+        assertEquals(ExistingDownloadView.NeedsConfirmation, fixture.existingDownloads().load())
+    }
+
+    @Test
+    fun `飞行模式从已有下载点播只给播放器原副本的读取定位 丢失字节后原请求不能再播`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        fixture.ledger.replaceAll(listOf(entry("通勤列表", listOf("album 曲"), DownloadKind.PLAYLIST)))
+        val originalKey = "$base/Videos/album%20%E6%9B%B2/stream?static=true"
+        val copy = fixture.copyAt(originalKey)
+        val existing = fixture.existingDownloads()
+        assertEquals(ExistingDownloadApply.Applied, existing.confirm(fixture.previewer.preview() as OldDownloadPreview.Report))
+
+        val reopened = fixture.existingDownloads()
+        val track = (reopened.load() as ExistingDownloadView.Ready).playable.single()
+        val remote = FakePlaybackRemote().apply { snapshot = RemoteSnapshot(isConnected = true) }
+        val playback = PlaybackSession(remote, TrackMediaItemFactory {
+            MediaItem.Builder().setMediaId(it.id).build()
+        }, FakePlaybackGate(), backgroundScope)
+        assertEquals(true, playback.dispatch(PlaybackIntent.Play(listOf(track.toTrack()), track.mediaId)))
+        val queuedId = remote.setQueueCalls.single().items.single().mediaId
+        assertEquals(originalKey, reopened.playbackKey(queuedId))
+        playback.close()
+        assertEquals(null, reopened.playbackKey("album 曲"))
+        assertEquals(null, reopened.playbackKey("pc:新曲库:album 曲"))
+
+        copy.writeBytes(byteArrayOf(1, 2))
+        assertEquals(null, reopened.playbackKey(track.mediaId))
+        val changed = reopened.load() as ExistingDownloadView.Ready
+        assertEquals(emptyList<ExistingDownload>(), changed.playable)
+        assertEquals(listOf("album 曲"), changed.unavailable.map { it.trackId })
+    }
+
+    @Test
+    fun `写盘失败不覆盖上次可播结果 重试只补新确认的副本`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        val first = entry("第一张专辑", listOf("first"))
+        fixture.ledger.replaceAll(listOf(first))
+        fixture.copyAt("$base/Videos/first/stream?static=true")
+        val store = DataStoreExistingDownloadStore(fixture.preferences)
+        val existing = fixture.existingDownloads()
+        assertEquals(ExistingDownloadApply.Applied, existing.confirm(fixture.previewer.preview() as OldDownloadPreview.Report))
+
+        fixture.ledger.replaceAll(listOf(first, entry("第二张专辑", listOf("second"))))
+        fixture.copyAt("$base/Videos/second/stream?static=true")
+        val report = fixture.previewer.preview() as OldDownloadPreview.Report
+        val failing = ExistingDownloads(fixture.previewer, object : ExistingDownloadStore by store {
+            override suspend fun add(account: AccountScope, items: List<OldDownloadItem>) {
+                throw java.io.IOException("空间不足")
+            }
+        })
+        assertEquals(ExistingDownloadApply.Unavailable, failing.confirm(report))
+        assertEquals(listOf("first"), (existing.load() as ExistingDownloadView.Ready).playable.map { it.item.trackId })
+        assertEquals(ExistingDownloadApply.Applied, existing.confirm(report))
+        assertEquals(listOf("first", "second"), (existing.load() as ExistingDownloadView.Ready).playable.map { it.item.trackId })
+    }
+
+    @Test
+    fun `应用期间已有副本变为不可用时 只能报告部分可用且保留原登记`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        fixture.ledger.replaceAll(listOf(entry("我的专辑", listOf("one", "two"))))
+        fixture.copyAt("$base/Videos/one/stream?static=true")
+        val changed = fixture.copyAt("$base/Videos/two/stream?static=true")
+        val store = DataStoreExistingDownloadStore(fixture.preferences)
+        val existing = ExistingDownloads(fixture.previewer, object : ExistingDownloadStore by store {
+            override suspend fun add(account: AccountScope, items: List<OldDownloadItem>) {
+                changed.writeBytes(byteArrayOf(1, 2))
+                store.add(account, items)
+            }
+        })
+
+        val report = fixture.previewer.preview() as OldDownloadPreview.Report
+        assertEquals(ExistingDownloadApply.Partial, existing.confirm(report))
+        val reopened = fixture.existingDownloads().load() as ExistingDownloadView.Ready
+        assertEquals(listOf("one"), reopened.playable.map { it.item.trackId })
+        assertEquals(listOf("two"), reopened.unavailable.map { it.trackId })
+    }
+
+    @Test
+    fun `旧账号或完整性在预览后改变时 必须重新核对再确认`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        fixture.ledger.replaceAll(listOf(entry("我的专辑", listOf("song"))))
+        val file = fixture.copyAt("$base/Videos/song/stream?static=true")
+        val report = fixture.previewer.preview() as OldDownloadPreview.Report
+        val existing = fixture.existingDownloads()
+
+        fixture.saveAccount("其他账号")
+        assertEquals(ExistingDownloadApply.PreviewChanged, existing.confirm(report))
+        fixture.saveAccount()
+        file.writeBytes(byteArrayOf(1, 2))
+        assertEquals(ExistingDownloadApply.PreviewChanged, existing.confirm(report))
+        assertEquals(ExistingDownloadView.NeedsConfirmation, existing.load())
+    }
+
+    @Test
+    fun `会话凭据失效仍可重开已有下载 主动退出后不对无归属的用户开放`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        fixture.ledger.replaceAll(listOf(entry("我的专辑", listOf("song"))))
+        fixture.copyAt("$base/Videos/song/stream?static=true")
+        val before = fixture.existingDownloads()
+        assertEquals(ExistingDownloadApply.Applied, before.confirm(fixture.previewer.preview() as OldDownloadPreview.Report))
+        val track = (before.load() as ExistingDownloadView.Ready).playable.single()
+
+        fixture.expireAccount()
+        assertEquals("$base/Videos/song/stream?static=true", fixture.existingDownloads().playbackKey(track.mediaId))
+        fixture.clearAccount()
+        assertEquals(ExistingDownloadView.NoSavedAccount, fixture.existingDownloads().load())
+        assertEquals(null, fixture.existingDownloads().playbackKey(track.mediaId))
+    }
+
+    @Test
+    fun `字节完整但播放器报错的歌曲单列保留 重新检查后可以再试`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        fixture.ledger.replaceAll(listOf(entry("我的专辑", listOf("song"))))
+        val original = fixture.copyAt("$base/Videos/song/stream?static=true")
+        val downloads = fixture.existingDownloads()
+        val report = fixture.previewer.preview() as OldDownloadPreview.Report
+        assertEquals(ExistingDownloadApply.Applied, downloads.confirm(report))
+        val track = (downloads.load() as ExistingDownloadView.Ready).playable.single()
+
+        downloads.recordPlaybackFailure(track.mediaId)
+        val view = downloads.load() as ExistingDownloadView.Ready
+        assertEquals(emptyList<ExistingDownload>(), view.playable)
+        assertEquals(listOf("song"), view.unavailable.map { it.trackId })
+        assertEquals(ExistingDownloadApply.Partial, downloads.confirm(report))
+        assertEquals(listOf<Byte>(1, 2, 3, 4), original.readBytes().toList())
+        downloads.resetPlaybackFailures()
+        assertEquals(listOf(track), (downloads.load() as ExistingDownloadView.Ready).playable)
+    }
+
     private inner class Fixture(scope: TestScope) {
         val prefsFile = File(temporary.root, "pulsar.preferences_pb")
-        private val preferences = PreferenceDataStoreFactory.create(scope = scope.backgroundScope) { prefsFile }
+        val preferences = PreferenceDataStoreFactory.create(scope = scope.backgroundScope) { prefsFile }
         val ledger = DataStoreDownloadLedgerStore(preferences)
         val snapshotFile = File(temporary.root, "library-snapshot.json")
         val snapshot = FileLibrarySnapshotRepository(snapshotFile)
@@ -158,7 +327,11 @@ class OldDownloadPreviewTest {
             },
         )
 
-        suspend fun saveAccount() = store.save(Session(server, user, "旧账号", "test-only-token"))
+        fun existingDownloads() = ExistingDownloads(previewer, DataStoreExistingDownloadStore(preferences))
+
+        suspend fun saveAccount(userId: String = user) = store.save(Session(server, userId, "旧账号", "test-only-token"))
+        suspend fun expireAccount() = store.clearExpired()
+        suspend fun clearAccount() = sessionManager.signOut()
 
         fun copyAt(key: String, total: Long = 4L, cached: Long = 4L): File {
             val file = temporary.newFile().apply { writeBytes(ByteArray(cached.toInt()) { (it + 1).toByte() }) }

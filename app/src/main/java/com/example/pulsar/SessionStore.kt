@@ -4,8 +4,11 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.example.pulsar.download.AccountScope
 import com.example.pulsar.session.Session
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 
 /**
  * 会话存储。只保存会话凭据（accessToken），不保存密码。
@@ -45,11 +48,24 @@ class SessionStore(private val dataStore: DataStore<Preferences>) : SessionRepos
         return sessionFromStoreMap(map)
     }
 
+    override fun downloadAccounts() = dataStore.data.map { preferences ->
+        val server = preferences[stringPreferencesKey(KEY_SERVER_URL)]
+        val userId = preferences[stringPreferencesKey(KEY_USER_ID)]
+        if (server.isNullOrBlank() || userId.isNullOrBlank()) null else AccountScope(server, userId)
+    }.distinctUntilChanged()
+
     override suspend fun save(session: Session) {
         dataStore.edit { preferences ->
             session.toStoreMap().forEach { (key, value) ->
                 preferences[stringPreferencesKey(key)] = value
             }
+        }
+    }
+
+    override suspend fun clearExpired() {
+        dataStore.edit { preferences ->
+            preferences.remove(stringPreferencesKey(KEY_ACCESS_TOKEN))
+            preferences.remove(stringPreferencesKey(KEY_USERNAME))
         }
     }
 

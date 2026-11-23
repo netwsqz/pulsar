@@ -18,7 +18,9 @@ import com.example.pulsar.data.qqdownload.QQDownloadApi
 import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
+import com.example.pulsar.download.DataStoreExistingDownloadStore
 import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.download.ExistingDownloads
 import com.example.pulsar.download.OldDownloadPreviewer
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
@@ -237,6 +239,9 @@ class PulsarApplication : Application() {
             ledger = downloadLedgerStore(),
             scheduler = downloadScheduler,
             scope = downloadScope,
+            existingDownloads = ExistingDownloads(
+                oldDownloadPreviewer, DataStoreExistingDownloadStore(pulsarPreferencesDataStore),
+            ),
         )
     }
 }

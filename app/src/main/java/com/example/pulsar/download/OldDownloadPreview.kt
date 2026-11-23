@@ -6,12 +6,22 @@ import com.example.pulsar.LibrarySnapshotRepository
 import com.example.pulsar.data.jellyfin.JellyfinUrlBuilder
 import com.example.pulsar.downloadedPlaylistsFor
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.Serializable
 
+@Serializable
 internal data class OldDownloadItem(
     val trackId: String,
     val title: String?,
     val downloadNames: List<String>,
-)
+    val artist: String? = null,
+    val album: String? = null,
+    val durationMs: Long? = null,
+    val normalizationGainDb: Float? = null,
+) {
+    fun displayTitle(): String = title?.takeIf { it.isNotBlank() }
+        ?: trackId.takeIf { it.isNotBlank() }?.let { "曲目 ID：$it" }
+        ?: "未记录曲目 ID"
+}
 
 internal sealed interface OldDownloadPreview {
     data object NoSavedAccount : OldDownloadPreview
@@ -20,6 +30,7 @@ internal sealed interface OldDownloadPreview {
         val complete: List<OldDownloadItem>,
         val unfinished: List<OldDownloadItem>,
         val pending: List<OldDownloadItem>,
+        internal val account: AccountScope,
     ) : OldDownloadPreview
 }
 
@@ -30,14 +41,26 @@ internal class OldDownloadPreviewer(
     private val snapshot: LibrarySnapshotRepository,
     private val readCopies: suspend ((String) -> Boolean) -> Map<String, DownloadCopyEvidence>,
 ) {
+    internal suspend fun currentAccount(): AccountScope? = savedAccount()
+
     suspend fun preview(): OldDownloadPreview = try {
-        val account = savedAccount()
+        val account = currentAccount()
         if (account == null) OldDownloadPreview.NoSavedAccount else previewAccount(account)
     } catch (error: CancellationException) {
         throw error
     } catch (_: Exception) {
         // 本地证据不可读时不能把失败报告成「没有下载」。不把异常或缓存键交给界面。
         OldDownloadPreview.Unavailable
+    }
+
+    /** 点播时只重查这一首的归属和原缓存键，不依赖快照、网络或运行中的会话。 */
+    suspend fun completePlaybackKey(account: AccountScope, trackId: String): String? {
+        if (trackId.isBlank() || currentAccount() != account) return null
+        if (readLedger().entries.none {
+                it.serverUrl == account.serverUrl && it.userId == account.userId && trackId in it.trackIds
+            }) return null
+        val key = JellyfinUrlBuilder(account.serverUrl).mediaStreamUrl(trackId)
+        return key.takeIf { readCopies { it == key }[key] == DownloadCopyEvidence.COMPLETE && currentAccount() == account }
     }
 
     private suspend fun previewAccount(account: AccountScope): OldDownloadPreview.Report {
@@ -60,13 +83,17 @@ internal class OldDownloadPreviewer(
         }
         val copies = readCopies { builder.mediaIdFromStreamKey(it) != null }
         // 曲库全量快照没有账号标记，仅使用有明确归属的已下载列表清单补曲名。
-        val titles = snapshot.load()?.downloadedPlaylistsFor(account.serverUrl, account.userId).orEmpty()
-            .flatMap { it.tracks }.associate { it.id to it.title }
+        val metadata = snapshot.load()?.downloadedPlaylistsFor(account.serverUrl, account.userId).orEmpty()
+            .flatMap { it.tracks }.associateBy { it.id }
         val complete = mutableListOf<OldDownloadItem>()
         val unfinished = mutableListOf<OldDownloadItem>()
         val pending = mutableListOf<OldDownloadItem>()
         for ((id, names) in namesById) {
-            val item = OldDownloadItem(id, titles[id], names.toList())
+            val track = metadata[id]
+            val item = OldDownloadItem(
+                id, track?.title, names.toList(), track?.artist, track?.album,
+                track?.durationMs, track?.normalizationGainDb,
+            )
             val key = id.takeIf { it.isNotBlank() }?.let(builder::mediaStreamUrl)
             when (copies[key]) {
                 DownloadCopyEvidence.COMPLETE -> complete += item
@@ -79,7 +106,7 @@ internal class OldDownloadPreviewer(
             // 归属未确认：不从未知账号的曲库快照或名单拿曲名／列表名。
             pending += OldDownloadItem(id, null, emptyList())
         }
-        return OldDownloadPreview.Report(complete, unfinished, pending)
+        return OldDownloadPreview.Report(complete, unfinished, pending, account)
     }
 
     private fun sameLibrary(serverUrl: String, builder: JellyfinUrlBuilder): Boolean =

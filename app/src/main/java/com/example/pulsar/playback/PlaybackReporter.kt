@@ -104,7 +104,7 @@ class PlaybackReporter(
         }
     }
 
-    /** 本地音频（`content://` / `file://`）没有 Jellyfin 曲目 id，不参与上报。 */
+    /** 本地音频和电脑曲库带独立的媒体 id，不参与 Jellyfin 上报。 */
     private fun isJellyfinItemId(itemId: String): Boolean = itemId.isNotBlank() && ':' !in itemId
 
     companion object {

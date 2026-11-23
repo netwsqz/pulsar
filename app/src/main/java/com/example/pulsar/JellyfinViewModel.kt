@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
+import com.example.pulsar.data.companion.isCompanionMediaId
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.Lyrics
@@ -26,6 +27,7 @@ import com.example.pulsar.session.SessionManager
 import com.example.pulsar.state.DownloadsState
 import com.example.pulsar.state.FileOpsState
 import com.example.pulsar.state.LibraryState
+import com.example.pulsar.state.SearchState
 import com.example.pulsar.state.SessionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -70,8 +72,10 @@ class JellyfinViewModel(
      * 「已下载」唯一真相（工单 #4）：字节完整 ∩ 当前账号名单。
      * null = 没有下载能力（仅测试 / 未接线调用方）；生产由 [PulsarApplication.downloadLibrary] 注入。
      */
-    private val downloadLibrary: DownloadLibrary? = null
+    private val downloadLibrary: DownloadLibrary? = null,
+    startLibraryActive: Boolean = true,
 ) : ViewModel() {
+    private var libraryActive = startLibraryActive
     private val _state = MutableStateFlow(JellyfinUiState())
     val state: StateFlow<JellyfinUiState> = _state.asStateFlow()
 
@@ -121,7 +125,7 @@ class JellyfinViewModel(
             override fun connection(): LibraryCache.Connection? {
                 // 恢复会话时 module 会先发布会话再等曲库校验；校验完成前界面仍按
                 // 「会话未就绪」处理（改前要等 getMusicItems 成功，别让各节抢跑）。
-                if (_state.value.session.isRestoring) return null
+                if (!libraryActive || _state.value.session.isRestoring) return null
                 val connection = activeConnection() ?: return null
                 return LibraryCache.Connection(connection.api)
             }
@@ -190,8 +194,10 @@ class JellyfinViewModel(
         // 启动即声明"正在恢复会话"：在读到本地会话、拉到曲库之前 UI 直接进主页面、
         // 用灰色波浪骨架占位；不这样做的话这段等待期会落到 tracks == null 分支，
         // 闪一屏空白登录表单。
-        updateSession { it.copy(isRestoring = true) }
-        restoreSavedLogin()
+        if (libraryActive) {
+            updateSession { it.copy(isRestoring = true) }
+            restoreSavedLogin()
+        }
         // 地址历史只服务登录页：现在就拉，登录表单随时可显示下拉。
         viewModelScope.launch(dispatcher) {
             // **先把值读出来再碰 _state**。写成 `_state.value = _state.value.copy(x = load())`
@@ -203,11 +209,36 @@ class JellyfinViewModel(
         }
     }
 
+    /** 暂停旧曲库浏览，保留会话和本地数据；退出试用时按原路径恢复。 */
+    internal fun setLibraryActive(active: Boolean) {
+        if (libraryActive == active) return
+        libraryActive = active
+        if (!active) {
+            loginGeneration++
+            loginJob?.cancel()
+            loginJob = null
+            invalidateSessionRequests()
+            clearLyrics()
+            _state.value = _state.value.let {
+                it.copy(
+                    session = it.session.copy(isRestoring = false, isLoading = false, errorMessage = null),
+                    library = it.library.copy(search = SearchState(), multiSelectIds = emptySet()),
+                )
+            }
+        } else if (_state.value.library.tracks == null) {
+            updateSession { it.copy(isRestoring = true) }
+            restoreSavedLogin()
+        } else if (_state.value.library.isOffline) {
+            startOfflineRetry()
+        }
+    }
+
     fun updateServerUrl(value: String) { updateSession { it.copy(serverUrl = value, errorMessage = null) } }
     fun updateUsername(value: String) { updateSession { it.copy(username = value, errorMessage = null) } }
     fun updatePassword(value: String) { updateSession { it.copy(password = value, errorMessage = null) } }
 
     fun login() {
+        if (!libraryActive) return
         loginJob?.cancel()
         val current = _state.value
         val form = current.session
@@ -276,9 +307,12 @@ class JellyfinViewModel(
     }
 
     private fun restoreSavedLogin() {
+        val generation = ++loginGeneration
         loginJob = viewModelScope.launch(dispatcher) {
             try {
-                if (!sessionManager.restore()) {
+                val restoredLogin = sessionManager.restore()
+                if (!coroutineContext.isActive || generation != loginGeneration) return@launch
+                if (!restoredLogin) {
                     // 本地没有可恢复的会话（或读盘失败）：结束恢复态，UI 落到登录表单。
                     updateSession { it.copy(isRestoring = false) }
                     return@launch
@@ -288,7 +322,6 @@ class JellyfinViewModel(
                     updateSession { it.copy(isRestoring = false) }
                     return@launch
                 }
-                val generation = ++loginGeneration
                 // 顺手预填地址/用户名：万一后面网络失败回退到登录表单，用户面对的
                 // 不是一张空白表单，只需补密码即可重试。
                 updateSession {
@@ -319,29 +352,17 @@ class JellyfinViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                // 只在代次仍匹配时才修改状态与会话，防止已取消的恢复任务误清新登录的 token。
-                val currentGeneration = loginGeneration
-                if (error is JellyfinError.Unauthorized && currentGeneration == loginGeneration) {
-                    sessionManager.expire()
-                }
-                if (currentGeneration == loginGeneration) {
-                    // 断网启动：本地存过会话但连不上服务器。用曲库快照把界面撑起来，
-                    // 别让用户打开就是一片空白（用户故事 7）。撑不起来才回落到登录表单。
-                    if (error is JellyfinError.Network && sessionManager.current.value != null &&
-                        restoreFromSnapshotOffline()
-                    ) {
-                        return@launch
-                    }
-                    // 校验失败（断网 / 服务端异常）：撤掉已发布的会话与鉴权头，
-                    // 但保留存储，下次启动还能恢复（与过期不同）。
-                    sessionManager.clearInMemory()
-                    updateSession {
-                        it.copy(
-                            isLoading = false,
-                            isRestoring = false,
-                            errorMessage = friendlyError(error),
-                        )
-                    }
+                // 已离开旧曲库时，晚到的 401 也不能把保存的旧会话清掉。
+                if (!coroutineContext.isActive || generation != loginGeneration) return@launch
+                if (error is JellyfinError.Unauthorized) sessionManager.expire()
+                // 断网启动：本地存过会话但连不上服务器。有快照才能撑起旧曲库。
+                if (error is JellyfinError.Network && sessionManager.current.value != null &&
+                    restoreFromSnapshotOffline()
+                ) return@launch
+                // 校验失败：只撤内存会话，保留存储以便下次恢复。
+                sessionManager.clearInMemory()
+                updateSession {
+                    it.copy(isLoading = false, isRestoring = false, errorMessage = friendlyError(error))
                 }
             }
         }
@@ -417,6 +438,7 @@ class JellyfinViewModel(
     }
 
     fun streamUrl(track: Track): String? {
+        if (isCompanionMediaId(track.id)) return null
         val src = activeConnection()?.api ?: return null
         return src.streamUrl(track.id)
     }
@@ -448,7 +470,7 @@ class JellyfinViewModel(
     fun playlistCover(playlist: Playlist): JellyfinRequest? = coverRequest(playlist.id, playlist.imageTag)
 
     fun trackCover(track: Track): JellyfinRequest? {
-        if (track.id.isBlank()) return null
+        if (track.id.isBlank() || isCompanionMediaId(track.id)) return null
         val src = activeConnection()?.api ?: return null
         return src.imageRequest(track.id, track.imageTag)
     }
@@ -469,6 +491,10 @@ class JellyfinViewModel(
         _currentTrack.value = mediaItem?.let { item ->
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
+        if (!libraryActive || mediaItem?.mediaId?.let(::isCompanionMediaId) == true) {
+            clearLyrics()
+            return
+        }
         // 播过的歌服务端 UserData 会变（工单 09）：本地那两份历史缓存作废，回到发现页时
         // 重新拉。**只递增版本号，不清数据**——清成 null 会让发现页两节先闪成骨架再弹回。
         // module 会一并作废三节历史的在途响应（界面在后台时也能挡住旧结果），并补跑当前分区。
@@ -485,6 +511,7 @@ class JellyfinViewModel(
      */
     fun loadLyricsForCurrentTrack() {
         val track = _currentTrack.value ?: return
+        if (!libraryActive || isCompanionMediaId(track.id)) return
         val src = activeConnection()?.api ?: return
         val generation = ++lyricsGeneration
         _lyrics.value = Lyrics.NONE
@@ -521,6 +548,7 @@ class JellyfinViewModel(
      * 会话就绪 / 离线翻转 / 切歌后 module 会按这里记住的分区自己补跑。
      */
     internal fun onSectionEntered(section: LibrarySection) {
+        if (!libraryActive) return
         currentSection = section
         enterSection(section)
     }
@@ -567,6 +595,7 @@ class JellyfinViewModel(
     fun clearPlaylistDetail() = libraryCache.clearPlaylistDetail()
 
     fun updateSearchQuery(value: String) {
+        if (!libraryActive) return
         _state.value = _state.value.let {
             it.copy(
                 session = it.session.copy(errorMessage = null),
@@ -1219,6 +1248,7 @@ class JellyfinViewModel(
                 } catch (error: Throwable) {
                     null
                 }
+                if (!isActive) return@launch
                 when {
                     // token 已失效：照实走会话过期，别空转到上限——断网兜底时的乐观会话
                     // 就在这里收口（真失效了 401 会说话）。

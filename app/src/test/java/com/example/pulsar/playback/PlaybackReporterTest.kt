@@ -77,6 +77,17 @@ class PlaybackReporterTest {
     }
 
     @Test
+    fun `电脑曲库的歌不向 Jellyfin 上报`() = runTest {
+        val (reporter, channel) = createReporter()
+
+        reporter.onTrackStarted("pc:${"a".repeat(64)}", positionMs = 0)
+        reporter.onPlaybackStopped(positionMs = 5_000)
+        advanceUntilIdle()
+
+        assertTrue(channel.reports.isEmpty())
+    }
+
+    @Test
     fun `stop is sent before the next start`() = runTest {
         val (reporter, channel) = createReporter()
         channel.gate = CompletableDeferred()

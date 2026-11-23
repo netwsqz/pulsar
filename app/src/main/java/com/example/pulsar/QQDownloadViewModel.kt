@@ -50,7 +50,9 @@ private const val HEALTH_RECHECK_INTERVAL_MS = 3_000L
 class QQDownloadViewModel(
     private val preferences: QQDownloadSettings,
     private val apiFactory: QQDownloadApiFactory,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate
+    private val dispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+    /** 试用时仅在内存使用配对的服务地址（空串 = 未配对），不读写旧地址或文件操作密钥。 */
+    private val trialServiceUrl: String? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(QQDownloadUiState())
@@ -85,14 +87,17 @@ class QQDownloadViewModel(
 
     init {
         viewModelScope.launch(dispatcher) {
-            val url = preferences.serviceUrl()
+            val url = trialServiceUrl ?: preferences.serviceUrl()
             val quality = preferences.quality()
-            val fileOpsKey = preferences.fileOpsKey()
+            val fileOpsKey = if (trialServiceUrl == null) preferences.fileOpsKey() else ""
             updateService { it.copy(serviceUrl = url) }
             updateSettings { it.copy(quality = quality, fileOpsKey = fileOpsKey, fileOpsKeyInput = fileOpsKey) }
             if (url.isNotBlank()) {
                 applyServiceUrl(url)
                 checkHealth()
+                // 用户可能在偏好还没读完时就已经输入关键词。
+                val query = _state.value.search.query
+                if (trialServiceUrl != null && query.isNotBlank()) updateSearchQuery(query)
             }
         }
     }
@@ -102,6 +107,7 @@ class QQDownloadViewModel(
      * 登录成功时由界面调用，用户完全不感知地址这回事（不提供手动入口）。
      */
     fun autoFillServiceUrl(jellyfinServerUrl: String) {
+        if (trialServiceUrl != null) return
         val host = runCatching { java.net.URI(jellyfinServerUrl.trim()).host }.getOrNull()
         if (host.isNullOrBlank()) return
         val url = "http://$host:8900"
@@ -197,7 +203,7 @@ class QQDownloadViewModel(
                     searchFailed = true
                     // 搜索期失败只写分区小字（toSearch = true），不弹 Snackbar：
                     // 搜索页同时画着曲库结果，动作反馈那条路不能来抢。
-                    showSearchError(error)
+                    if (coroutineContext.isActive && generation == searchGeneration) showSearchError(error)
                 }
             )
             if (!searchFailed && coroutineContext.isActive && generation == searchGeneration) {

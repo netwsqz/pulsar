@@ -26,19 +26,20 @@ internal fun unifiedSearchViewState(
     val bothEmpty = libraryEmpty && !qq.hasResults
     val libraryError = input.errorMessage
     val qqStatus = qq.searchStatus
+    val showTrialFailure = input.showLibraryErrorWithQqResults && libraryEmpty && libraryError != null &&
+        (qq.hasResults || qq.isSearching)
 
     return when {
         input.query.isBlank() -> SearchViewState.Blank
         input.isSearching -> SearchViewState.Loading
-        // 曲库空 + QQ 在搜：不能提前报「未找到」。
-        libraryEmpty && qq.isSearching -> SearchViewState.Loading
-        // 曲库侧的失败优先说：QQ 的错误不能让「曲库没搜成」看起来像「曲库没有」。
-        bothEmpty && libraryError != null -> SearchViewState.LibraryError(libraryError)
-        bothEmpty && qqStatus != null ->
-            SearchViewState.LibraryEmptyQqError(input.query, librarySearchedEmpty, qqStatus)
-        bothEmpty && input.searchNotice != null ->
-            SearchViewState.OfflineEmpty(input.query, input.searchNotice)
-        bothEmpty -> SearchViewState.BothEmpty(input.query)
+        libraryEmpty && qq.isSearching && !showTrialFailure -> SearchViewState.Loading
+        bothEmpty && !showTrialFailure -> when {
+            // 曲库侧的失败优先说：QQ 的错误不能让「曲库没搜成」看起来像「曲库没有」。
+            libraryError != null -> SearchViewState.LibraryError(libraryError)
+            qqStatus != null -> SearchViewState.LibraryEmptyQqError(input.query, librarySearchedEmpty, qqStatus)
+            input.searchNotice != null -> SearchViewState.OfflineEmpty(input.query, input.searchNotice)
+            else -> SearchViewState.BothEmpty(input.query)
+        }
         else -> SearchViewState.Results(
             library = input.results,
             librarySearchedEmpty = librarySearchedEmpty,
@@ -47,11 +48,11 @@ internal fun unifiedSearchViewState(
             qqStatus = qqStatus,
             searchNotice = input.searchNotice,
             // Results 说明至少一边有结果；曲库又确实搜过且为空时，有结果的只可能是 QQ。
-            libraryMessage = if (librarySearchedEmpty) {
+            libraryMessage = if (librarySearchedEmpty && !showTrialFailure) {
                 libraryEmptyMessage(input.query, searchedEmpty = true)
             } else {
                 null
-            }
-        )
+            },
+            libraryError = libraryError.takeIf { showTrialFailure },        )
     }
 }

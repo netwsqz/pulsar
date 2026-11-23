@@ -6,7 +6,13 @@
 
 双击 `start.bat`（或 `python qqmusic_service.py`）。服务监听 `0.0.0.0:8900`。
 
-首次启动时若 `E:\music\qqmusic_cred.json` 缺失/失效，需要 QQ 音乐客户端正在运行且已登录，调 `POST /api/credential/retry` 提取凭证（客户端之后可以关掉）。
+电脑曲库接口使用 Starlette 的 `FileResponse` 提供 Range；**Starlette 至少为 0.49.1**（含 Range 安全修复），搭配 FastAPI 0.121.3 或更新的兼容版本。沿用原有启动环境，若依赖版本过低，在该环境安装：
+
+```powershell
+python -m pip install "fastapi>=0.121.3" "starlette>=0.49.1"
+```
+
+QQ 音乐导入需要 QQ 凭证；若 `E:\music\qqmusic_cred.json` 缺失/失效，需要 QQ 音乐客户端正在运行且已登录，调 `POST /api/credential/retry` 提取凭证（客户端之后可以关掉）。**电脑曲库的配对和播放不用 QQ 凭证或 Jellyfin，也不需要 ffmpeg 转码。**
 
 ## 接口一览
 
@@ -21,6 +27,8 @@
 | `/api/jobs` | GET | 任务列表（最新 100 条） |
 | `/api/jobs/{job_id}` | GET | 单任务：`queued/running/done/failed` + `error` + `final_path` |
 | `/api/credential/retry` | POST | 凭证过期后重提（需 QQ 音乐客户端运行中） |
+| `/api/library/tracks` | GET | 访问密钥：`{"tracks":[{"id":"…","title":"…","artist":"…","album":"…"}]}`，不返回文件路径 |
+| `/api/library/tracks/{id}/audio` | GET | 访问密钥：读取原文件字节，支持 HTTP Range |
 | `/api/library/delete` | POST | 🔒 `{"paths": [...]}` → `{"deleted": [...], "failed": [{"path", "error"}]}`（挪进回收站） |
 | `/api/library/rename` | POST | 🔒 `{"path", "title"?, "artist"?, "album"?}` → `{"ok", "path"}`（改**内嵌标签**） |
 | `/api/library/recycle` | GET | 🔒 `{"files": [{"rel_path", "size", "deleted_at"}], "total_size"}` |
@@ -29,18 +37,25 @@
 
 🔒 = 需要文件操作密钥，请求头带 `X-Pulsar-Key`；缺密钥或对不上回 **401**。
 
+## 电脑曲库配对
+
+- 手动启动现有服务后，在电脑上打开 `server/.library_access_key`，在 App 的「电脑曲库」填写 `http://<电脑局域网 IP>:8900` 和文件里的访问密钥。访问密钥自动生成、重启复用，**只在启动日志提示文件位置，不打印它的值**；与文件操作密钥不同。
+- 两条只读接口都需 `Authorization: Bearer <访问密钥>`，**不能把密钥放在 URL**。缺少或填错密钥回 `401`，索引未就绪或根目录不可读回 `503`，曲库确实为空时列表回 `200` 和 `{"tracks":[]}`；若密钥文件无法读取或创建，仅这两条接口回 `500`。请检查服务目录的权限及文件是否完整，服务不会覆盖已有密钥。
+- 曲目 ID 是 64 位小写十六进制；文件路径不变时，重启、重扫或改内嵌标签不会改变 ID。音频按 ID 读取曲库内的原文件，未知或失效 ID 回 `404`，可满足的 Range 回 `206`，超出文件的范围回 `416`。曲库里的联接和符号链接不入索引。
+- 局域网 HTTP **不加密**。只在可信家庭网络使用，不做端口转发，也不要把服务开放到公网。
+
 ## 文件操作密钥
 
 服务监听 `0.0.0.0` 且没有账号体系，所以文件管理那五个接口单独配了一把锁（`library_files.py` 是**全服务唯一会动用户文件**的模块）。
 
 - 首次启动自动生成，存在 `server/.file_ops_key`（已 gitignore），**启动日志会打印密钥值**，App 设置页填一次。
-- **只锁上表里带 🔒 的五个**。搜索、下载、任务查询一律不挂——密钥对不上时听歌下歌照常。
+- **只锁上表里带 🔒 的五个**。搜索、导入、任务查询不挂这把密钥；电脑曲库用独立的访问密钥。
 - 密钥文件读不出来（目录只读等）时退化成临时密钥，服务照常起，只是重启后要重填。
 - 删 / 改 / 恢复成功后会**立刻重扫曲库索引**，否则删完想重下会被去重挡下来（清空回收站不动曲库，不重扫）。
 
 ## 曲库去重
 
-服务后台维护一份 `E:\file\Te_Music` 的曲库索引（`library_index.py`，**只读**，启动时扫一遍、之后每 3 分钟对比目录快照，有变化才重扫）。判定钥匙优先取音频标签（`TITLE`/`ARTIST`），标签缺失才回退解析文件名。
+服务后台维护一份 `E:\file\Te_Music` 的曲库索引（`library_index.py`，**只读**，启动时扫一遍、之后每 3 分钟对比目录快照，有变化才重读标签）。电脑曲库和 QQ 音乐导入共用这份索引，优先读内嵌标签（`TITLE`/`ARTIST` 等），缺歌名才回退解析文件名。
 
 - 搜索与专辑曲目接口给每首歌带 `in_library`（已在库）与 `downloading`（任务队列里 `queued`/`running`）。
 - 下载**默认跳过已在库的**：单曲回 `{"job_id": "", "skipped": true}`（字段形状与正常响应一致，老客户端不会解析失败）；整张下载回 `count`（入队数）+ `skipped_count`（跳过数）。

@@ -55,6 +55,38 @@ class QQDownloadViewModelTest {
     }
 
     @Test
+    fun `电脑曲库试用沿用配对地址搜索 不覆盖旧 QQ 地址和文件操作密钥`() = runTest {
+        val oldUrl = "http://192.168.1.10:8900"
+        val pairedUrl = "http://192.168.1.20:8900"
+        val preferences = FakePreferences(initialUrl = oldUrl, initialKey = "test-file-op-key")
+        val api = FakeQQApi(songs = listOf(song))
+        val requestedOrigins = mutableListOf<String>()
+        val viewModel = QQDownloadViewModel(
+            preferences,
+            object : QQDownloadApiFactory {
+                override fun create(baseUrl: String): QQDownloadApi {
+                    requestedOrigins += baseUrl
+                    return api
+                }
+            },
+            StandardTestDispatcher(testScheduler),
+            trialServiceUrl = pairedUrl,
+        )
+
+        // 配对恢复后，即使用户在读偏好期间就开始搜索，也会按当前词完成这次搜索。
+        viewModel.updateSearchQuery("晴天")
+        viewModel.autoFillServiceUrl("http://192.168.1.30:8096")
+        advanceUntilIdle()
+
+        assertEquals(listOf(pairedUrl), requestedOrigins)
+        assertEquals(listOf("晴天"), api.searchQueries)
+        assertEquals(listOf(song), viewModel.state.value.search.songs)
+        assertEquals(oldUrl, preferences.savedUrl)
+        assertEquals("test-file-op-key", preferences.savedKey)
+        assertEquals("", viewModel.state.value.settings.fileOpsKey)
+    }
+
+    @Test
     fun `blank search query clears results without request`() = runTest {
         val preferences = FakePreferences(initialUrl = "http://192.168.1.10:8900")
         val api = FakeQQApi(songs = listOf(song))

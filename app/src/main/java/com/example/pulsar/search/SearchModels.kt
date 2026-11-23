@@ -24,7 +24,9 @@ internal data class SearchInput(
      * 离线搜索标识，来自 `OfflinePolicy` 的 `OfflineView.searchNotice`（#8）；
      * null = 在线搜索，不打标。命名沿用 candidate 2，不另造 `isOfflineFiltered`。
      */
-    val searchNotice: OfflineSearchNotice? = null
+    val searchNotice: OfflineSearchNotice? = null,
+    /** 电脑曲库的重试／重配提示不能被可独立使用的 QQ 结果遮住。 */
+    val showLibraryErrorWithQqResults: Boolean = false,
 )
 
 /**
@@ -79,7 +81,8 @@ internal sealed interface SearchViewState {
          * 只在曲库确实搜过且为空时给（此时 [Results] 能成立，说明有结果的只可能是 QQ）。
          * 由合并规则算好，分区不再自己判断「曲库空不空」——文案与判据都只有这里一个来源。
          */
-        val libraryMessage: String? = null
+        val libraryMessage: String? = null,
+        val libraryError: String? = null,
     ) : SearchViewState
 
     /** 两边都空，且曲库侧有错误：整页错误 + 曲库重试。 */

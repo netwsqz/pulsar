@@ -6,6 +6,8 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.session.SessionCommand
 import com.example.pulsar.QueueTrack
+import com.example.pulsar.data.companion.isCompanionMediaId
+import com.example.pulsar.data.companion.playbackLibraryIdentity
 import com.example.pulsar.domain.model.Track
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -428,14 +430,23 @@ internal class PlaybackSession(
 
     /** 添加到队列：插在当前曲目之后；队列为空时 set + prepare + play。 */
     private fun addToQueue(track: Track): Boolean {
-        if (!remote.snapshot().isConnected) return false
+        val snapshot = remote.snapshot()
+        if (!snapshot.isConnected) return false
         val reason = gate.unplayableReason(track)
         if (reason != null) {
             _events.tryEmit(PlaybackEvent.Unplayable(reason))
             return true
         }
+        val source = playbackLibraryIdentity(track.id)
+        if (snapshot.queue.any { queued ->
+                (isCompanionMediaId(track.id) || isCompanionMediaId(queued.id)) &&
+                    playbackLibraryIdentity(queued.id) != source
+            }) {
+            _events.tryEmit(PlaybackEvent.Unplayable("当前队列来自其他曲库，直接点播一首歌曲即可换队列"))
+            return true
+        }
         val item = mediaItems.create(track) ?: return false
-        if (remote.snapshot().queue.isEmpty()) {
+        if (snapshot.queue.isEmpty()) {
             remote.setSingleItem(item)
             remote.prepare()
             remote.play()

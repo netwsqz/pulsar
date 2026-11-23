@@ -33,6 +33,8 @@ import androidx.media3.session.SessionResult
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.example.pulsar.data.companion.companionPlaybackHttpClient
 import com.example.pulsar.playback.DeviceVolumeSource
 import com.example.pulsar.playback.LoudnessGainAudioSink
 import com.example.pulsar.playback.LoudnessGainProvider
@@ -584,13 +586,16 @@ class PlaybackService : MediaSessionService() {
      * 缓存实例在 [PulsarApplication] 里（进程级单例，界面也在用它查完整副本），
      * 这里只取用不释放——释放会让界面的查询全变成异常。
      */
-    private fun cacheDataSourceFactory(): DataSource.Factory = CacheDataSource.Factory()
-        .setCache((application as PulsarApplication).mediaCacheStore)
-        .setUpstreamDataSourceFactory(
-            AuthHttpDataSourceFactory { (application as PulsarApplication).sessionManager.authorizationHeader }
-        )
-        .setCacheWriteDataSinkFactory(null)
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    private fun cacheDataSourceFactory(): DataSource.Factory {
+        val app = application as PulsarApplication
+        val jellyfin = AuthHttpDataSourceFactory { app.sessionManager.authorizationHeader }
+        val companion = OkHttpDataSource.Factory(companionPlaybackHttpClient(app.companionLibrary))
+        return CacheDataSource.Factory()
+            .setCache(app.mediaCacheStore)
+            .setUpstreamDataSourceFactory(PlaybackUpstreamFactory(jellyfin, companion))
+            .setCacheWriteDataSinkFactory(null)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
 
     private fun capturePlayerState(oldPlayer: ExoPlayer): PlayerRebuildState {
         val items = (0 until oldPlayer.mediaItemCount)

@@ -5,6 +5,8 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import com.example.pulsar.data.companion.CompanionLibraryConnection
+import com.example.pulsar.data.companion.CompanionPairingStore
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
 import com.example.pulsar.data.jellyfin.JellyfinLoginApi
 import com.example.pulsar.data.jellyfin.JellyfinLoginDataSource
@@ -27,6 +29,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
 import java.io.File
+import java.net.Proxy
 
 /** 下载目录用 `filesDir` 而**不是** `cacheDir`：后者会被系统在空间紧张时清掉，
  * 也不适合放用户主动要的东西——这里的副本是用户点了「下载」才有的，不能自己消失。
@@ -67,6 +70,22 @@ class PulsarApplication : Application() {
                 socketTimeoutMillis = 15_000
             }
         }
+    }
+
+    /** 试用入口独立于 Jellyfin 会话：只读写配对设置，不碰原曲库快照和下载名单。 */
+    internal val companionLibrary by lazy {
+        CompanionLibraryConnection(
+            client = HttpClient(Android) {
+                followRedirects = false
+                engine { proxy = Proxy.NO_PROXY }
+                install(HttpTimeout) {
+                    connectTimeoutMillis = 5_000
+                    socketTimeoutMillis = 15_000
+                    requestTimeoutMillis = 15_000
+                }
+            },
+            store = CompanionPairingStore(pulsarPreferencesDataStore),
+        )
     }
 
     /** 登录前用：只带服务器地址，不带任何凭据。 */

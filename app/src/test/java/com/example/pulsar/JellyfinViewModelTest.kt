@@ -29,11 +29,14 @@ import com.example.pulsar.state.LibrarySectionKey
 import com.example.pulsar.state.LibraryState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -71,6 +74,53 @@ class JellyfinViewModelTest {
 
         assertEquals(0, api.musicItemsCalls)
         assertNull(viewModel.state.value.library.tracks)
+    }
+
+    @Test
+    fun `进入电脑曲库时晚到的旧搜索不生效 不再访问旧曲库直到主动离开试用`() = runTest {
+        val saved = Session("https://server.test", "user-1", "user", "secret")
+        val sessions = FakeSessionRepository(saved)
+        val release = CompletableDeferred<Unit>()
+        val api = FakeJellyfinApi(tracks = listOf(track), searchResults = SearchResults(tracks = listOf(track)))
+        api.searchGate = release
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+        viewModel.updateSearchQuery("旧词")
+        advanceTimeBy(300)
+        runCurrent()
+        assertEquals(listOf("旧词"), api.searchQueries)
+
+        viewModel.setLibraryActive(false)
+        release.complete(Unit)
+        viewModel.updateSearchQuery("不应发出")
+        viewModel.onSectionEntered(LibrarySection.Albums)
+        advanceUntilIdle()
+        assertEquals(listOf("旧词"), api.searchQueries)
+        assertEquals(0, api.albumsCalls)
+        assertEquals(1, api.musicItemsCalls)
+        assertNull(viewModel.state.value.library.search.results)
+        assertEquals(saved, sessions.load())
+
+        viewModel.setLibraryActive(true)
+        viewModel.updateSearchQuery("回到原曲库")
+        advanceUntilIdle()
+        assertEquals(listOf("旧词", "回到原曲库"), api.searchQueries)
+        assertEquals(listOf(track), viewModel.state.value.library.search.results?.tracks)
+    }
+
+    @Test
+    fun `试用还原时不恢复旧会话 退出试用才恢复`() = runTest {
+        val saved = Session("https://server.test", "user-1", "user", "secret")
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        val viewModel = createViewModel(FakeSessionRepository(saved), api, startLibraryActive = false)
+        advanceUntilIdle()
+        assertEquals(0, api.musicItemsCalls)
+        assertNull(lastSessionManager.current.value)
+
+        viewModel.setLibraryActive(true)
+        advanceUntilIdle()
+        assertEquals(1, api.musicItemsCalls)
+        assertEquals(listOf(track), viewModel.state.value.library.tracks)
     }
 
     @Test
@@ -286,6 +336,22 @@ class JellyfinViewModelTest {
         viewModel.loadLyricsForCurrentTrack()
         advanceUntilIdle()
 
+        assertEquals(0, api.lyricsCalls)
+    }
+
+    @Test
+    fun `返回 Jellyfin 入口后不为电脑曲目请求 Jellyfin 封面 歌词或音频`() = runTest {
+        val sessions = FakeSessionRepository(Session("https://server.test", "user-1", "user", "secret"))
+        val api = FakeJellyfinApi(tracks = listOf(track))
+        val viewModel = createViewModel(sessions, api)
+        advanceUntilIdle()
+        val pcTrack = track.copy(id = "pc:${"a".repeat(64)}")
+        viewModel.onMediaItemTransition(MediaItem.Builder().setMediaId(pcTrack.id).build())
+        viewModel.loadLyricsForCurrentTrack()
+        advanceUntilIdle()
+
+        assertNull(viewModel.trackCover(pcTrack))
+        assertNull(viewModel.streamUrl(pcTrack))
         assertEquals(0, api.lyricsCalls)
     }
 
@@ -2431,7 +2497,8 @@ class JellyfinViewModelTest {
         snapshotRepository: FakeSnapshotRepository? = null,
         serverUrlHistory: FakeServerUrlHistory? = null,
         downloadLedgerStore: FakeDownloadLedgerStore? = null,
-        downloadLibrary: DownloadLibrary? = null
+        downloadLibrary: DownloadLibrary? = null,
+        startLibraryActive: Boolean = true,
     ): JellyfinViewModel {
         // 生产路径只有一条：有下载能力就一定接真 module（旧 ViewModel 派生已在 #7 删除）。
         val library = downloadLibrary
@@ -2451,7 +2518,8 @@ class JellyfinViewModelTest {
             snapshotRepository = snapshotRepository,
             serverUrlHistory = serverUrlHistory,
             downloadLedgerStore = downloadLedgerStore,
-            downloadLibrary = library
+            downloadLibrary = library,
+            startLibraryActive = startLibraryActive,
         )
     }
 
@@ -2579,6 +2647,7 @@ class JellyfinViewModelTest {
         /** 非空时 getMusicItems 会挂起到测试放行：复现「会话已发布但曲库还没校验完」。 */
         var musicItemsGate: CompletableDeferred<Unit>? = null
         var searchError: Throwable? = null
+        var searchGate: CompletableDeferred<Unit>? = null
         val searchQueries = mutableListOf<String>()
         var lyricsCalls = 0
         val lyricsTrackIds = mutableListOf<String>()
@@ -2639,6 +2708,8 @@ class JellyfinViewModelTest {
             playlistTracksResult
         override suspend fun search(query: String): Result<SearchResults> {
             searchQueries += query
+            // 模拟已在途的旧响应，即使取消也仍可能返回给调用方。
+            withContext(NonCancellable) { searchGate?.await() }
             return searchError?.let { Result.failure(it) } ?: Result.success(searchResults)
         }
         override suspend fun getLyrics(trackId: String): Result<Lyrics> {

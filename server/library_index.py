@@ -1,9 +1,8 @@
-"""
+r"""
 library_index.py — 曲库索引与「这首歌是不是已经有了」的判定
 =============================================================
 
-扫描 Jellyfin 音乐库目录，回答「曲库里有没有这首歌」。
-供 qqmusic_service 在搜索/专辑接口里打标记、在下载接口里挡重复。
+维护伴生服务共用的曲库索引：为 QQ 音乐导入去重，也为电脑曲库提供曲目清单。
 
 判定钥匙优先取音频标签（TITLE/ARTIST），标签缺失才回退解析文件名——
 下载器会把文件名里的 `<>:"/\\|?*` 清洗成 `_`，是有损的，换不回来。
@@ -18,10 +17,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import logging
+import os
 import re
+import stat
 import sys
 import threading
 import time
+from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -161,8 +164,44 @@ def read_tags(path: Path) -> dict:
         return {}
 
 
+def _unlinked_stat(path: Path) -> os.stat_result | None:
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    # Windows 目录联接不是 is_symlink()，但同样会把曲库路径重定向到别处。
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return None
+    return info
+
+
+def _plain_directory(path: Path) -> bool:
+    info = _unlinked_stat(path)
+    return info is not None and stat.S_ISDIR(info.st_mode)
+
+
+def _plain_directory_chain(path: Path) -> bool:
+    # 检查到卷根，避免曲库路径本身的父目录是联接而整库被重定向。
+    return all(_plain_directory(parent) for parent in reversed(path.parents)) and _plain_directory(path)
+
+
+def _audio_stat(path: Path) -> os.stat_result | None:
+    if path.suffix.lower() not in AUDIO_EXTENSIONS:
+        return None
+    info = _unlinked_stat(path)
+    return info if info is not None and stat.S_ISREG(info.st_mode) else None
+
+
+@dataclass(frozen=True)
+class LibraryTrack:
+    id: str
+    title: str
+    artist: str
+    album: str
+
+
 class LibraryIndex:
-    """曲库索引：扫一遍曲库，之后回答「这首歌是不是已经有了」。
+    """伴生服务共用的曲库索引：扫描一次，供 QQ 音乐导入去重和电脑曲库读取。
 
     只读——绝不写入、移动、删除曲库里的任何文件。
 
@@ -171,13 +210,16 @@ class LibraryIndex:
     """
 
     def __init__(self, root: Path, read_tags: Callable[[Path], dict] = read_tags):
-        self._root = Path(root)
+        self._root = Path(root).absolute()
         self._read_tags = read_tags
+        self._refresh_lock = threading.Lock()
         self._lock = threading.Lock()
-        self._identities: dict[Path, tuple[str, str]] = {}
-        self._stamps: dict[Path, tuple[float, int]] = {}
+        self._tracks: dict[Path, LibraryTrack] = {}
+        self._paths_by_id: dict[str, Path] = {}
+        self._stamps: dict[Path, tuple[int, int]] = {}
         self._by_title: dict[str, list[set[str]]] = {}
         self._ready = False
+        self._readable_root = False
 
     @property
     def ready(self) -> bool:
@@ -185,59 +227,80 @@ class LibraryIndex:
             return self._ready
 
     @property
+    def catalog_ready(self) -> bool:
+        """可供配对的索引必须至少读过一次曲库根目录；旧去重的 ready 语义不变。"""
+        with self._lock:
+            root_was_read = self._readable_root
+        return root_was_read and _plain_directory_chain(self._root)
+
+    @property
     def count(self) -> int:
         with self._lock:
-            return len(self._identities)
+            return len(self._tracks)
 
     def entries(self) -> list[tuple[str, str]]:
         """索引里的全部 (歌名, 歌手)，按歌名排序。"""
+        return [(track.title, track.artist) for track in self.tracks()]
+
+    def tracks(self) -> list[LibraryTrack]:
+        """电脑曲库清单；快照不含文件路径。"""
         with self._lock:
-            return sorted(
-                self._identities.values(),
-                key=lambda item: (item[0].casefold(), item[1].casefold()),
-            )
+            tracks = list(self._tracks.values())
+        return sorted(tracks, key=lambda track: (track.title.casefold(), track.artist.casefold()))
+
+    def audio_file(self, track_id: str) -> tuple[Path, os.stat_result] | None:
+        """只按索引 ID 查找音频；即使文件在扫描后被替换，也重新检查曲库边界。"""
+        with self._lock:
+            path = self._paths_by_id.get(track_id)
+        if path is None:
+            return None
+        info = self._checked_audio_stat(path)
+        return (path, info) if info is not None else None
 
     def refresh(self) -> None:
         """重扫曲库。没变的文件不重读标签——读标签是这里唯一的重活。
 
         读标签在锁外做：冷扫 595 个文件要十几秒，不能把查询请求堵死。
         """
-        current = self._scan()
+        # 周期重扫和文件操作触发的重扫共用一个扫描锁；查询仍只读上一次的快照。
+        with self._refresh_lock:
+            self._refresh()
+
+    def _refresh(self) -> None:
         with self._lock:
             known = dict(self._stamps)
+        snapshot = self._scan()
+        current = snapshot if snapshot is not None else {}
         fresh = {
-            path: identity_from_file(path.name, self._read_tags(path))
+            path: self._read_track(path)
             for path, stamp in current.items()
             if known.get(path) != stamp
         }
         with self._lock:
-            self._identities.update(fresh)
-            stamps = dict(current)
-            for path in list(self._identities):
-                if path in stamps:
-                    continue
-                # 不在快照里 ≠ 已经没了：快照是读标签**之前**取的，这期间
-                # worker 可能刚好下载落盘并 note_downloaded 并了进来。
-                # 只有文件真没了才清掉（顺带把它补进 stamps，省一次重读标签）。
-                stamp = self._stamp(path)
-                if stamp is None:
-                    del self._identities[path]
-                else:
-                    stamps[path] = stamp
-            self._stamps = stamps
+            # 扫描期间 note_downloaded 可能已经并入新曲目。它读取标签更晚，
+            # 保留它的快照（包括与本轮扫描碰巧看见了同一个路径的情况）。
+            for path, stamp in self._stamps.items():
+                if known.get(path) != stamp:
+                    current[path] = stamp
+                    fresh.pop(path, None)
+            self._tracks.update(fresh)
+            for path in self._tracks.keys() - current.keys():
+                del self._tracks[path]
+            self._stamps = current
             self._rebuild_locked()
+            self._readable_root = snapshot is not None
             self._ready = True
 
     def note_downloaded(self, path: Path) -> None:
         """把刚下载完的文件并入索引，不必等下一次周期扫描。"""
-        path = Path(path)
-        stamp = self._stamp(path)
-        if stamp is None:
+        path = Path(path).absolute()
+        info = self._checked_audio_stat(path)
+        if info is None:
             return
-        identity = identity_from_file(path.name, self._read_tags(path))
+        track = self._read_track(path)
         with self._lock:
-            self._identities[path] = identity
-            self._stamps[path] = stamp
+            self._tracks[path] = track
+            self._stamps[path] = (info.st_mtime_ns, info.st_size)
             self._rebuild_locked()
 
     def contains(self, title: str, artist: str) -> bool:
@@ -271,35 +334,47 @@ class LibraryIndex:
 
     # ─── 内部 ───
 
-    def _scan(self) -> dict[Path, tuple[float, int]]:
-        """列出曲库里的音频文件及其 (mtime, size) 快照。"""
-        found: dict[Path, tuple[float, int]] = {}
-        try:
-            for path in self._root.rglob("*"):
-                if path.suffix.lower() not in AUDIO_EXTENSIONS or not path.is_file():
-                    continue
-                stamp = self._stamp(path)
-                if stamp is not None:
-                    found[path] = stamp
-        except OSError:
-            log.exception("扫描曲库失败: %s", self._root)
-        return found
+    def _read_track(self, path: Path) -> LibraryTrack:
+        tags = self._read_tags(path)
+        title, artist = identity_from_file(path.name, tags)
+        # ID 只取曲库相对路径，不随内嵌标签、内容或进程重启改变。
+        relative = path.relative_to(self._root).as_posix()
+        track_id = sha256(relative.encode("utf-8", errors="surrogatepass")).hexdigest()
+        return LibraryTrack(track_id, title, artist, _tag_value(tags, "album"))
 
-    @staticmethod
-    def _stamp(path: Path) -> Optional[tuple[float, int]]:
-        try:
-            stat = path.stat()
-        except OSError:
+    def _checked_audio_stat(self, path: Path) -> os.stat_result | None:
+        if path == self._root or not path.is_relative_to(self._root):
             return None
-        return (stat.st_mtime, stat.st_size)
+        if ".." in path.parts or not _plain_directory_chain(path.parent):
+            return None
+        return _audio_stat(path)
+
+    def _scan(self) -> dict[Path, tuple[int, int]] | None:
+        """一遍扫描；遇到目录联接或符号链接不进入、不读标签。"""
+        found: dict[Path, tuple[int, int]] = {}
+        if not _plain_directory_chain(self._root):
+            return None
+        walked = False
+        for directory, subdirs, files in os.walk(self._root, followlinks=False):
+            walked = True
+            parent = Path(directory)
+            # Windows 的 os.walk(followlinks=False) 仍可能走进目录联接。
+            subdirs[:] = [name for name in subdirs if _plain_directory(parent / name)]
+            for name in files:
+                path = parent / name
+                info = _audio_stat(path)
+                if info is not None:
+                    found[path] = (info.st_mtime_ns, info.st_size)
+        return found if walked else None
 
     def _rebuild_locked(self) -> None:
         """按归一化歌名建查表；歌手存成分段集合供包含判定。"""
         by_title: dict[str, list[set[str]]] = {}
-        for title, artist in self._identities.values():
-            key = normalize_text(title)
+        for track in self._tracks.values():
+            key = normalize_text(track.title)
             if key:
-                by_title.setdefault(key, []).append(_artist_segments(artist))
+                by_title.setdefault(key, []).append(_artist_segments(track.artist))
+        self._paths_by_id = {track.id: path for path, track in self._tracks.items()}
         self._by_title = by_title
 
 

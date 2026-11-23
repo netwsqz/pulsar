@@ -1,4 +1,4 @@
-"""
+r"""
 qqmusic_service.py — QQ 音乐下载 HTTP 服务（播放器项目侧）
 ==========================================================
 
@@ -13,7 +13,7 @@ qqmusic_service.py — QQ 音乐下载 HTTP 服务（播放器项目侧）
   - 不修改 E:\music 下的任何文件
 
 启动:  双击 start.bat（或 python qqmusic_service.py）
-依赖:  pip install fastapi uvicorn requests mutagen frida==16.7.18 + ffmpeg 在 PATH
+依赖:  pip install "fastapi>=0.121.3" "starlette>=0.49.1" uvicorn requests mutagen frida==16.7.18 + ffmpeg 在 PATH
 """
 
 from __future__ import annotations
@@ -49,6 +49,7 @@ from pydantic import BaseModel  # noqa: E402
 
 from library_files import LibraryFiles, LibraryFilesError  # noqa: E402
 from library_index import DEFAULT_LIBRARY_ROOT, LibraryIndex  # noqa: E402
+from pc_library import library_router  # noqa: E402
 
 # ---- 常量 ----
 LIBRARY_ROOT = DEFAULT_LIBRARY_ROOT  # Jellyfin 音乐库目录（实时监控已开启，落盘即入库）
@@ -88,6 +89,7 @@ _last_refresh_error: Optional[str] = None
 
 # 曲库索引：后台线程扫，请求只读内存。构造不碰磁盘，首次扫描在 startup 里发起。
 _library_index = LibraryIndex(LIBRARY_ROOT)
+app.include_router(library_router(_library_index, Path(__file__).resolve().with_name(".library_access_key")))
 
 
 # ─── 文件操作密钥 ─────────────────────────────────────────
@@ -635,7 +637,7 @@ def album_songs(album_mid: str) -> dict:
 
 
 def _album_song_details(album_mid: str, cookie: str, uin: str) -> list[dict]:
-    """专辑曲目（mid + 歌名 + 歌手）。
+    r"""专辑曲目（mid + 歌名 + 歌手）。
 
     qmc2.get_album_songs 只返回 mid 不带歌名，任务列表会显示成内部 ID；
     E:\music 不许改，所以这里复用同一底层接口把歌名一起取回来

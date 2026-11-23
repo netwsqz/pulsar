@@ -31,7 +31,8 @@ internal data class SearchScreenState(
     val isPlaying: Boolean,
     val trackCover: (Track) -> JellyfinRequest?,
     val albumCover: (Album) -> JellyfinRequest?,
-    val playlistCover: (Playlist) -> JellyfinRequest?
+    val playlistCover: (Playlist) -> JellyfinRequest?,
+    val isCompanionTrial: Boolean = false,
 )
 
 /**
@@ -51,7 +52,8 @@ internal fun searchScreenState(
     isPlaying: Boolean,
     trackCover: (Track) -> JellyfinRequest?,
     albumCover: (Album) -> JellyfinRequest?,
-    playlistCover: (Playlist) -> JellyfinRequest?
+    playlistCover: (Playlist) -> JellyfinRequest?,
+    isCompanionTrial: Boolean = false,
 ): SearchScreenState = SearchScreenState(
     view = unifiedSearchViewState(
         input = SearchInput(
@@ -59,7 +61,8 @@ internal fun searchScreenState(
             results = results,
             isSearching = search.isSearching,
             errorMessage = errorMessage,
-            searchNotice = searchNotice
+            searchNotice = searchNotice,
+            showLibraryErrorWithQqResults = isCompanionTrial,
         ),
         qq = QqSearchInput(
             songs = qq.search.songs,
@@ -75,7 +78,8 @@ internal fun searchScreenState(
     isPlaying = isPlaying,
     trackCover = trackCover,
     albumCover = albumCover,
-    playlistCover = playlistCover
+    playlistCover = playlistCover,
+    isCompanionTrial = isCompanionTrial,
 )
 
 /**

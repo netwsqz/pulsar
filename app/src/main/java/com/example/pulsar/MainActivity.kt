@@ -36,6 +36,7 @@ import com.example.pulsar.ui.components.VolumeFeedbackOverlay
 import com.example.pulsar.ui.components.VolumeFeedbackState
 import com.example.pulsar.ui.components.coverScrimHeight
 import com.example.pulsar.ui.components.glassBarSliderColors
+import com.example.pulsar.ui.components.LoadState
 import com.example.pulsar.ui.components.libraryLoadState
 import com.example.pulsar.ui.components.menuTopLeft
 import com.example.pulsar.ui.components.pausedPlayingBarProgress
@@ -268,12 +269,16 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import com.example.pulsar.data.jellyfin.JellyfinDataSource
+import com.example.pulsar.data.companion.isCompanionMediaId
+import com.example.pulsar.library.CompanionLibraryTrial
 import com.example.pulsar.data.jellyfin.JellyfinError
 import com.example.pulsar.data.jellyfin.JellyfinRequest
 import com.example.pulsar.data.jellyfin.JellyfinUrlBuilder
@@ -309,11 +314,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -348,7 +352,7 @@ class MainActivity : ComponentActivity() {
         )
         val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
-        setContent { PulsarApp(controllerFuture = controllerFuture, volumeKeys = volumeKeys) }
+        setContent { PulsarEntry(controllerFuture, volumeKeys) }
     }
 
     /** 独占开启时吃掉音量键交给 App，其余情况一律放行（[ForegroundVolumeKeys.handle]）。 */
@@ -370,46 +374,65 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-private fun PulsarApp(
-    controllerFuture: ListenableFuture<MediaController>?,
-    volumeKeys: ForegroundVolumeKeys
-) {
+private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, volumeKeys: ForegroundVolumeKeys) {
     val application = LocalContext.current.applicationContext as PulsarApplication
-    val viewModelFactory = remember(application) { JellyfinViewModelFactory(application) }
+    var showCompanionLibrary by rememberSaveable { mutableStateOf(false) }
+    var showPairing by rememberSaveable { mutableStateOf(false) }
+    val pageState = rememberSaveableStateHolder()
+    val viewModelFactory = remember(application) { JellyfinViewModelFactory(application, !showCompanionLibrary) }
     val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
-    val qqViewModel: QQDownloadViewModel = viewModel(
-        factory = remember(application) {
-            object : androidx.lifecycle.ViewModelProvider.Factory {
-                @Suppress("UNCHECKED_CAST")
-                override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
-                    require(modelClass.isAssignableFrom(QQDownloadViewModel::class.java))
-                    return QQDownloadViewModel(
-                        preferences = application.qqDownloadSettings(),
-                        apiFactory = application.qqDownloadApiFactory()
-                    ) as T
-                }
-            }
-        }
-    )
+    val scope = rememberCoroutineScope()
+    val trial = remember(application, scope) { CompanionLibraryTrial(application.companionLibrary, scope) }
+    val trialState by trial.state.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
-    val qqState by qqViewModel.state.collectAsStateWithLifecycle()
-    // 当前播放曲目提到主题之上取：色板要跟着它变，登录页和主页面都得在同一套主题里。
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
-    // QQ 下载服务与 Jellyfin 同机、端口固定 8900：登录成功后自动填地址，用户不用管。
-    LaunchedEffect(state.library.tracks != null, state.session.serverUrl) {
-        if (state.library.tracks != null && state.session.serverUrl.isNotBlank()) {
-            qqViewModel.autoFillServiceUrl(state.session.serverUrl)
+
+    fun setTrial(enabled: Boolean) {
+        viewModel.setLibraryActive(!enabled)
+        if (enabled) trial.enter() else trial.leave()
+        showPairing = false
+        showCompanionLibrary = enabled
+    }
+
+    // Activity 重建时试用来源仍独立；冷启动没有这段页面状态，默认还是 Jellyfin。
+    LaunchedEffect(trial) { if (showCompanionLibrary) trial.enter() }
+    val trialActive = showCompanionLibrary
+    val mediaItems = remember(viewModel, trial) {
+        TrackMediaItemFactory { track ->
+            val url = if (isCompanionMediaId(track.id)) trial.streamUrl(track) else viewModel.streamUrl(track)
+            url?.let { buildMediaItem(track, it) }
         }
     }
+    val gate = remember(viewModel, trial) {
+        object : PlaybackGate {
+            override fun isPlayable(track: Track): Boolean = unplayableReason(track) == null
+
+            override fun unplayableReason(track: Track): String? = if (showCompanionLibrary) {
+                trial.unplayableReason(track)
+            } else if (isCompanionMediaId(track.id)) {
+                "请从当前曲库重新选择歌曲"
+            } else {
+                viewModel.unplayableReason(track)
+            }
+        }
+    }
+    val modeStore = remember(application) { DataStorePlaybackModeStore(application.pulsarPreferencesDataStore) }
+    val playbackSession = rememberPlaybackSession(controllerFuture, mediaItems, gate, volumeKeys, modeStore)
+    LaunchedEffect(playbackSession) {
+        playbackSession.state.map { it.isConnected to it.currentMediaItem }.distinctUntilChanged().collect { (connected, item) ->
+            if (connected) viewModel.onMediaItemTransition(item)
+        }
+    }
+    // 换浏览来源不打断正在播放的曲目；播放条仍如实显示会话正在播的歌。
     val darkTheme = isSystemInDarkTheme()
-    // 手动配色（工单 13）：预设色只是**没有封面时的兜底种子**，有封面色时仍以封面为准。
-    val themeContext = LocalContext.current
-    val themePreferences = remember { ThemePreferences(themeContext.pulsarPreferencesDataStore) }
+    val themePreferences = remember(application) { ThemePreferences(application.pulsarPreferencesDataStore) }
     val presetArgb by themePreferences.preset.collectAsStateWithLifecycle(initialValue = null)
     val preset = presetArgb?.let(::Color)
-    // 等待新封面时可留上一张，但不能跨登录界面或账号保留。不把会话凭据带进组合。
-    val artworkAccount = if (state.library.tracks != null) state.session.serverUrl to state.session.username else null
-    val playbackCoverRequest = currentTrack?.let(viewModel::trackCover)
+    // 配对地址与 Jellyfin 会话分开，封面主题不跨来源复用。
+    val artworkAccount = if (trialActive) trialState.serviceUrl else if (state.library.tracks != null) {
+        state.session.serverUrl to state.session.username
+    } else null
+    val playbackCoverRequest = if (trialActive) null else currentTrack?.let(viewModel::trackCover)
     val windowSize = LocalWindowInfo.current.containerSize
     val artworkSizePx = minOf(windowSize.width, windowSize.height).coerceIn(96, 1440)
     val coverTheme = rememberCoverGradient(
@@ -417,34 +440,87 @@ private fun PulsarApp(
         darkTheme = darkTheme,
         preset = preset,
         sessionIdentity = artworkAccount,
-        artworkSizePx = artworkSizePx
+        artworkSizePx = artworkSizePx,
     )
-    // 无封面 / 全灰封面 → 不传种子，沿用改造前的固定靛蓝色板（工单 11 的回退要求）。
     val seed = coverTheme.seed.color.takeIf { coverTheme.seed.source != ThemeSeedSource.Default }
     PulsarTheme(darkTheme = darkTheme, seed = seed) {
-        // 启动直接进主页面：恢复会话期间曲库页用灰色波浪骨架占位（页面框架、玻璃岛、
-        // 迷你播放条都立刻可用），不另起一屏加载页。只有"确实没有可用会话"——本地没存
-        // 过、或恢复失败——才落到登录表单。
-        if (!state.session.isRestoring && state.library.tracks == null) {
-            LoginScreen(session = state.session, viewModel = viewModel)
+        if (trialActive && (showPairing || trialState.needsPairing)) {
+            pageState.SaveableStateProvider("companion-pairing") {
+                CompanionPairingScreen(
+                    trial = trial,
+                    initialError = trialState.error,
+                    onPaired = { showPairing = false },
+                    onBack = {
+                        if (showPairing && !trialState.needsPairing) showPairing = false else setTrial(false)
+                    },
+                )
+            }
+        } else if (!trialActive && !state.session.isRestoring && state.library.tracks == null) {
+            pageState.SaveableStateProvider("jellyfin-library") {
+                LoginScreen(state.session, viewModel) { setTrial(true) }
+            }
         } else {
-            MusicLibraryScreen(
-                library = state.library,
-                session = state.session,
-                downloads = state.downloads,
-                viewModel = viewModel,
-                controllerFuture = controllerFuture,
-                volumeKeys = volumeKeys,
-                qqState = qqState,
-                qqViewModel = qqViewModel,
-                currentTrack = currentTrack,
-                artworkSessionIdentity = artworkAccount,
-                coverTheme = coverTheme,
-                themePreferences = themePreferences
-            )
+            val sourceKey = if (trialActive) "companion-library" else "jellyfin-library"
+            pageState.SaveableStateProvider(sourceKey) {
+                val qqViewModel = rememberQqViewModel(application, if (trialActive) trialState.serviceUrl.orEmpty() else null)
+                val qqState by qqViewModel.state.collectAsStateWithLifecycle()
+                if (!trialActive) {
+                    // 原入口保留 Jellyfin 同机自动填 QQ 服务地址的行为。
+                    LaunchedEffect(state.library.tracks != null, state.session.serverUrl) {
+                        if (state.library.tracks != null && state.session.serverUrl.isNotBlank()) {
+                            qqViewModel.autoFillServiceUrl(state.session.serverUrl)
+                        }
+                    }
+                }
+                MusicLibraryScreen(
+                    library = if (trialActive) LibraryState(tracks = trialState.tracks, search = trialState.search) else state.library,
+                    session = if (trialActive) SessionState(isLoading = trialState.isLoading, errorMessage = trialState.error?.message) else state.session,
+                    downloads = if (trialActive) DownloadsState() else state.downloads,
+                    viewModel = viewModel,
+                    playbackSession = playbackSession,
+                    qqState = qqState,
+                    qqViewModel = qqViewModel,
+                    currentTrack = currentTrack,
+                    artworkSessionIdentity = artworkAccount,
+                    coverTheme = coverTheme,
+                    themePreferences = themePreferences,
+                    onOpenCompanionLibrary = { setTrial(true) },
+                    companionTrial = trial.takeIf { trialActive },
+                    onRePair = { showPairing = true },
+                    onExitTrial = { setTrial(false) },
+                )
+            }
         }
     }
 }
+
+@Composable
+private fun rememberQqViewModel(application: PulsarApplication, trialServiceUrl: String?): QQDownloadViewModel {
+    val owner = if (trialServiceUrl != null) {
+        // 试用会话使用独立的 QQ 状态；离开或换配对时取消它的请求，不保留旧结果。
+        val trialOwner = remember(trialServiceUrl) {
+            object : ViewModelStoreOwner { override val viewModelStore = ViewModelStore() }
+        }
+        DisposableEffect(trialOwner) { onDispose { trialOwner.viewModelStore.clear() } }
+        trialOwner
+    } else {
+        checkNotNull(LocalViewModelStoreOwner.current)
+    }
+    return viewModel(viewModelStoreOwner = owner, factory = remember(application, trialServiceUrl) {
+        object : androidx.lifecycle.ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                require(modelClass.isAssignableFrom(QQDownloadViewModel::class.java))
+                return QQDownloadViewModel(
+                    preferences = application.qqDownloadSettings(),
+                    apiFactory = application.qqDownloadApiFactory(),
+                    trialServiceUrl = trialServiceUrl,
+                ) as T
+            }
+        }
+    })
+}
+
 
 /**
  * 艺术家列表页（工单 06）：由已加载的专辑在客户端分组而来（零新 API）。
@@ -713,7 +789,7 @@ private enum class SkeletonLeading { Cover, Number }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel) {
+private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel, onOpenCompanionLibrary: () -> Unit) {
     Column(
         // edge-to-edge 后登录页同样要躲开状态栏 / 导航栏（工单 14）。
         modifier = Modifier
@@ -765,6 +841,9 @@ private fun LoginScreen(session: SessionState, viewModel: JellyfinViewModel) {
                 if (session.isLoading) CircularProgressIndicator(strokeWidth = 2.dp) else Text("登录")
             }
             OldDownloadPreviewButton(Modifier.fillMaxWidth())
+            TextButton(onClick = onOpenCompanionLibrary, modifier = Modifier.fillMaxWidth()) {
+                Text("连接电脑曲库（试用）")
+            }
     }
 }
 
@@ -775,31 +854,21 @@ private fun MusicLibraryScreen(
     session: SessionState,
     downloads: DownloadsState,
     viewModel: JellyfinViewModel,
-    controllerFuture: ListenableFuture<MediaController>?,
-    volumeKeys: ForegroundVolumeKeys,
+    playbackSession: PlaybackSession,
     qqState: QQDownloadUiState,
     qqViewModel: QQDownloadViewModel,
     currentTrack: Track?,
     artworkSessionIdentity: Any?,
     coverTheme: CoverTheme,
-    themePreferences: ThemePreferences
+    themePreferences: ThemePreferences,
+    onOpenCompanionLibrary: () -> Unit,
+    companionTrial: CompanionLibraryTrial?,
+    onRePair: () -> Unit,
+    onExitTrial: () -> Unit,
 ) {
-    // 播放会话的两个端口：曲目 → 播放条目 / 离线守门。Step 2 只把它们接进会话构造签名，
-    // Step 3 的播放意图才会用到；这里给的是生产实现（viewModel::streamUrl 等）。
-    val playbackMediaItems = remember(viewModel) {
-        TrackMediaItemFactory { track -> viewModel.streamUrl(track)?.let { buildMediaItem(track, it) } }
-    }
-    val playbackGate = remember(viewModel) {
-        object : PlaybackGate {
-            override fun isPlayable(track: Track): Boolean = viewModel.isPlayable(track)
-            override fun unplayableReason(track: Track): String? = viewModel.unplayableReason(track)
-        }
-    }
+    val trialActive = companionTrial != null
+    val defaultSection = if (trialActive) LibrarySection.Tracks else LibrarySection.Discover
     val context = LocalContext.current
-    val modeStore = remember(context) { DataStorePlaybackModeStore(context.pulsarPreferencesDataStore) }
-    val playbackSession = rememberPlaybackSession(
-        controllerFuture, playbackMediaItems, playbackGate, volumeKeys, modeStore
-    )
     val playback by playbackSession.state.collectAsStateWithLifecycle()
     // 队列的拖拽暂态（#28）：迷你条与全屏页**共用同一个实例**，队列真相仍是会话状态。
     // 会话队列一变（轮询 / 切歌 / 增删 / 回写生效）就释放暂态，界面回到唯一真相。
@@ -820,7 +889,7 @@ private fun MusicLibraryScreen(
     // 主页默认显示发现页（随机专辑），其余分区通过顶部导航切换。
     // **rememberSaveable**：转屏 / Activity 重建后当前页签与详情页不丢（#16）。
     var section by rememberSaveable(stateSaver = LibrarySectionSaver) {
-        mutableStateOf<LibrarySection>(LibrarySection.Discover)
+        mutableStateOf<LibrarySection>(defaultSection)
     }
     var returning by remember { mutableStateOf(false) }
     val pageStates = rememberSaveableStateHolder()
@@ -828,6 +897,10 @@ private fun MusicLibraryScreen(
         if (next == section) return
         returning = isBack
         section = next
+        if (companionTrial != null && next == LibrarySection.Search) {
+            // 搜索使用当前清单：重新打开搜索时也应发现停机、扫描或密钥变化。
+            companionTrial.retry()
+        }
     }
     // 详情页来源：从列表页还是搜索页进的详情，返回时回到对应来源。也要跨重建保留，
     // 否则详情页转屏后再按返回会被送回发现页。
@@ -848,9 +921,12 @@ private fun MusicLibraryScreen(
     // `LibraryCache` 里；会话就绪、离线翻转、切歌后的补跑由 module 自己触发，
     // 所以这里不再把 sessionReady / isOffline / historyEpoch 当 key。
     LaunchedEffect(section) {
-        viewModel.onSectionEntered(section)
-        // 下载服务页（设置 → 下载）：进来时刷新一次任务列表，和原来挂在顶层 QQ 页时一致。
+        if (!trialActive) viewModel.onSectionEntered(section)
         if (section == LibrarySection.DownloadService) qqViewModel.refreshJobs()
+    }
+    // 配对成功或换到新地址时，新的 QQ 会话接续当前查询，不显示上一台电脑的结果。
+    LaunchedEffect(qqViewModel) {
+        if (companionTrial != null) qqViewModel.updateSearchQuery(companionTrial.state.value.search.query)
     }
     // 离线可见性（ADR-0008）：离线时各屏只显示已下载的东西，不再「全量 + 标灰」。
     // 判据全部收在 OfflinePolicy 里——这里只把原始 state 喂进去、读回渲染用的视图，
@@ -891,13 +967,6 @@ private fun MusicLibraryScreen(
     val lyrics by viewModel.lyrics.collectAsStateWithLifecycle()
     // 音量浮窗的显示窗口：独占模式下音量键被 App 截获、系统音量条不会弹，靠它给唯一的视觉反馈。
     val volumeFeedback by VolumeFeedback.state.collectAsStateWithLifecycle()
-    // 当前曲目由会话状态驱动，界面不再挂控制器的 transition 监听。
-    // 连接成功时状态里已经有当前条目（后台播放回来不会再触发 transition），这里一并恢复。
-    LaunchedEffect(playback.isConnected, playback.currentMediaItem) {
-        if (playback.isConnected) {
-            viewModel.onMediaItemTransition(playback.currentMediaItem)
-        }
-    }
     // 统一播放入口：把可播队列记录进 ViewModel，并交给会话起播。gate 在会话内执行。
     val snackbarHostState = remember { SnackbarHostState() }
     val snackbarScope = rememberCoroutineScope()
@@ -916,7 +985,7 @@ private fun MusicLibraryScreen(
     }
     // QQ 下载动作反馈（音质不可用 / 入队失败 / 整专跳过 N 首）走 Snackbar——那是动作反馈。
     // 搜索期失败（服务不可用 / 凭证过期）不走这里，它在搜索页 QQ 分区里常驻（ADR-0006）。
-    LaunchedEffect(qqState.download.actionMessage) {
+    LaunchedEffect(qqState.download.actionMessage, qqViewModel) {
         val message = qqState.download.actionMessage ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(message)
         qqViewModel.dismissActionMessage()
@@ -928,8 +997,9 @@ private fun MusicLibraryScreen(
             when (event) {
                 is PlaybackEvent.Unplayable -> snackbarHostState.showSnackbar(event.reason)
                 is PlaybackEvent.Message -> snackbarHostState.showSnackbar(event.text)
-                is PlaybackEvent.PlaybackQueuePrepared ->
-                    viewModel.setPlaybackQueue(event.tracks, event.startTrackId)
+                is PlaybackEvent.PlaybackQueuePrepared -> {
+                    if (!trialActive) viewModel.setPlaybackQueue(event.tracks, event.startTrackId)
+                }
                 is PlaybackEvent.VolumeApplied -> VolumeFeedback.show(event.percent)
             }
         }
@@ -977,7 +1047,7 @@ private fun MusicLibraryScreen(
     val currentListTracks: List<Track> = currentListTracks(section, visible, discoverPicks)
     // 系统返回键 + 侧滑手势：详情页返回来源页（列表页或搜索页）；非默认页签（歌曲/专辑/播放列表/搜索）
     // 先回到默认的发现页；只有已在发现页时按返回才走系统默认行为（退出应用）。
-    BackHandler(section != LibrarySection.Discover) {
+    BackHandler(trialActive || section != defaultSection) {
         when (val s = section) {
             is LibrarySection.AlbumDetail -> {
                 viewModel.clearAlbumDetail()
@@ -1004,7 +1074,7 @@ private fun MusicLibraryScreen(
             // 已下载和 QQ 音乐导入都是设置里的二级页。
             LibrarySection.CachedCopies, LibrarySection.DownloadService ->
                 goTo(LibrarySection.Settings, isBack = true)
-            else -> goTo(LibrarySection.Discover, isBack = true)
+            else -> if (trialActive && section == defaultSection) onExitTrial() else goTo(defaultSection, isBack = true)
         }
     }
     // 多选模式下返回键先退出多选，而不是退出页面（后声明的 BackHandler 优先响应）。
@@ -1050,7 +1120,7 @@ private fun MusicLibraryScreen(
     }
     // 全屏页打开期间跟随曲目拉歌词；切歌时因 key 变化重新触发，关闭时清掉常驻内存。
     LaunchedEffect(showNowPlaying, currentTrack?.id) {
-        if (showNowPlaying && currentTrack != null) viewModel.loadLyricsForCurrentTrack()
+        if (!trialActive && showNowPlaying && currentTrack != null) viewModel.loadLyricsForCurrentTrack()
     }
     val nowPlayingVisibility = updateTransition(showNowPlaying, label = "nowPlaying")
     val dockOnTop = !showNowPlaying && (nowPlayingVisibility.isRunning || nowPlayingVisibility.currentState)
@@ -1103,8 +1173,8 @@ private fun MusicLibraryScreen(
     // SharedTransitionLayout 包住整个悬浮布局：迷你条小封面 ↔ 全屏页大封面共用
     // 同一 key 做 morph（打开/收起全屏页时封面跨布局连续飞行动画）。
     CompositionLocalProvider(
-        LocalTrackFileOps provides trackFileOps,
-        LocalMultiSelect provides multiSelect,
+        LocalTrackFileOps provides trackFileOps.takeUnless { trialActive },
+        LocalMultiSelect provides multiSelect.takeUnless { trialActive },
         LocalCoverAccent provides coverAccentAnimated,
         LocalOfflineActive provides library.isOffline,
         // 长按菜单状态：TrackRow 上报锚点，菜单本体由本层渲染（工单 15）。
@@ -1152,7 +1222,15 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                when (s) {
+                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search) {
+                    LibraryScreenScaffold(
+                        title = s.navLabel().orEmpty(),
+                        loadState = LoadState.Empty("电脑曲库试用目前支持歌曲和搜索"),
+                        actions = { TextButton(onClick = { goTo(LibrarySection.Tracks) }) { Text("打开歌曲") } },
+                        loading = {},
+                        content = {},
+                    )
+                } else when (s) {
                     LibrarySection.Discover -> DiscoverContent(
                         library = library,
                         session = session,
@@ -1186,7 +1264,8 @@ private fun MusicLibraryScreen(
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         currentTrackId = currentTrack?.id,
-                        onRetry = viewModel::loadTracks,
+                        onRetry = if (companionTrial != null) companionTrial::retry else viewModel::loadTracks,
+                        onRefreshTrial = companionTrial?.let { it::retry },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Albums -> AlbumsContent(
@@ -1231,12 +1310,15 @@ private fun MusicLibraryScreen(
                             isPlaying = playback.isPlaying,
                             trackCover = viewModel::trackCover,
                             albumCover = viewModel::albumCover,
-                            playlistCover = viewModel::playlistCover
+                            playlistCover = viewModel::playlistCover,
+                            isCompanionTrial = trialActive,
                         ),
                         actions = searchActions(
-                            viewModel = viewModel,
+                            onLibraryQuery = if (companionTrial != null) companionTrial::updateSearchQuery else viewModel::updateSearchQuery,
                             qqViewModel = qqViewModel,
-                            query = library.search.query,
+                            onRetryLibrary = if (companionTrial != null) companionTrial::retry else {
+                                { viewModel.updateSearchQuery(library.search.query) }
+                            },
                             onPlayTrack = onPlayTrack,
                             onAddToQueue = onAddToQueue,
                             onOpenAlbum = openAlbum,
@@ -1312,6 +1394,7 @@ private fun MusicLibraryScreen(
                         playbackEvents = playbackSession.events,
                         onOpenCachedCopies = { goTo(LibrarySection.CachedCopies) },
                         onOpenDownloadService = { goTo(LibrarySection.DownloadService) },
+                        onOpenCompanionLibrary = onOpenCompanionLibrary,
                         themePreferences = themePreferences,
                         seedSource = coverTheme.seed.source,
                         modifier = Modifier.fillMaxSize()
@@ -1341,6 +1424,8 @@ private fun MusicLibraryScreen(
                     goTo(LibrarySection.Settings)
                 },
                 onSignOut = viewModel::signOut,
+                onRePair = onRePair.takeIf { trialActive },
+                onExitTrial = onExitTrial.takeIf { trialActive },
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
@@ -1600,6 +1685,8 @@ private fun GlassChipBar(
     onShowSearch: () -> Unit,
     onShowSettings: () -> Unit,
     onSignOut: () -> Unit,
+    onRePair: (() -> Unit)? = null,
+    onExitTrial: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // 可读性表面色：非组合的 onDrawSurface 里不能读 MaterialTheme，先取出来。
@@ -1706,20 +1793,39 @@ private fun GlassChipBar(
                     expanded = moreMenuExpanded,
                     onDismissRequest = { moreMenuExpanded = false }
                 ) {
-                    DropdownMenuItem(
-                        text = { Text("设置") },
-                        onClick = {
-                            moreMenuExpanded = false
-                            onShowSettings()
+                    if (onExitTrial == null) {
+                        DropdownMenuItem(
+                            text = { Text("设置") },
+                            onClick = {
+                                moreMenuExpanded = false
+                                onShowSettings()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("退出登录") },
+                            onClick = {
+                                moreMenuExpanded = false
+                                confirmSignOut = true
+                            }
+                        )
+                    } else {
+                        if (onRePair != null) {
+                            DropdownMenuItem(
+                                text = { Text("更换配对") },
+                                onClick = {
+                                    moreMenuExpanded = false
+                                    onRePair()
+                                }
+                            )
                         }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("退出登录") },
-                        onClick = {
-                            moreMenuExpanded = false
-                            confirmSignOut = true
-                        }
-                    )
+                        DropdownMenuItem(
+                            text = { Text("退出电脑曲库试用") },
+                            onClick = {
+                                moreMenuExpanded = false
+                                onExitTrial()
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -1784,6 +1890,7 @@ private fun TracksContent(
     onAddToQueue: (Track) -> Unit,
     currentTrackId: String?,
     onRetry: () -> Unit,
+    onRefreshTrial: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     LibraryScreenScaffold(
@@ -1796,13 +1903,23 @@ private fun TracksContent(
             isLoading = session.isLoading || session.isRestoring,
             errorMessage = session.errorMessage,
             // 离线空态与在线空态不能互相顶替：用户要能分清「曲库空了」和「离线只能看下载」。
-            emptyMessage = if (offlineNotice != null) OfflineEmpty.Tracks.message() else "暂无音乐",
+            emptyMessage = when {
+                offlineNotice != null -> OfflineEmpty.Tracks.message()
+                onRefreshTrial != null -> "电脑曲库里还没有歌"
+                else -> "暂无音乐"
+            },
             onRetry = onRetry
         ),
         offlineNotice = offlineNotice,
         modifier = modifier,
         // 「选择手机里的音频」是页面级入口，不属于三态：加载中 / 失败 / 空库时都要能点。
         actions = {
+            if (onRefreshTrial != null) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("电脑曲库（试用）", modifier = Modifier.align(Alignment.CenterVertically))
+                    if (library.tracks != null) TextButton(onClick = onRefreshTrial) { Text("刷新") }
+                }
+            }
             Button(
                 onClick = onLocalAudio,
                 Modifier.fillMaxWidth().padding(top = Dimens.SpaceTiny, bottom = Dimens.SpaceSmall),
@@ -1823,13 +1940,13 @@ private fun TracksContent(
     }
 }
 
-private fun LazyListScope.trackList(
+internal fun LazyListScope.trackList(
     tracks: List<Track>,
     currentTrackId: String?,
     isPlaying: Boolean,
     coverFor: (Track) -> JellyfinRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
-    onAddToQueue: (Track) -> Unit,
+    onAddToQueue: ((Track) -> Unit)? = null,
     leadingNumbers: Boolean = false,
     keyPrefix: String = ""
 ) {
@@ -1838,7 +1955,7 @@ private fun LazyListScope.trackList(
             track = track,
             cover = coverFor(track),
             onClick = { onPlayTrack(tracks, track.id) },
-            onAddToQueue = { onAddToQueue(track) },
+            onAddToQueue = onAddToQueue?.let { add -> { add(track) } },
             showDivider = index != tracks.lastIndex,
             isCurrent = currentTrackId == track.id,
             isPlaying = isPlaying,
@@ -3349,20 +3466,19 @@ private fun PlaylistsContent(
  * 各的（ADR-0006），这里不做聚合。
  */
 private fun searchActions(
-    viewModel: JellyfinViewModel,
+    onLibraryQuery: (String) -> Unit,
     qqViewModel: QQDownloadViewModel,
-    query: String,
+    onRetryLibrary: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     onOpenAlbum: (Album) -> Unit,
     onOpenPlaylist: (Playlist) -> Unit
 ): SearchActions = SearchActions(
     onQueryChange = { value ->
-        viewModel.updateSearchQuery(value)
+        onLibraryQuery(value)
         qqViewModel.updateSearchQuery(value)
     },
-    // 重试 = 拿当前关键词再问一次曲库；重搜同一串不会命中「空串即清」那条短路。
-    onRetryLibrary = { viewModel.updateSearchQuery(query) },
+    onRetryLibrary = onRetryLibrary,
     onRetryQqSearch = qqViewModel::retrySearch,
     onRetryCredential = qqViewModel::retryCredential,
     onPlayTrack = onPlayTrack,
@@ -3412,7 +3528,9 @@ private fun SearchContent(
             onValueChange = actions.onQueryChange,
             modifier = Modifier.fillMaxWidth().padding(top = Dimens.SpaceSmall),
             shape = RoundedCornerShape(Dimens.CornerLarge),
-            placeholder = { Text("搜索歌曲、专辑、播放列表，也能搜 QQ 音乐") },
+            placeholder = {
+                Text(if (state.isCompanionTrial) "搜索电脑曲库歌曲或 QQ 音乐" else "搜索歌曲、专辑、播放列表，也能搜 QQ 音乐")
+            },
             leadingIcon = { Icon(Icons.Filled.Search, contentDescription = "搜索图标") },
             trailingIcon = if (state.query.isNotEmpty()) {
                 {
@@ -3474,6 +3592,9 @@ private fun SearchContent(
                         contentPadding = PaddingValues(bottom = Dimens.BottomContentInset),
                         verticalArrangement = Arrangement.spacedBy(Dimens.SpaceTiny)
                     ) {
+                        view.libraryError?.let { message ->
+                            item { ErrorState(message, onRetry = actions.onRetryLibrary) }
+                        }
                         val library = view.library
                         if (library != null) {
                             if (library.tracks.isNotEmpty()) {
@@ -3657,6 +3778,7 @@ private fun SettingsContent(
     playbackEvents: SharedFlow<PlaybackEvent>,
     onOpenCachedCopies: () -> Unit,
     onOpenDownloadService: () -> Unit,
+    onOpenCompanionLibrary: () -> Unit,
     themePreferences: ThemePreferences,
     seedSource: ThemeSeedSource,
     modifier: Modifier = Modifier
@@ -3863,6 +3985,10 @@ private fun SettingsContent(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+        SurfaceCard(onClick = onOpenCompanionLibrary) {
+            Text("电脑曲库（试用）", style = MaterialTheme.typography.titleMedium)
+            Text("不用 Jellyfin，直接播放电脑上的歌", style = MaterialTheme.typography.labelSmall)
         }
         // 回收站：删除的歌都先挪到这里（E:\file\Te_Music_deleted），能恢复、能真清空。
         SectionHeader("存储", SectionHeaderStyle.Section)

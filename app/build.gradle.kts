@@ -96,6 +96,8 @@ dependencies {
     // 本地音频缓存（离线能听）：SimpleCache 在 datasource，索引数据库在 database。
     // 前者此前只是 exoplayer 的传递依赖，后者根本没进来——两个都要显式声明才稳。
     implementation("androidx.media3:media3-datasource:1.5.1")
+    // 电脑曲库的访问密钥只发往配对地址，音频请求必须能完全关闭重定向。
+    implementation("androidx.media3:media3-datasource-okhttp:1.5.1")
     implementation("androidx.media3:media3-database:1.5.1")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("io.ktor:ktor-client-android:3.0.3")
@@ -110,6 +112,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("io.ktor:ktor-client-mock:3.0.3")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

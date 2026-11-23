@@ -1,0 +1,226 @@
+package com.example.pulsar.data.companion
+
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.MutablePreferences
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import com.example.pulsar.domain.model.Track
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okio.ByteString.Companion.encodeUtf8
+import java.io.IOException
+import java.net.URI
+
+/** 只管理电脑曲库的配对；不读写 Jellyfin 会话或下载数据。 */
+internal class CompanionLibraryConnection(
+    private val client: HttpClient,
+    private val store: CompanionPairingStore,
+) {
+    private val mutex = Mutex()
+
+    // 播放数据源在后台线程打开；地址和密钥作为一个快照读取，换配对不会串用。
+    @Volatile
+    private var current: CompanionPairing? = null
+
+    /** 保存过的非敏感服务地址。暂时连不上也能独立发起 QQ 搜索，不用等重新配对。 */
+    var serviceUrl: String? = null
+        private set
+
+    fun streamUrl(mediaId: String): String? = current?.streamUrl(mediaId)
+
+    fun playbackAuthorization(url: HttpUrl): String? = current?.let { pairing ->
+        if (pairing.ownsStream(url)) pairing.authorization else null
+    }
+
+    suspend fun pair(address: String, key: String): Result<List<Track>> = mutex.withLock {
+        val pairing = CompanionPairing.parse(address, key)
+        if (pairing == null) return@withLock Result.failure(CompanionLibraryError.InvalidPairing)
+        val tracks = fetchTracks(pairing)
+        if (tracks.isSuccess) {
+            try {
+                store.save(pairing)
+                current = pairing
+                serviceUrl = pairing.serviceUrl
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: IOException) {
+                return@withLock Result.failure(CompanionLibraryError.Storage)
+            }
+        }
+        tracks
+    }
+
+    /** null = 尚未配对；空列表 = 已配对，曲库确实没有歌。 */
+    suspend fun refresh(): Result<List<Track>?> = mutex.withLock {
+        val pairing = try {
+            store.load()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: IOException) {
+            return@withLock Result.failure(CompanionLibraryError.Storage)
+        }
+        serviceUrl = pairing?.serviceUrl
+        if (pairing == null) return@withLock Result.success(null)
+        fetchTracks(pairing).also { if (it.isSuccess) current = pairing }
+    }
+
+    private suspend fun fetchTracks(pairing: CompanionPairing): Result<List<Track>> = try {
+        val response = client.get(pairing.tracksUrl()) {
+            header(HttpHeaders.Authorization, pairing.authorization)
+        }
+        when (response.status) {
+            HttpStatusCode.OK -> {
+                val tracks = json.decodeFromString<CompanionTracksResponse>(response.bodyAsText()).tracks
+                require(tracks.all { trackIdPattern.matches(it.id) } && tracks.distinctBy { it.id }.size == tracks.size)
+                Result.success(tracks.map { Track(pairing.mediaId(it.id), it.title, it.artist, it.album, null, null) })
+            }
+            HttpStatusCode.Unauthorized -> Result.failure(CompanionLibraryError.Unauthorized)
+            HttpStatusCode.ServiceUnavailable -> Result.failure(CompanionLibraryError.LibraryNotReady)
+            HttpStatusCode.InternalServerError -> Result.failure(CompanionLibraryError.KeyUnavailable)
+            else -> Result.failure(CompanionLibraryError.Unavailable)
+        }
+    } catch (error: CancellationException) {
+        throw error
+    } catch (_: IOException) {
+        Result.failure(CompanionLibraryError.Network)
+    } catch (_: Exception) {
+        Result.failure(CompanionLibraryError.Unavailable)
+    }
+
+    private companion object {
+        val json = Json { ignoreUnknownKeys = true }
+    }
+}
+
+internal sealed class CompanionLibraryError(message: String) : Exception(message) {
+    data object InvalidPairing : CompanionLibraryError("请填写局域网内的电脑 IP 和访问密钥")
+    data object Unauthorized : CompanionLibraryError("访问密钥不正确，请重新配对")
+    data object LibraryNotReady : CompanionLibraryError(
+        "电脑曲库还没准备好，请稍后重试；一直不行请检查电脑上的音乐目录"
+    )
+    data object KeyUnavailable : CompanionLibraryError("电脑服务无法读取访问密钥，请检查电脑端服务提示")
+    data object Network : CompanionLibraryError("连不上电脑，请确认两台设备在同一网络、PC 服务已启动")
+    data object Storage : CompanionLibraryError("无法读取或保存配对，请检查手机存储空间后重试")
+    data object Unavailable : CompanionLibraryError("暂时无法读取电脑曲库，请确认已更新 PC 服务")
+}
+
+@Serializable
+private data class CompanionTracksResponse(val tracks: List<CompanionTrack>)
+
+@Serializable
+private data class CompanionTrack(val id: String, val title: String, val artist: String, val album: String)
+
+private const val TRACKS_PATH = "/api/library/tracks"
+private const val MEDIA_ID_PREFIX = "pc:"
+private const val DEFAULT_COMPANION_PORT = 8900
+private val trackIdPattern = Regex("[0-9a-f]{64}")
+private val audioPathPattern = Regex("$TRACKS_PATH/[0-9a-f]{64}/audio")
+private val accessKeyPattern = Regex("[A-Za-z0-9_-]+")
+
+internal fun isCompanionMediaId(id: String): Boolean = id.startsWith(MEDIA_ID_PREFIX)
+
+/** 电脑曲目的 ID 带着服务归属；其他曲库仍用原来的 ID。 */
+internal fun playbackLibraryIdentity(mediaId: String): String = if (isCompanionMediaId(mediaId)) {
+    mediaId.substringBeforeLast(':')
+} else {
+    if (':' in mediaId) "local" else "jellyfin"
+}
+
+internal fun isCompanionStreamUrl(url: String): Boolean =
+    url.toHttpUrlOrNull()?.let { audioPathPattern.matches(it.encodedPath) } == true
+
+internal class CompanionPairing private constructor(
+    private val origin: HttpUrl,
+    private val address: String,
+    private val accessKey: String,
+) {
+    val authorization get() = "Bearer $accessKey"
+    val serviceUrl get() = origin.toString().removeSuffix("/")
+    // 服务端 ID 来自相对路径，两台电脑可以相同；本机播放身份必须包含服务归属。
+    private val mediaIdPrefix = "$MEDIA_ID_PREFIX${serviceUrl.encodeUtf8().sha256().hex()}:"
+
+    fun mediaId(trackId: String): String = "$mediaIdPrefix$trackId"
+
+    fun saveInto(edit: MutablePreferences) {
+        edit[companionAddressKey] = address
+        edit[companionAccessKey] = accessKey
+    }
+
+    fun tracksUrl(): String = origin.newBuilder().encodedPath(TRACKS_PATH).build().toString()
+
+    fun streamUrl(mediaId: String): String? {
+        if (!mediaId.startsWith(mediaIdPrefix)) return null
+        val id = mediaId.removePrefix(mediaIdPrefix)
+        return if (trackIdPattern.matches(id)) {
+            origin.newBuilder().encodedPath("$TRACKS_PATH/$id/audio").build().toString()
+        } else null
+    }
+
+    fun ownsStream(url: HttpUrl): Boolean =
+        origin.scheme == url.scheme && origin.host == url.host && origin.port == url.port &&
+            url.encodedUsername.isEmpty() && url.encodedPassword.isEmpty() &&
+            url.encodedQuery == null && url.fragment == null && audioPathPattern.matches(url.encodedPath)
+
+    // 普通类不输出字段，防止因日志或断言意外把访问密钥写出去。
+    companion object {
+        fun parse(address: String, key: String): CompanionPairing? {
+            val trimmed = address.trim()
+            val accessKey = key.trim()
+            if (trimmed.isEmpty() || !accessKeyPattern.matches(accessKey)) return null
+            val value = if ("://" in trimmed) trimmed else "http://$trimmed"
+            val uri = runCatching { URI(value) }.getOrNull() ?: return null
+            val parsed = value.toHttpUrlOrNull() ?: return null
+            if (uri.host == null || uri.rawUserInfo != null || !isLanHost(parsed.host) ||
+                (uri.rawPath != "" && uri.rawPath != "/") || uri.rawQuery != null || uri.rawFragment != null ||
+                (uri.port != -1 && uri.port !in 1..65535)
+            ) return null
+            val port = if (uri.port == -1) DEFAULT_COMPANION_PORT else uri.port
+            // URL 格式化会省掉 80/443；原输入落盘，恢复时才能区分「省略」与「显式填写」。
+            return CompanionPairing(parsed.newBuilder().port(port).build(), trimmed, accessKey)
+        }
+
+        private fun isLanHost(host: String): Boolean {
+            if (host == "localhost" || host == "::1") return true
+            val firstWord = host.substringBefore(':').toIntOrNull(16)
+            if (':' in host && firstWord != null && (firstWord in 0xfc00..0xfdff || firstWord in 0xfe80..0xfebf)) {
+                return true
+            }
+            val octets = host.split('.').map { it.toIntOrNull() ?: return false }
+            return octets.size == 4 && octets.all { it in 0..255 } && when (octets[0]) {
+                10, 127 -> true
+                172 -> octets[1] in 16..31
+                192 -> octets[1] == 168
+                else -> false
+            }
+        }
+    }
+}
+
+internal class CompanionPairingStore(private val dataStore: DataStore<Preferences>) {
+    suspend fun load(): CompanionPairing? {
+        val preferences = dataStore.data.first()
+        val address = preferences[companionAddressKey] ?: return null
+        val key = preferences[companionAccessKey] ?: return null
+        return CompanionPairing.parse(address, key)
+    }
+
+    suspend fun save(pairing: CompanionPairing) {
+        dataStore.edit(pairing::saveInto)
+    }
+}
+
+private val companionAddressKey = stringPreferencesKey("companion_library_address")
+private val companionAccessKey = stringPreferencesKey("companion_library_access_key")

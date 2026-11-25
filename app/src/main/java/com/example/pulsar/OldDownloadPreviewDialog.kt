@@ -24,6 +24,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.download.DownloadLibrary
+import com.example.pulsar.download.LinkedDownloadPreview
 import com.example.pulsar.download.ExistingDownloadApply
 import com.example.pulsar.download.ExistingDownloadView
 import com.example.pulsar.download.OldDownloadItem
@@ -187,6 +189,69 @@ internal fun LazyListScope.existingDownloadGroup(
             if (view.pending.isNotEmpty()) previewGroup("待核对（未应用）", view.pending)
         }
     }
+}
+
+@Composable
+internal fun LinkedDownloadButton(library: DownloadLibrary, onLinked: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    TextButton(onClick = { open = true }) { Text("核对与电脑曲库的关联") }
+    if (open) LinkedDownloadDialog(library, onLinked) { open = false }
+}
+
+@Composable
+private fun LinkedDownloadDialog(library: DownloadLibrary, onLinked: () -> Unit, onClose: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var attempt by remember { mutableIntStateOf(0) }
+    var preview by remember { mutableStateOf<LinkedDownloadPreview?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var applying by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(attempt) {
+        loading = true
+        failed = false
+        preview = library.previewLinkedDownloads()
+        loading = false
+    }
+    val report = preview
+    AlertDialog(
+        onDismissRequest = { if (!applying) onClose() },
+        title = { Text("核对与电脑曲库的关联") },
+        text = {
+            when {
+                loading -> CircularProgressIndicator()
+                report == null -> Text("暂时无法核对。请确认已配对、电脑在线且伴生服务已更新。原副本不动。")
+                else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall)) {
+                    item {
+                        Text("只核对已确认加入「已有下载」的副本。确认后可从电脑曲库直接播放字节完全相同的旧副本，不重下、不搬文件。")
+                        Text("可关联 ${report.matches.size} 首；未匹配 ${report.unmatched} 首仍留在「已有下载」。")
+                        if (report.matches.isEmpty()) Text("没有可确认的关联。若还没加入已有下载，请先预览旧下载。")
+                        if (failed) Text("未保存：核对结果已变化或暂不可用。请重新核对；原副本不动。")
+                    }
+                    itemsIndexed(report.matches) { _, match -> Text(match.track.title) }
+                }
+            }
+        },
+        confirmButton = {
+            if (!loading && report != null && report.matches.isNotEmpty()) {
+                TextButton(enabled = !applying && !failed, onClick = {
+                    applying = true
+                    scope.launch {
+                        if (library.confirmLinkedDownloads(report)) {
+                            onLinked()
+                            onClose()
+                        } else {
+                            failed = true
+                        }
+                        applying = false
+                    }
+                }) { Text(if (applying) "正在确认…" else "确认关联") }
+            }
+        },
+        dismissButton = {
+            if (!loading) TextButton(enabled = !applying, onClick = { attempt++ }) { Text("重新核对") }
+            TextButton(enabled = !applying, onClick = onClose) { Text("关闭") }
+        },
+    )
 }
 
 private fun LazyListScope.previewGroup(label: String, entries: List<OldDownloadItem>) {

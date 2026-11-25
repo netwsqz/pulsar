@@ -48,6 +48,7 @@ class DownloadLibrary internal constructor(
     private val scheduler: DownloadScheduler,
     private val scope: CoroutineScope,
     private val existingDownloads: ExistingDownloads? = null,
+    private val linkedDownloads: LinkedDownloads? = null,
 ) {
     private val _state = MutableStateFlow(DownloadSnapshot())
     val state: StateFlow<DownloadSnapshot> = _state.asStateFlow()
@@ -66,6 +67,16 @@ class DownloadLibrary internal constructor(
     internal fun recordExistingPlaybackFailure(mediaId: String) { existingDownloads?.recordPlaybackFailure(mediaId) }
 
     internal fun resetExistingPlaybackFailures() { existingDownloads?.resetPlaybackFailures() }
+
+    internal suspend fun previewLinkedDownloads(): LinkedDownloadPreview? = linkedDownloads?.preview()
+
+    internal suspend fun confirmLinkedDownloads(preview: LinkedDownloadPreview): Boolean = linkedDownloads?.confirm(preview) == true
+
+    internal suspend fun loadLinkedDownloads(scope: String): List<LinkedDownload> = linkedDownloads?.load(scope).orEmpty()
+
+    internal suspend fun checkLinkedCatalog(scope: String, tracks: List<Track>) { linkedDownloads?.checkCatalog(scope, tracks) }
+
+    internal suspend fun linkedPlaybackKey(uri: String): String? = linkedDownloads?.playbackKey(uri)
 
     /** 当前账号作用域。登录 / 切号 / 退出时由 ViewModel 更新，来源是当前会话。 */
     @Volatile

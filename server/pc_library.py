@@ -4,13 +4,13 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from pathlib import Path
 from secrets import compare_digest, token_hex
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from starlette.responses import FileResponse
+from pydantic import BaseModel, StrictStr
+from starlette.responses import FileResponse, JSONResponse
 
 from library_index import LibraryIndex
 
@@ -33,6 +33,10 @@ def _load_access_key(path: Path) -> bytes:
     if not re.fullmatch(rb"[0-9a-f]{64}", key):
         raise ValueError("访问密钥文件格式不正确")
     return key
+
+
+class EvidenceRequest(BaseModel):
+    paths: list[StrictStr]
 
 
 def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
@@ -67,7 +71,13 @@ def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
 
     @router.get("/tracks")
     def tracks() -> dict:
-        return {"tracks": [asdict(track) for track in index.tracks()]}
+        return {"tracks": index.catalog()}
+
+    @router.post("/evidence")
+    def evidence(request: EvidenceRequest) -> JSONResponse:
+        if len(request.paths) > 2000 or any(len(path) > 4096 for path in request.paths):
+            raise HTTPException(413, "本次核对的路径过多或过长")
+        return JSONResponse({"tracks": index.evidence(request.paths)}, headers={"Cache-Control": "private, no-store"})
 
     @router.get("/tracks/{track_id}/audio", response_class=FileResponse)
     def audio(track_id: str) -> FileResponse:

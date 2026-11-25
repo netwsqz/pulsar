@@ -27,7 +27,8 @@ QQ 音乐导入需要 QQ 凭证；若 `E:\music\qqmusic_cred.json` 缺失/失效
 | `/api/jobs` | GET | 任务列表（最新 100 条） |
 | `/api/jobs/{job_id}` | GET | 单任务：`queued/running/done/failed` + `error` + `final_path` |
 | `/api/credential/retry` | POST | 凭证过期后重提（需 QQ 音乐客户端运行中） |
-| `/api/library/tracks` | GET | 访问密钥：`{"tracks":[{"id":"…","title":"…","artist":"…","album":"…"}]}`，不返回文件路径 |
+| `/api/library/tracks` | GET | 访问密钥：曲目清单含 `id`、`title`、`artist`、`album`、`revision`，不返回文件路径 |
+| `/api/library/evidence` | POST | 访问密钥：按 `{"paths":[...]}` 在索引内找候选，返回完整字节大小及 SHA-256；只在核对已有下载时使用 |
 | `/api/library/tracks/{id}/audio` | GET | 访问密钥：读取原文件字节，支持 HTTP Range |
 | `/api/library/delete` | POST | 🔒 `{"paths": [...]}` → `{"deleted": [...], "failed": [{"path", "error"}]}`（挪进回收站） |
 | `/api/library/rename` | POST | 🔒 `{"path", "title"?, "artist"?, "album"?}` → `{"ok", "path"}`（改**内嵌标签**） |
@@ -40,8 +41,9 @@ QQ 音乐导入需要 QQ 凭证；若 `E:\music\qqmusic_cred.json` 缺失/失效
 ## 电脑曲库配对
 
 - 手动启动现有服务后，在电脑上打开 `server/.library_access_key`，在 App 的「电脑曲库」填写 `http://<电脑局域网 IP>:8900` 和文件里的访问密钥。访问密钥自动生成、重启复用，**只在启动日志提示文件位置，不打印它的值**；与文件操作密钥不同。
-- 两条只读接口都需 `Authorization: Bearer <访问密钥>`，**不能把密钥放在 URL**。缺少或填错密钥回 `401`，索引未就绪或根目录不可读回 `503`，曲库确实为空时列表回 `200` 和 `{"tracks":[]}`；若密钥文件无法读取或创建，仅这两条接口回 `500`。请检查服务目录的权限及文件是否完整，服务不会覆盖已有密钥。
+- 三个只读接口都需 `Authorization: Bearer <访问密钥>`，**不能把密钥放在 URL**。缺少或填错密钥回 `401`，索引未就绪或根目录不可读回 `503`，曲库确实为空时列表回 `200` 和 `{"tracks":[]}`；若密钥文件无法读取或创建，仅这些接口回 `500`。请检查服务目录的权限及文件是否完整，服务不会覆盖已有密钥。
 - 曲目 ID 是 64 位小写十六进制；文件路径不变时，重启、重扫或改内嵌标签不会改变 ID。音频按 ID 读取曲库内的原文件，未知或失效 ID 回 `404`，可满足的 Range 回 `206`，超出文件的范围回 `416`。曲库里的联接和符号链接不入索引。
+- 核对旧副本时，电脑只读已索引的音频，手机在本机比对完整副本的大小和 SHA-256。路径及 `revision` 不是内容相同的证据；`revision` 只用来在刷新时撤下已变化的关联。
 - 局域网 HTTP **不加密**。只在可信家庭网络使用，不做端口转发，也不要把服务开放到公网。
 
 ## 文件操作密钥

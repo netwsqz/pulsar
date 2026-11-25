@@ -10,6 +10,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.test.runTest
@@ -131,6 +133,39 @@ class CompanionLibraryConnectionTest {
                 assertEquals(CompanionLibraryError.InvalidPairing, connection.pair(address, key).exceptionOrNull())
             }
             assertEquals(null, connection.refresh().getOrThrow())
+        }
+    }
+
+    @Test
+    fun `只把请求的路径发给已配对电脑 并拒绝与清单无关的证据`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val path = "E:/Music/中文.flac"
+        val revision = "c".repeat(64)
+        var returnedPath = path
+        HttpClient(MockEngine { request ->
+            assertEquals("Bearer $key", request.headers[HttpHeaders.Authorization])
+            when (request.method) {
+                HttpMethod.Get -> respond("""{"tracks":[]}""")
+                HttpMethod.Post -> {
+                    assertEquals("http://192.168.1.8:8900/api/library/evidence", request.url.toString())
+                    assertEquals("""{"paths":["$path"]}""", (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
+                    respond("""{"tracks":[{"path":"$returnedPath","id":"$trackId","title":"新曲目","artist":"歌手",
+                        "album":"专辑","revision":"$revision","size":4,"sha256":"${"d".repeat(64)}"}]}""")
+                }
+                else -> error("请求方法不正确")
+            }
+        }).use { client ->
+            val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+            assertEquals(null, connection.evidence(listOf(path)))
+            connection.pair("192.168.1.8", key).getOrThrow()
+            val checked = checkNotNull(connection.evidence(listOf(path)))
+            assertEquals(connection.savedScope(), checked.scope)
+            assertEquals("新曲目", checked.candidates.single().track.title)
+            assertEquals(revision, checked.candidates.single().track.sourceRevision)
+            returnedPath = "E:/Music/另一首.flac"
+            assertEquals(null, connection.evidence(listOf(path)))
         }
     }
 

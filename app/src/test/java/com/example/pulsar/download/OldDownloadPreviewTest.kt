@@ -12,6 +12,9 @@ import com.example.pulsar.DownloadedPlaylist
 import com.example.pulsar.FileLibrarySnapshotRepository
 import com.example.pulsar.LibrarySnapshot
 import com.example.pulsar.SessionStore
+import com.example.pulsar.data.companion.CompanionCopyCandidate
+import com.example.pulsar.data.companion.CompanionDownloadEvidence
+import com.example.pulsar.data.companion.CompanionDownloadEvidenceSource
 import com.example.pulsar.data.jellyfin.JellyfinApiFactory
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.playback.FakePlaybackGate
@@ -20,6 +23,8 @@ import com.example.pulsar.playback.PlaybackIntent
 import com.example.pulsar.playback.PlaybackSession
 import com.example.pulsar.playback.RemoteSnapshot
 import com.example.pulsar.playback.TrackMediaItemFactory
+import com.example.pulsar.readCompleteCopyDigest
+import com.example.pulsar.readCompleteCopyStamp
 import com.example.pulsar.readDownloadCopies
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionManager
@@ -304,6 +309,65 @@ class OldDownloadPreviewTest {
         assertEquals(listOf(track), (downloads.load() as ExistingDownloadView.Ready).playable)
     }
 
+    @Test
+    fun `只确认字节完全相同的候选 断网后仍读原键 未匹配的原副本仍可播`() = runTest {
+        val fixture = Fixture(this)
+        fixture.saveAccount()
+        val ids = listOf("same", "replaced", "moved")
+        val entry = entry("我的专辑", ids)
+        fixture.ledger.replaceAll(listOf(entry))
+        fixture.snapshot.save(LibrarySnapshot(tracks = ids.map { id ->
+            track(id, "同名歌").copy(filePath = "E:/Music/$id.flac")
+        }))
+        val original = fixture.copyAt("$base/Videos/same/stream?static=true")
+        fixture.copyAt("$base/Videos/replaced/stream?static=true")
+        fixture.copyAt("$base/Videos/moved/stream?static=true")
+        val exact = track("pc:source:exact", "同名歌").copy(sourceRevision = "version-1")
+        val different = exact.copy(id = "pc:source:different")
+        var online = true
+        val source = CompanionDownloadEvidenceSource { paths ->
+            check(online) { "离线读取确认结果不能请求电脑" }
+            assertEquals(ids.map { "E:/Music/$it.flac" }, paths)
+            CompanionDownloadEvidence("paired-computer", listOf(
+                CompanionCopyCandidate(paths[0], exact, 4, "9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a"),
+                CompanionCopyCandidate(paths[1], different, 4, "0".repeat(64)),
+            ))
+        }
+        val downloads = fixture.existingDownloads()
+        downloads.confirm(fixture.previewer.preview() as OldDownloadPreview.Report)
+        val links = fixture.links(source)
+        val preview = checkNotNull(links.preview())
+        assertEquals(listOf(exact), preview.matches.map { it.track })
+        assertEquals(2, preview.unmatched)
+        assertEquals(emptyList<LinkedDownload>(), links.load("paired-computer"))
+        assertEquals(true, links.confirm(preview))
+
+        online = false
+        val reopened = fixture.links(source)
+        val linked = reopened.load("paired-computer").single()
+        assertEquals(exact, linked.track)
+        assertEquals("$base/Videos/same/stream?static=true", reopened.playbackKey(linked.playbackUri))
+        assertEquals(emptyList<LinkedDownload>(), reopened.load("另一台电脑"))
+        fixture.companionScope = "另一台电脑"
+        assertEquals(null, reopened.playbackKey(linked.playbackUri))
+        fixture.companionScope = "paired-computer"
+        assertEquals(ids, (downloads.load() as ExistingDownloadView.Ready).playable.map { it.item.trackId })
+        assertEquals(listOf(entry), fixture.ledger.load().entries)
+
+        reopened.checkCatalog("paired-computer", listOf(exact.copy(sourceRevision = "version-2")))
+        assertEquals(emptyList<LinkedDownload>(), reopened.load("paired-computer"))
+        assertEquals(null, reopened.playbackKey(linked.playbackUri))
+        assertEquals("$base/Videos/same/stream?static=true", downloads.playbackKey(linked.originalId))
+        online = true
+        assertEquals(true, links.confirm(preview))
+        online = false
+
+        original.writeBytes(byteArrayOf(1, 2))
+        assertEquals(null, reopened.playbackKey(linked.playbackUri))
+        fixture.saveAccount("其他账号")
+        assertEquals(emptyList<LinkedDownload>(), reopened.load("paired-computer"))
+    }
+
     private inner class Fixture(scope: TestScope) {
         val prefsFile = File(temporary.root, "pulsar.preferences_pb")
         val preferences = PreferenceDataStoreFactory.create(scope = scope.backgroundScope) { prefsFile }
@@ -328,6 +392,14 @@ class OldDownloadPreviewTest {
         )
 
         fun existingDownloads() = ExistingDownloads(previewer, DataStoreExistingDownloadStore(preferences))
+
+        var companionScope = "paired-computer"
+
+        fun links(source: CompanionDownloadEvidenceSource) = LinkedDownloads(
+            previewer, existingDownloads(), snapshot, DataStoreLinkedDownloadStore(preferences), source,
+            { companionScope }, { key -> cache().readCompleteCopyDigest(key) },
+            { key -> cache().readCompleteCopyStamp(key) },
+        )
 
         suspend fun saveAccount(userId: String = user) = store.save(Session(server, userId, "旧账号", "test-only-token"))
         suspend fun expireAccount() = store.clearExpired()

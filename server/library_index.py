@@ -23,7 +23,7 @@ import stat
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable, Optional
@@ -192,6 +192,23 @@ def _audio_stat(path: Path) -> os.stat_result | None:
     return info if info is not None and stat.S_ISREG(info.st_mode) else None
 
 
+def _normalized_path(raw: str) -> str | None:
+    # 用户给的路径只作为索引查找键，绝不直接用来打开文件。
+    if not raw or "\x00" in raw or not Path(raw).is_absolute() or ".." in Path(raw).parts:
+        return None
+    return os.path.normcase(os.path.normpath(raw))
+
+
+def _file_stamp(info: os.stat_result) -> tuple[int, ...]:
+    # Windows 的 lstat 与 fstat 对 ctime 可能给出不同含义；比较双方共有的字段。
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def _revision(info: os.stat_result) -> str:
+    # 仅用来发现文件变化，不能代替首次核对时的整份字节摘要。
+    return sha256(repr((*_file_stamp(info), info.st_ctime_ns)).encode("ascii")).hexdigest()
+
+
 @dataclass(frozen=True)
 class LibraryTrack:
     id: str
@@ -218,6 +235,8 @@ class LibraryIndex:
         self._paths_by_id: dict[str, Path] = {}
         self._stamps: dict[Path, tuple[int, int]] = {}
         self._by_title: dict[str, list[set[str]]] = {}
+        # 手机给的旧文件路径只用来找候选，不证明内容一致。
+        self._by_normcase: dict[str, Path] = {}
         self._ready = False
         self._readable_root = False
 
@@ -248,6 +267,16 @@ class LibraryIndex:
             tracks = list(self._tracks.values())
         return sorted(tracks, key=lambda track: (track.title.casefold(), track.artist.casefold()))
 
+    def catalog(self) -> list[dict]:
+        """附带当前文件版本；稳定曲目 ID 不变，替换文件不沿用已确认的副本。"""
+        result = []
+        for track in self.tracks():
+            file = self.audio_file(track.id)
+            if file is not None:
+                _, info = file
+                result.append({**asdict(track), "revision": _revision(info)})
+        return result
+
     def audio_file(self, track_id: str) -> tuple[Path, os.stat_result] | None:
         """只按索引 ID 查找音频；即使文件在扫描后被替换，也重新检查曲库边界。"""
         with self._lock:
@@ -256,6 +285,57 @@ class LibraryIndex:
             return None
         info = self._checked_audio_stat(path)
         return (path, info) if info is not None else None
+
+    def evidence(self, paths: list[str]) -> list[dict]:
+        """按手机给的旧文件路径找索引里的同一份文件，返回大小与 SHA-256。
+
+        **只读**：不打开索引外的文件，不写入、不移动曲库。路径只用来找候选——
+        路径相同不代表字节相同（文件可能被替换），所以手机必须再用摘要比对。
+        路径写法不同（大小写、分隔符）按系统规则归一化；相对路径一律不认。
+        """
+        results: list[dict] = []
+        for raw in dict.fromkeys(paths):
+            normalized = _normalized_path(raw)
+            if normalized is None:
+                continue
+            with self._lock:
+                path = self._by_normcase.get(normalized)
+                track = self._tracks.get(path) if path is not None else None
+            if path is None or track is None:
+                continue
+            info = self._checked_audio_stat(path)
+            if info is None:
+                continue
+            digest = self._digest(path, info) if info.st_size > 0 else None
+            if digest is None:
+                continue
+            results.append({
+                **asdict(track), "path": raw, "size": info.st_size,
+                "sha256": digest, "revision": _revision(info),
+            })
+        return results
+
+    def _digest(self, path: Path, info: os.stat_result) -> str | None:
+        """整首文件的内容摘要。读失败只影响这一条，不抛给接口。"""
+        stamp = _file_stamp(info)
+        try:
+            with path.open("rb") as file:
+                if _file_stamp(os.fstat(file.fileno())) != stamp:
+                    return None
+                digest = sha256()
+                remaining = info.st_size
+                while remaining:
+                    chunk = file.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        return None
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if file.read(1) or _file_stamp(os.fstat(file.fileno())) != stamp:
+                    return None
+        except OSError:
+            return None
+        latest = self._checked_audio_stat(path)
+        return digest.hexdigest() if latest is not None and _file_stamp(latest) == stamp else None
 
     def refresh(self) -> None:
         """重扫曲库。没变的文件不重读标签——读标签是这里唯一的重活。
@@ -375,6 +455,9 @@ class LibraryIndex:
             if key:
                 by_title.setdefault(key, []).append(_artist_segments(track.artist))
         self._paths_by_id = {track.id: path for path, track in self._tracks.items()}
+        self._by_normcase = {
+            os.path.normcase(os.path.abspath(path)): path for path in self._tracks
+        }
         self._by_title = by_title
 
 

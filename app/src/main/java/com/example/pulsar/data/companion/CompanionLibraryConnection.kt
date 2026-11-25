@@ -9,9 +9,13 @@ import com.example.pulsar.domain.model.Track
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -28,7 +32,7 @@ import java.net.URI
 internal class CompanionLibraryConnection(
     private val client: HttpClient,
     private val store: CompanionPairingStore,
-) {
+) : CompanionDownloadEvidenceSource {
     private val mutex = Mutex()
 
     // 播放数据源在后台线程打开；地址和密钥作为一个快照读取，换配对不会串用。
@@ -40,6 +44,40 @@ internal class CompanionLibraryConnection(
         private set
 
     fun streamUrl(mediaId: String): String? = current?.streamUrl(mediaId)
+
+    /** 冷启动读取副本归属不发网络请求；服务地址相同但配对密钥变了也不是同一份确认。 */
+    suspend fun savedScope(): String? = store.load()?.scope
+
+    suspend fun savedScopeOrNull(): String? = try {
+        savedScope()
+    } catch (_: IOException) {
+        null
+    }
+
+    override suspend fun evidence(paths: List<String>): CompanionDownloadEvidence? {
+        return try {
+            val pairing = store.load() ?: return null
+            val candidates = paths.distinct().chunked(16).flatMap { batch ->
+                val response = client.post(pairing.evidenceUrl()) {
+                    header(HttpHeaders.Authorization, pairing.authorization)
+                    contentType(ContentType.Application.Json)
+                    setBody(json.encodeToString(EvidenceRequest.serializer(), EvidenceRequest(batch)))
+                }
+                if (response.status != HttpStatusCode.OK) return null
+                val rows = json.decodeFromString<EvidenceResponse>(response.bodyAsText()).tracks
+                require(rows.map { it.path }.distinct().size == rows.size && rows.all {
+                    it.path in batch && it.size > 0 && trackIdPattern.matches(it.sha256) &&
+                        trackIdPattern.matches(it.id) && trackIdPattern.matches(it.revision)
+                })
+                rows.map { CompanionCopyCandidate(it.path, it.toTrack(pairing), it.size, it.sha256) }
+            }
+            CompanionDownloadEvidence(pairing.scope, candidates).takeIf { savedScope() == pairing.scope }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun playbackAuthorization(url: HttpUrl): String? = current?.let { pairing ->
         if (pairing.ownsStream(url)) pairing.authorization else null
@@ -85,7 +123,7 @@ internal class CompanionLibraryConnection(
             HttpStatusCode.OK -> {
                 val tracks = json.decodeFromString<CompanionTracksResponse>(response.bodyAsText()).tracks
                 require(tracks.all { trackIdPattern.matches(it.id) } && tracks.distinctBy { it.id }.size == tracks.size)
-                Result.success(tracks.map { Track(pairing.mediaId(it.id), it.title, it.artist, it.album, null, null) })
+                Result.success(tracks.map { it.toTrack(pairing) })
             }
             HttpStatusCode.Unauthorized -> Result.failure(CompanionLibraryError.Unauthorized)
             HttpStatusCode.ServiceUnavailable -> Result.failure(CompanionLibraryError.LibraryNotReady)
@@ -121,7 +159,33 @@ internal sealed class CompanionLibraryError(message: String) : Exception(message
 private data class CompanionTracksResponse(val tracks: List<CompanionTrack>)
 
 @Serializable
-private data class CompanionTrack(val id: String, val title: String, val artist: String, val album: String)
+private data class CompanionTrack(
+    val id: String, val title: String, val artist: String, val album: String, val revision: String? = null,
+) {
+    fun toTrack(pairing: CompanionPairing) =
+        Track(pairing.mediaId(id), title, artist, album, null, null, sourceRevision = revision)
+}
+
+@Serializable
+private data class EvidenceRequest(val paths: List<String>)
+
+@Serializable
+private data class EvidenceResponse(val tracks: List<CompanionEvidenceRow>)
+
+@Serializable
+private data class CompanionEvidenceRow(
+    val path: String, val id: String, val title: String, val artist: String, val album: String,
+    val revision: String, val size: Long, val sha256: String,
+) {
+    fun toTrack(pairing: CompanionPairing) = CompanionTrack(id, title, artist, album, revision).toTrack(pairing)
+}
+
+internal fun interface CompanionDownloadEvidenceSource {
+    suspend fun evidence(paths: List<String>): CompanionDownloadEvidence?
+}
+
+internal data class CompanionDownloadEvidence(val scope: String, val candidates: List<CompanionCopyCandidate>)
+internal data class CompanionCopyCandidate(val path: String, val track: Track, val size: Long, val sha256: String)
 
 private const val TRACKS_PATH = "/api/library/tracks"
 private const val MEDIA_ID_PREFIX = "pc:"
@@ -144,6 +208,7 @@ internal class CompanionPairing private constructor(
     val serviceUrl get() = origin.toString().removeSuffix("/")
     // 服务端 ID 来自相对路径，两台电脑可以相同；本机播放身份必须包含服务归属。
     private val mediaIdPrefix = "$MEDIA_ID_PREFIX${serviceUrl.encodeUtf8().sha256().hex()}:"
+    val scope: String = serviceUrl.encodeUtf8().hmacSha256(accessKey.encodeUtf8()).hex()
 
     fun mediaId(trackId: String): String = "$mediaIdPrefix$trackId"
 
@@ -153,6 +218,7 @@ internal class CompanionPairing private constructor(
     }
 
     fun tracksUrl(): String = origin.newBuilder().encodedPath(TRACKS_PATH).build().toString()
+    fun evidenceUrl(): String = origin.newBuilder().encodedPath("/api/library/evidence").build().toString()
 
     fun streamUrl(mediaId: String): String? {
         if (!mediaId.startsWith(mediaIdPrefix)) return null

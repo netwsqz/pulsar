@@ -21,5 +21,7 @@ data class Track(
      * 删歌/改名走 PC 伴生服务（ADR-0001），靠它定位文件；null = 拿不到路径，
      * 文件操作菜单对这首歌不可用。
      */
-    val filePath: String? = null
+    val filePath: String? = null,
+    /** 电脑文件版本。只用于撤下过期的副本关联，不改变曲目 ID。 */
+    val sourceRevision: String? = null,
 )

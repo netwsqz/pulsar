@@ -14,6 +14,7 @@ import com.example.pulsar.download.DownloadLibrary
 import com.example.pulsar.download.buildDownloadTarget
 import com.example.pulsar.download.downloadDeletedMessage
 import com.example.pulsar.download.isPlayingDownloadCopy
+import com.example.pulsar.download.linkedOriginalId
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.SearchResults
@@ -182,6 +183,7 @@ class JellyfinViewModel(
     internal val playbackTracks: StateFlow<Map<String, Track>> = _playbackTracks.asStateFlow()
 
     private val _currentTrack = MutableStateFlow<Track?>(null)
+    private var playingLinkedOriginal: String? = null
     val currentTrack: StateFlow<Track?> = _currentTrack.asStateFlow()
 
     // 歌词：随 currentTrack 变化自动拉取（会话就绪才有值），带代次防护防过期协程写入。
@@ -489,6 +491,7 @@ class JellyfinViewModel(
     }
 
     fun onMediaItemTransition(mediaItem: MediaItem?) {
+        playingLinkedOriginal = mediaItem?.localConfiguration?.uri?.toString()?.let(::linkedOriginalId)
         _currentTrack.value = mediaItem?.let { item ->
             item.mediaId?.let { _playbackTracks.value[it] } ?: item.toRecoveredTrack()
         }
@@ -1046,8 +1049,10 @@ class JellyfinViewModel(
     // 绝不冒泡成播放失败或界面报错。
 
     /** 下载键 = 播放流 URL（token 只走 header 不进 URL，所以键里没有凭据）。 */
+    private fun playingCopyId(): String? = playingLinkedOriginal ?: _currentTrack.value?.id
+
     internal fun isCurrentCopy(track: Track): Boolean =
-        isPlayingDownloadCopy(_currentTrack.value?.id, track.id, cacheKey(track).orEmpty())
+        isPlayingDownloadCopy(playingCopyId(), track.id, cacheKey(track).orEmpty())
 
     private fun cacheKey(track: Track): String? = streamUrl(track)
 
@@ -1292,7 +1297,7 @@ class JellyfinViewModel(
         val downloads = mediaDownloads ?: return
         val key = cacheKey(track) ?: return
         viewModelScope.launch(dispatcher) {
-            if (!isPlayingDownloadCopy(_currentTrack.value?.id, track.id, key)) downloads.remove(key)
+            if (!isPlayingDownloadCopy(playingCopyId(), track.id, key)) downloads.remove(key)
         }
     }
 
@@ -1331,7 +1336,7 @@ class JellyfinViewModel(
         viewModelScope.launch(dispatcher) {
             // module 内部会再挡一道「正在播的不删」，并顺手把名单里的这一首去掉；
             // 统计也在删除后由 module 刷新。
-            library.deleteTrack(track, key, _currentTrack.value?.id)
+            library.deleteTrack(track, key, playingCopyId())
             refreshCachedAlbums(tracks)
         }
     }
@@ -1371,7 +1376,7 @@ class JellyfinViewModel(
                     streamUrl = ::streamUrl
                 )
                 if (target != null) {
-                    val result = library.delete(target, _currentTrack.value?.id)
+                    val result = library.delete(target, playingCopyId())
                     // 界面状态只在会话没换过时写：会话已经换掉的话，这些结果会飘在登录页上。
                     if (generation == loginGeneration) {
                         refreshCachedAlbums(tracks)

@@ -19,6 +19,8 @@ import com.example.pulsar.data.qqdownload.QQDownloadDataSource
 import com.example.pulsar.data.qqdownload.QQDownloadPreferences
 import com.example.pulsar.data.qqdownload.QQDownloadSettings
 import com.example.pulsar.download.DataStoreExistingDownloadStore
+import com.example.pulsar.download.DataStoreLinkedDownloadStore
+import com.example.pulsar.download.LinkedDownloads
 import com.example.pulsar.download.DownloadLibrary
 import com.example.pulsar.download.ExistingDownloads
 import com.example.pulsar.download.OldDownloadPreviewer
@@ -234,13 +236,22 @@ class PulsarApplication : Application() {
      * **进程级单例**——View 重建不能重来一份，账号作用域与快照都挂在它身上。
      */
     val downloadLibrary: DownloadLibrary by lazy {
+        val existing = ExistingDownloads(oldDownloadPreviewer, DataStoreExistingDownloadStore(pulsarPreferencesDataStore))
         DownloadLibrary(
             downloads = mediaDownloads(),
             ledger = downloadLedgerStore(),
             scheduler = downloadScheduler,
             scope = downloadScope,
-            existingDownloads = ExistingDownloads(
-                oldDownloadPreviewer, DataStoreExistingDownloadStore(pulsarPreferencesDataStore),
+            existingDownloads = existing,
+            linkedDownloads = LinkedDownloads(
+                previewer = oldDownloadPreviewer,
+                existing = existing,
+                snapshot = librarySnapshotRepository(),
+                store = DataStoreLinkedDownloadStore(pulsarPreferencesDataStore),
+                source = companionLibrary,
+                savedScope = companionLibrary::savedScope,
+                digest = { mediaCacheStore.readCompleteCopyDigest(it) },
+                copyStamp = { mediaCacheStore.readCompleteCopyStamp(it) },
             ),
         )
     }

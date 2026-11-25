@@ -38,6 +38,8 @@ import com.example.pulsar.data.companion.companionPlaybackHttpClient
 import com.example.pulsar.download.existingDownloadBelongsTo
 import com.example.pulsar.download.isExistingDownloadMediaId
 import com.example.pulsar.download.isExistingDownloadPlaybackUri
+import com.example.pulsar.download.isLinkedDownloadPlaybackUri
+import com.example.pulsar.download.linkedOriginalId
 import com.example.pulsar.playback.DeviceVolumeSource
 import com.example.pulsar.playback.LoudnessGainAudioSink
 import com.example.pulsar.playback.LoudnessGainProvider
@@ -179,7 +181,9 @@ class PlaybackService : MediaSessionService() {
             // 外部控制器仍能操作队列和进度，但不能要求读取应用私有的旧副本。
             if (controller.uid != applicationInfo.uid && mediaItems.any { item ->
                     isExistingDownloadMediaId(item.mediaId) ||
-                        item.localConfiguration?.uri?.toString()?.let(::isExistingDownloadPlaybackUri) == true
+                        item.localConfiguration?.uri?.toString()?.let { uri ->
+                            isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri)
+                        } == true
                 }) {
                 return com.google.common.util.concurrent.Futures.immediateFailedFuture(SecurityException())
             }
@@ -330,8 +334,10 @@ class PlaybackService : MediaSessionService() {
                 .collect { account ->
                     val activePlayer = player ?: return@collect
                     if ((0 until activePlayer.mediaItemCount).any { index ->
-                            val id = activePlayer.getMediaItemAt(index).mediaId
-                            isExistingDownloadMediaId(id) && !existingDownloadBelongsTo(id, account)
+                            val item = activePlayer.getMediaItemAt(index)
+                            val original = item.localConfiguration?.uri?.toString()?.let(::linkedOriginalId)
+                                ?: item.mediaId.takeIf(::isExistingDownloadMediaId)
+                            original != null && !existingDownloadBelongsTo(original, account)
                         }) {
                         // 账号切换或清除后立即撤回旧副本的队列，包括已预读的内容。
                         activePlayer.clearMediaItems()
@@ -619,9 +625,11 @@ class PlaybackService : MediaSessionService() {
         val app = application as PulsarApplication
         val jellyfin = AuthHttpDataSourceFactory { app.sessionManager.authorizationHeader }
         val companion = OkHttpDataSource.Factory(companionPlaybackHttpClient(app.companionLibrary))
-        return playbackDataSourceFactory(app.mediaCacheStore, jellyfin, companion) { mediaId ->
-            app.downloadLibrary.existingPlaybackKey(mediaId)
-        }
+        return playbackDataSourceFactory(
+            app.mediaCacheStore, jellyfin, companion,
+            resolveLinkedKey = app.downloadLibrary::linkedPlaybackKey,
+            resolveExistingKey = app.downloadLibrary::existingPlaybackKey,
+        )
     }
 
     private fun capturePlayerState(oldPlayer: ExoPlayer): PlayerRebuildState {

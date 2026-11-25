@@ -11,8 +11,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okio.ByteString.Companion.encodeUtf8
+import okio.ByteString.Companion.toByteString
+import java.io.IOException
+import java.security.MessageDigest
 
 /**
  * 手机本地的音频副本（**下载**）。存在的唯一理由是**离线能听**——电脑关机、连不上
@@ -101,6 +106,60 @@ internal suspend fun Cache.readDownloadCopies(acceptsKey: (String) -> Boolean): 
             }
         }
     }
+
+internal data class CompleteCopyDigest(val size: Long, val sha256: String, val stamp: String)
+
+private fun copyStamp(total: Long, spans: Collection<androidx.media3.datasource.cache.CacheSpan>): String? {
+    if (total <= 0 || spans.isEmpty()) return null
+    var position = 0L
+    val parts = buildString {
+        for (span in spans) {
+            val file = span.file ?: return null
+            if (span.position != position || span.length !in 1..(total - position) ||
+                !file.isFile || file.length() != span.length
+            ) return null
+            append("${span.position}:${span.length}:${file.name}:${file.lastModified()}\n")
+            position += span.length
+        }
+    }
+    return parts.encodeUtf8().sha256().hex().takeIf { position == total }
+}
+
+/** 比对的是已核对的原片段；如果用户删后再下，必须重新核对。 */
+internal suspend fun Cache.readCompleteCopyStamp(key: String): String? = withContext(Dispatchers.IO) {
+    copyStamp(ContentMetadata.getContentLength(getContentMetadata(key)), getCachedSpans(key))
+}
+
+/** 按字节位置读取原缓存片段；不打开网络、不写缓存，也不拼出第二份文件。 */
+internal suspend fun Cache.readCompleteCopyDigest(key: String): CompleteCopyDigest? = withContext(Dispatchers.IO) {
+    (this@readCompleteCopyDigest as? SimpleCache)?.checkInitialization()
+    val total = ContentMetadata.getContentLength(getContentMetadata(key))
+    if (total <= 0) return@withContext null
+    val spans = getCachedSpans(key)
+    val stamp = copyStamp(total, spans) ?: return@withContext null
+    val digest = MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(64 * 1024)
+    try {
+        for (span in spans) {
+            val file = span.file ?: return@withContext null
+            file.inputStream().use { input ->
+                var remaining = span.length
+                while (remaining > 0) {
+                    ensureActive()
+                    val count = input.read(buffer, 0, minOf(remaining, buffer.size.toLong()).toInt())
+                    if (count <= 0) return@withContext null
+                    digest.update(buffer, 0, count)
+                    remaining -= count
+                }
+                if (input.read() != -1) return@withContext null
+            }
+        }
+    } catch (_: IOException) {
+        return@withContext null
+    }
+    if (readCompleteCopyStamp(key) != stamp) return@withContext null
+    CompleteCopyDigest(total, digest.digest().toByteString().hex(), stamp)
+}
 
 /**
  * 下载/快照这类「手机本地落盘」操作的公共兜底：挪到 IO 线程、吞掉一切异常只回

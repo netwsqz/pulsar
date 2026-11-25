@@ -1,5 +1,6 @@
 """电脑曲库 HTTP 合同：只用临时曲库和访问密钥，不加载 QQ 音乐导入服务。"""
 
+import hashlib
 import os
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from test_library_files import minimal_flac
 
 class PcLibraryHttpTest(unittest.TestCase):
     TRACKS = "/api/library/tracks"
+    EVIDENCE = "/api/library/evidence"
     KEY = "a" * 64
     AUTH = {"Authorization": f"Bearer {KEY}"}
 
@@ -77,7 +79,8 @@ class PcLibraryHttpTest(unittest.TestCase):
             [(t["title"], t["artist"], t["album"]) for t in tracks],
         )
         for track in tracks:
-            self.assertEqual({"id", "title", "artist", "album"}, set(track))
+            self.assertEqual({"id", "title", "artist", "album", "revision"}, set(track))
+            self.assertRegex(track["revision"], r"^[0-9a-f]{64}$")
             self.assertRegex(track["id"], r"^[0-9a-f]{64}$")
         self.assertEqual(len(tracks), len({track["id"] for track in tracks}))
         for private in (str(self.root), "临时文件夹", ".flac", self.KEY):
@@ -212,6 +215,82 @@ class PcLibraryHttpTest(unittest.TestCase):
             self.assertEqual(404, client.get(url, headers=self.AUTH).status_code)
             self.index.refresh()
             self.assertEqual({"tracks": []}, client.get(self.TRACKS, headers=self.AUTH).json())
+
+
+    def test_evidence_requires_access_key_and_only_reports_indexed_files(self):
+        first = self.make_track("专辑/01 歌曲.flac")
+        second = self.make_track("专辑/02 另一首.flac")
+        second.write_bytes(minimal_flac() + b"extra")
+        outside = self.sandbox / "曲库目录-外部" / "偷看.flac"
+        outside.parent.mkdir()
+        outside.write_bytes(minimal_flac())
+        payload = {
+            "paths": [str(first), str(second), str(outside), str(self.root / "不存在.flac")],
+        }
+
+        # 索引未就绪时与其它接口一致：密钥先过关，再报 503，不泄露任何内容。
+        with self.client() as client:
+            for headers in ({}, {"Authorization": "Bearer wrong"}):
+                denied = client.post(self.EVIDENCE, json=payload, headers=headers)
+                self.assertEqual(401, denied.status_code)
+                self.assertEqual("Bearer", denied.headers.get("WWW-Authenticate"))
+            self.assertEqual(503, client.post(self.EVIDENCE, json=payload, headers=self.AUTH).status_code)
+
+        self.index.refresh()
+        with self.client() as client:
+            response = client.post(self.EVIDENCE, json=payload, headers=self.AUTH)
+
+        self.assertEqual(200, response.status_code)
+        tracks = response.json()["tracks"]
+        self.assertEqual([str(first), str(second)], [track["path"] for track in tracks])
+        self.assertEqual(
+            [
+                (len(first.read_bytes()), hashlib.sha256(first.read_bytes()).hexdigest()),
+                (len(second.read_bytes()), hashlib.sha256(second.read_bytes()).hexdigest()),
+            ],
+            [(track["size"], track["sha256"]) for track in tracks],
+        )
+        self.assertRegex(tracks[0]["id"], r"^[0-9a-f]{64}$")
+        for private in (self.KEY, "曲库目录-外部", "偷看"):
+            self.assertNotIn(private, response.text)
+
+    def test_evidence_follows_replaced_bytes_and_accepts_windows_path_spelling(self):
+        track = self.make_track("专辑/01 歌曲.flac")
+        self.index.refresh()
+        before = hashlib.sha256(track.read_bytes()).hexdigest()
+        spelled = str(track).upper() if os.name == "nt" else str(track)
+
+        with self.client() as client:
+            before_track = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]
+            first = client.post(self.EVIDENCE, json={"paths": [spelled]}, headers=self.AUTH).json()["tracks"]
+            info = track.stat()
+            track.write_bytes(minimal_flac()[:-1] + b"X")  # 同路径、同长度、同名，字节不同
+            os.utime(track, ns=(info.st_atime_ns, info.st_mtime_ns))
+            same_stamp = client.post(self.EVIDENCE, json={"paths": [str(track)]}, headers=self.AUTH).json()["tracks"]
+            os.utime(track, (1_800_000_000, 1_800_000_000))
+            after = client.post(self.EVIDENCE, json={"paths": [str(track)]}, headers=self.AUTH).json()["tracks"]
+            after_track = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]
+
+        self.assertEqual(before_track["revision"], first[0]["revision"])
+        self.assertNotEqual(before_track["revision"], after_track["revision"])
+        self.assertEqual(after_track["revision"], after[0]["revision"])
+        self.assertEqual(before_track["id"], after_track["id"])
+        self.assertEqual(before, first[0]["sha256"])
+        self.assertNotEqual(before, same_stamp[0]["sha256"])
+        self.assertEqual(same_stamp[0]["sha256"], after[0]["sha256"])
+        self.assertEqual(hashlib.sha256(track.read_bytes()).hexdigest(), after[0]["sha256"])
+        self.assertEqual(len(track.read_bytes()), after[0]["size"])
+
+    def test_evidence_rejects_oversized_or_malformed_requests(self):
+        self.index.refresh()
+        with self.client() as client:
+            self.assertEqual(
+                422, client.post(self.EVIDENCE, json={"paths": [123]}, headers=self.AUTH).status_code
+            )
+            self.assertEqual(
+                413, client.post(self.EVIDENCE, json={"paths": ["x"] * 2001}, headers=self.AUTH).status_code
+            )
+            self.assertEqual({"tracks": []}, client.post(self.EVIDENCE, json={"paths": []}, headers=self.AUTH).json())
 
 
 if __name__ == "__main__":

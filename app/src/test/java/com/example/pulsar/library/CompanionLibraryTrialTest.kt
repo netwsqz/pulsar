@@ -7,6 +7,7 @@ import com.example.pulsar.data.companion.CompanionLibraryError
 import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.QueueTrack
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.download.LinkedDownload
 import com.example.pulsar.playback.FakePlaybackRemote
 import com.example.pulsar.playback.FakeTrackMediaItemFactory
 import com.example.pulsar.playback.PlaybackIntent
@@ -179,6 +180,54 @@ class CompanionLibraryTrialTest {
             assertTrue(playback.dispatch(PlaybackIntent.Play(listOf(current), current.id)))
             assertEquals(current.id, remote.setQueueCalls.single().items.single().mediaId)
             playback.close()
+        }
+    }
+
+    @Test
+    fun `电脑断开时原歌曲和搜索只显示确认的副本 恢复联网后替换文件不再读旧副本`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val store = CompanionPairingStore(preferences)
+        val otherId = "b".repeat(64)
+        var revision = "c".repeat(64)
+        var online = true
+        HttpClient(MockEngine {
+            if (!online) throw IOException("电脑关机")
+            respond("""{"tracks":[{"id":"$id","title":"同名歌","artist":"歌手","album":"专辑","revision":"$revision"},
+                {"id":"$otherId","title":"同名歌","artist":"歌手","album":"另一张专辑"}]}""")
+        }).use { client ->
+            val old = CompanionLibraryConnection(client, store).pair("192.168.1.8", "test-key").getOrThrow().first()
+            val original = LinkedDownload(old, "existing:account:copy", "stamp")
+            var available = emptyList<LinkedDownload>()
+            val trial = CompanionLibraryTrial(
+                CompanionLibraryConnection(client, store), backgroundScope, StandardTestDispatcher(testScheduler),
+                loadLinked = { available },
+            )
+            online = false
+            trial.enter()
+            assertEquals(CompanionLibraryError.Network, trial.state.first { !it.isLoading }.error)
+            available = listOf(original)
+            trial.reloadLinkedDownloads()
+            val offline = trial.state.first { it.isOffline }
+            assertTrue(offline.isOffline)
+            assertEquals(listOf(old), offline.tracks)
+            trial.updateSearchQuery("同名歌")
+            advanceTimeBy(LIBRARY_SEARCH_DEBOUNCE_MS)
+            runCurrent()
+            val result = trial.state.value.search.results!!.tracks.single()
+            assertEquals(original.playbackUri, trial.streamUrl(result))
+            assertTrue(trial.isPlayable(result))
+
+            online = true
+            revision = "d".repeat(64)
+            trial.retry()
+            val refreshed = trial.state.first { !it.isLoading }
+            assertEquals(false, refreshed.isOffline)
+            assertEquals(2, refreshed.tracks!!.size)
+            val changed = refreshed.tracks.first()
+            assertEquals(old.id, changed.id)
+            assertEquals("http://192.168.1.8:8900/api/library/tracks/$id/audio", trial.streamUrl(changed))
         }
     }
 

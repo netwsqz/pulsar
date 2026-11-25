@@ -10,6 +10,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import com.example.pulsar.data.companion.isCompanionStreamUrl
 import com.example.pulsar.download.existingDownloadIdFromUri
 import com.example.pulsar.download.isExistingDownloadPlaybackUri
+import com.example.pulsar.download.isLinkedDownloadPlaybackUri
 import java.io.IOException
 import kotlinx.coroutines.runBlocking
 
@@ -18,6 +19,7 @@ internal fun playbackDataSourceFactory(
     cache: Cache,
     jellyfin: DataSource.Factory,
     companion: DataSource.Factory,
+    resolveLinkedKey: suspend (String) -> String? = { null },
     resolveExistingKey: suspend (String) -> String?,
 ): DataSource.Factory {
     val online = CacheDataSource.Factory()
@@ -31,13 +33,17 @@ internal fun playbackDataSourceFactory(
         CacheDataSource.Factory().setCache(cache).setCacheWriteDataSinkFactory(null),
     ) { spec ->
         // Media3 在加载线程打开数据源。重新校验本机归属和完整性，包括从队列续播或拖进度。
-        val mediaId = existingDownloadIdFromUri(spec.uri.toString())
-        val key = mediaId?.let { runBlocking { resolveExistingKey(it) } }
-            ?: throw IOException("已有下载的原副本暂不可读")
+        val uri = spec.uri.toString()
+        val key = runBlocking {
+            if (isLinkedDownloadPlaybackUri(uri)) resolveLinkedKey(uri)
+            else existingDownloadIdFromUri(uri)?.let { resolveExistingKey(it) }
+        } ?: throw IOException("已有下载的原副本暂不可读")
         // 只替换读取定位，保留 Media3 请求的字节范围；不采用调用方传来的键。
         spec.buildUpon().setKey(key).build()
     }
-    return PlaybackUpstreamFactory { uri -> if (isExistingDownloadPlaybackUri(uri)) existing else online }
+    return PlaybackUpstreamFactory { uri ->
+        if (isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri)) existing else online
+    }
 }
 
 /** 每次打开时选数据源：Media3 也可能用同一个实例继续读取下一区间。 */

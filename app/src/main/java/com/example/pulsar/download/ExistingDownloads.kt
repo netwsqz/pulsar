@@ -163,7 +163,7 @@ private fun confirmationKey(account: AccountScope) =
 @Serializable
 private data class ExistingDownloadAccount(val serverUrl: String, val userId: String)
 
-private fun AccountScope.identity(): String =
+internal fun AccountScope.identity(): String =
     Json.encodeToString(ExistingDownloadAccount(serverUrl, userId)).encodeUtf8().sha256().hex()
 
 internal fun existingDownloadMediaId(account: AccountScope, originalKey: String): String =
@@ -181,7 +181,7 @@ private fun copyIdentity(key: String): String = key.encodeUtf8().sha256().hex()
 
 internal fun isExistingDownloadMediaId(mediaId: String): Boolean = mediaId.startsWith(EXISTING_MEDIA_ID_PREFIX)
 
-private suspend fun <T> localResult(fallback: T, read: suspend () -> T): T = withContext(Dispatchers.IO) {
+internal suspend fun <T> localResult(fallback: T, read: suspend () -> T): T = withContext(Dispatchers.IO) {
     try {
         read()
     } catch (error: CancellationException) {

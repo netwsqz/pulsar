@@ -316,6 +316,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CancellationException
@@ -385,7 +386,18 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     val viewModelFactory = remember(application) { JellyfinViewModelFactory(application, !showCompanionLibrary) }
     val viewModel: JellyfinViewModel = viewModel(factory = viewModelFactory)
     val scope = rememberCoroutineScope()
-    val trial = remember(application, scope) { CompanionLibraryTrial(application.companionLibrary, scope) }
+    val trial = remember(application, scope) {
+        CompanionLibraryTrial(
+            application.companionLibrary, scope,
+            loadLinked = { application.downloadLibrary.loadLinkedDownloads(it) },
+            checkCatalog = { pairing, tracks -> application.downloadLibrary.checkLinkedCatalog(pairing, tracks) },
+        )
+    }
+    LaunchedEffect(trial) {
+        application.sessionManager.savedDownloadAccountChanges.catch { emit(null) }.collect {
+            trial.reloadLinkedDownloads()
+        }
+    }
     val trialState by trial.state.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val currentTrack by viewModel.currentTrack.collectAsStateWithLifecycle()
@@ -501,9 +513,11 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                     }
                 }
                 MusicLibraryScreen(
-                    library = if (trialActive) LibraryState(tracks = trialState.tracks, search = trialState.search) else state.library,
+                    library = if (trialActive) LibraryState(
+                        tracks = trialState.tracks, search = trialState.search, isOffline = trialState.isOffline,
+                    ) else state.library,
                     session = if (trialActive) SessionState(isLoading = trialState.isLoading, errorMessage = trialState.error?.message) else state.session,
-                    downloads = if (trialActive) DownloadsState() else state.downloads,
+                    downloads = if (trialActive) DownloadsState(visibleTrackIds = trialState.reusedTrackIds) else state.downloads,
                     viewModel = viewModel,
                     playbackSession = playbackSession,
                     qqState = qqState,
@@ -1438,6 +1452,7 @@ private fun MusicLibraryScreen(
                             goTo(if (trialActive) defaultSection else LibrarySection.Settings, isBack = true)
                         },
                         showOriginalGroups = !localDownloadsOnly && !trialActive,
+                        onLinked = companionTrial?.let { it::reloadLinkedDownloads },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -4265,6 +4280,7 @@ private fun CachedCopiesContent(
     onPlay: (List<Track>, String) -> Unit,
     onBack: () -> Unit,
     showOriginalGroups: Boolean,
+    onLinked: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -4286,6 +4302,7 @@ private fun CachedCopiesContent(
             verticalArrangement = Arrangement.spacedBy(Dimens.SpaceSmall),
             contentPadding = PaddingValues(bottom = Dimens.BottomContentInset)
         ) {
+            if (onLinked != null) item { LinkedDownloadButton(application.downloadLibrary, onLinked) }
             existingDownloadGroup(existing, playback, onPlay, reloadExisting)
             if (showOriginalGroups) when {
                 cachedAlbums == null -> item { CircularProgressIndicator() }

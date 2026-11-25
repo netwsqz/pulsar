@@ -42,13 +42,18 @@ class ExistingDownloadPlaybackTest {
                 var networkCalls = 0
                 val network = DataSource.Factory { networkCalls++; error("已有下载不能请求网络") }
                 val mediaId = "existing:account:album-track"
-                val factory = playbackDataSourceFactory(cache, network, network) { id ->
-                    key.takeIf { id == mediaId }
-                }
-                val request = DataSpec.Builder().setUri(existingDownloadPlaybackUri(mediaId))
-                    .setKey("不能信任请求自带的键").setPosition(2).setLength(3).build()
+                val linkedUri = "pulsar-linked:pc:paired:track/revision/$mediaId"
+                val factory = playbackDataSourceFactory(
+                    cache, network, network,
+                    resolveLinkedKey = { uri -> key.takeIf { uri == linkedUri } },
+                    resolveExistingKey = { id -> key.takeIf { id == mediaId } },
+                )
                 val originalSize = cache.cacheSpace
-                factory.createDataSource().let { source ->
+                val requests = listOf(existingDownloadPlaybackUri(mediaId), linkedUri).map { uri ->
+                    DataSpec.Builder().setUri(uri).setKey("不能信任请求自带的键").setPosition(2).setLength(3).build()
+                }
+                for (request in requests) {
+                    val source = factory.createDataSource()
                     try {
                         assertEquals(3L, source.open(request))
                         val bytes = ByteArray(3)
@@ -62,7 +67,8 @@ class ExistingDownloadPlaybackTest {
                 assertEquals(setOf(key), cache.keys)
 
                 cache.removeResource(key)
-                factory.createDataSource().let { source ->
+                for (request in requests) {
+                    val source = factory.createDataSource()
                     try {
                         assertThrows(IOException::class.java) { source.open(request) }
                     } finally {

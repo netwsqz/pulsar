@@ -8,7 +8,9 @@ import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import coil.ImageLoader
 import com.example.pulsar.data.companion.CompanionLibraryConnection
+import com.example.pulsar.data.companion.companionArtworkHttpClient
 import com.example.pulsar.data.companion.companionDownloadHttpClient
 import com.example.pulsar.download.CompanionDownloads
 import com.example.pulsar.download.companionDownloadVersion
@@ -98,6 +100,13 @@ class PulsarApplication : Application() {
             },
             store = CompanionPairingStore(pulsarPreferencesDataStore),
         )
+    }
+
+    internal val companionImageLoader by lazy {
+        ImageLoader.Builder(this)
+            .callFactory { companionArtworkHttpClient(companionLibrary) }
+            .diskCache(null)
+            .build()
     }
 
     /** 登录前用：只带服务器地址，不带任何凭据。 */

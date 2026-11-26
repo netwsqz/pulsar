@@ -5,11 +5,15 @@ import com.example.pulsar.data.companion.CompanionLibraryConnection
 import com.example.pulsar.data.companion.CompanionPairingStore
 import com.example.pulsar.data.companion.CompanionLibraryError
 import com.example.pulsar.QueueTrack
+import com.example.pulsar.libraryGroups
 import com.example.pulsar.domain.model.Track
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.download.CompanionDownloadCopy
 import com.example.pulsar.download.CompanionDownloadedAlbum
 import com.example.pulsar.download.LinkedDownload
+import com.example.pulsar.offline.OfflineInput
+import com.example.pulsar.offline.OfflineNotice
+import com.example.pulsar.offline.offlineView
 import com.example.pulsar.playback.FakePlaybackRemote
 import com.example.pulsar.playback.FakeTrackMediaItemFactory
 import com.example.pulsar.playback.PlaybackIntent
@@ -221,8 +225,9 @@ class CompanionLibraryTrialTest {
             trial.retry()
             val refreshed = trial.state.first { !it.isLoading }
             assertEquals(false, refreshed.isOffline)
-            assertEquals(2, refreshed.tracks!!.size)
-            val changed = refreshed.tracks.first()
+            val refreshedTracks = checkNotNull(refreshed.tracks)
+            assertEquals(2, refreshedTracks.size)
+            val changed = refreshedTracks.first()
             assertEquals(old.id, changed.id)
             assertEquals("http://192.168.1.8:8900/api/library/tracks/$id/audio", trial.streamUrl(changed))
         }
@@ -238,30 +243,104 @@ class CompanionLibraryTrialTest {
         HttpClient(MockEngine {
             if (!online) throw IOException("电脑关机")
             respond("""{"tracks":[{"id":"$id","title":"已下载","artist":"歌手","album":"专辑","revision":"$revision"},
-                {"id":"${"b".repeat(64)}","title":"未下载","artist":"歌手","album":"专辑","revision":"$revision"}]}""")
+                {"id":"${"b".repeat(64)}","title":"未下载","artist":"歌手","album":"专辑","revision":"$revision"},
+                {"id":"${"d".repeat(64)}","title":"未标注专辑的歌","artist":"歌手","album":"","revision":"$revision"}]}""")
         }).use { client ->
             val store = CompanionPairingStore(preferences)
             val connection = CompanionLibraryConnection(client, store)
-            val saved = connection.pair("192.168.1.8", "test-key").getOrThrow().first()
+            val catalog = connection.pair("192.168.1.8", "test-key").getOrThrow()
+            val saved = catalog.first()
             val pairing = checkNotNull(connection.savedScope())
             val copy = CompanionDownloadCopy(pairing, saved)
-            val album = Album("专辑", "专辑", "歌手", 2, null)
-            val group = CompanionDownloadedAlbum(pairing, album, listOf(copy), totalCount = 2)
+            val untagged = CompanionDownloadCopy(pairing, catalog.last())
+            val album = Album("2:歌手:专辑", "专辑", "歌手", 2, null)
+            val groups = listOf(
+                CompanionDownloadedAlbum(pairing, album, listOf(copy), totalCount = 2),
+                CompanionDownloadedAlbum(pairing, Album("2:歌手:", "未标注专辑", "歌手", null, null), listOf(untagged), totalCount = 1),
+            )
             val restart = CompanionLibraryTrial(
                 CompanionLibraryConnection(client, store), backgroundScope, StandardTestDispatcher(testScheduler),
-                loadDownloads = { listOf(group) },
+                loadDownloads = { groups },
             )
             online = false
             restart.enter()
             val offline = restart.state.first { !it.isLoading }
             assertTrue(offline.isOffline)
-            assertEquals(listOf(saved), offline.tracks)
-            assertEquals(copy.playbackUri, restart.streamUrl(offline.tracks!!.single()))
-            assertEquals(copy.playbackUri, restart.streamUrl(offline.downloads.single().copies.single().savedTrack))
+            assertEquals(listOf(saved, untagged.track), offline.tracks)
+            val view = offlineView(OfflineInput(
+                isOffline = offline.isOffline, downloadedTrackIds = offline.downloadedTrackIds,
+                tracks = offline.tracks, albums = offline.albums, discoverAlbums = null, albumTracks = null,
+                playlistTracks = null, searchResults = null, tracksLoaded = true, isLoading = false,
+                prefilteredAlbumCards = true,
+            ))
+            assertEquals(OfflineNotice.VisibleOnly, view.notice)
+            val albums = checkNotNull(view.visibleLibrary.albums)
+            val partial = albums.single { it.name == "专辑" }
+            assertEquals(2, partial.trackCount)
+            assertEquals(listOf(saved), restart.albumTracks(partial))
+            assertEquals(listOf(untagged.track), restart.albumTracks(albums.single { it.name == "未标注专辑" }))
+            assertEquals(copy.playbackUri, restart.streamUrl(restart.albumTracks(partial)!!.single()))
+            assertEquals(copy.playbackUri, restart.streamUrl(offline.downloads.first().copies.single().savedTrack))
             restart.updateSearchQuery("载")
             advanceTimeBy(LIBRARY_SEARCH_DEBOUNCE_MS)
             runCurrent()
             assertEquals(listOf(saved), restart.state.value.search.results?.tracks)
+        }
+    }
+
+    @Test
+    fun `专辑和艺术家沿用歌曲和搜索的曲目身份 专辑可借同组另一首的内嵌封面`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val coveredId = "b".repeat(64)
+        val anotherArtist = "c".repeat(64)
+        val revision = "d".repeat(64)
+        HttpClient(MockEngine {
+            respond("""{"tracks":[{"id":"$id","title":"第一首","artist":"歌手甲","album":"同名专辑","revision":"$revision"},
+                {"id":"$coveredId","title":"第二首","artist":"歌手甲","album":"同名专辑","revision":"$revision","has_artwork":true},
+                {"id":"$anotherArtist","title":"别人的歌","artist":"歌手乙","album":"同名专辑"}]}""")
+        }).use { client ->
+            val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+            connection.pair("192.168.1.8", "test-key").getOrThrow()
+            val trial = CompanionLibraryTrial(connection, backgroundScope, StandardTestDispatcher(testScheduler))
+            trial.enter()
+            val loaded = trial.state.first { !it.isLoading }
+            val songs = checkNotNull(loaded.tracks)
+            val albums = checkNotNull(loaded.albums)
+            val album = albums.single { it.artist == "歌手甲" }
+            val fromArtist = libraryGroups(albums).single { it.name == "歌手甲" }.albums.single()
+            assertEquals(album, fromArtist)
+            assertEquals(album, trial.albumFor(songs.first()))
+            assertEquals(songs.take(2), trial.albumTracks(album))
+            assertEquals(songs.take(2), trial.albumTracks(fromArtist))
+            assertNull(trial.trackArtwork(songs[0]))
+            assertEquals(trial.trackArtwork(songs[1]), trial.albumArtwork(album))
+            assertTrue(checkNotNull(trial.albumArtwork(album)).url.endsWith("/tracks/$coveredId/artwork"))
+            assertNull(trial.albumArtwork(albums.single { it.artist == "歌手乙" }))
+
+            trial.updateSearchQuery("第二首")
+            advanceTimeBy(LIBRARY_SEARCH_DEBOUNCE_MS)
+            runCurrent()
+            val search = checkNotNull(trial.state.value.search.results).tracks
+            assertEquals(listOf(songs[1]), search)
+            val urls = mutableListOf<String>()
+            val items = FakeTrackMediaItemFactory { track ->
+                trial.streamUrl(track)?.let { url ->
+                    urls += url
+                    androidx.media3.common.MediaItem.Builder().setMediaId(track.id).build()
+                }
+            }
+            val remote = FakePlaybackRemote().apply { snapshot = RemoteSnapshot(isConnected = true) }
+            val playback = PlaybackSession(remote, items, trial, backgroundScope)
+            for (trackList in listOf(songs, search, trial.albumTracks(album)!!, trial.albumTracks(fromArtist)!!)) {
+                urls.clear()
+                assertTrue(playback.dispatch(PlaybackIntent.Play(trackList, songs[1].id)))
+                val queue = remote.setQueueCalls.last()
+                assertEquals(songs[1].id, queue.items[queue.startIndex].mediaId)
+                assertEquals("http://192.168.1.8:8900/api/library/tracks/$coveredId/audio", urls[queue.startIndex])
+            }
+            playback.close()
         }
     }
 

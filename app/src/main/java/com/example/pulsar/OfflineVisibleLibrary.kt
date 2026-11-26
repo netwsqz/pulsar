@@ -47,8 +47,8 @@ internal fun offlineVisibleLibrary(
     albumTracks: List<Track>? = null,
     playlistTracks: List<Track>? = null,
     searchResults: SearchResults? = null,
-    visibleTrackIds: Set<String>
-): VisibleLibrary {
+    visibleTrackIds: Set<String>,
+    prefilteredAlbumCards: Boolean = false,): VisibleLibrary {
     val downloaded = tracks.orEmpty().filter { it.id in visibleTrackIds }
     val downloadedAlbumKeys = downloaded
         .map { albumIdentityOf(it) }
@@ -64,6 +64,7 @@ internal fun offlineVisibleLibrary(
      * 别把骨架屏换成空态。
      */
     fun albumsWithDownloads(list: List<Album>?): List<Album>? {
+        if (prefilteredAlbumCards) return list
         val matched = list.orEmpty()
             .map { it to albumIdentityOf(it).key }
             .filter { (_, key) -> key in downloadedAlbumKeys }

@@ -1,5 +1,6 @@
 """电脑曲库 HTTP 合同：只用临时曲库和访问密钥，不加载 QQ 音乐导入服务。"""
 
+import base64
 import hashlib
 import os
 import tempfile
@@ -8,7 +9,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from mutagen.flac import FLAC
+from mutagen.flac import FLAC, Picture
+from mutagen.id3 import APIC, ID3, TALB, TIT2, TPE1
 
 from library_index import LibraryIndex
 from pc_library import library_router
@@ -79,7 +81,7 @@ class PcLibraryHttpTest(unittest.TestCase):
             [(t["title"], t["artist"], t["album"]) for t in tracks],
         )
         for track in tracks:
-            self.assertEqual({"id", "title", "artist", "album", "revision"}, set(track))
+            self.assertEqual({"id", "title", "artist", "album", "revision", "has_artwork"}, set(track))
             self.assertRegex(track["revision"], r"^[0-9a-f]{64}$")
             self.assertRegex(track["id"], r"^[0-9a-f]{64}$")
         self.assertEqual(len(tracks), len({track["id"] for track in tracks}))
@@ -111,6 +113,75 @@ class PcLibraryHttpTest(unittest.TestCase):
         self.assertEqual(416, unsatisfiable.status_code)
         self.assertTrue(unsatisfiable.headers["Content-Range"].endswith(f"*/{len(source)}"))
         self.assertEqual(source, track.read_bytes())
+
+    def test_artwork_requires_pairing_and_only_returns_embedded_images(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+        covered = self.make_track("歌手/专辑/01 有封面.flac", title="有封面")
+        self.make_track("歌手/专辑/02 无封面.flac", title="无封面")
+        # 即使目录里有图片，也不能替代文件的内嵌封面。
+        (covered.parent / "cover.png").write_bytes(png)
+        audio = FLAC(covered)
+        for kind, image in ((4, png + b"back"), (3, png)):
+            picture = Picture()
+            picture.type = kind
+            picture.mime = "image/png"
+            picture.data = image
+            audio.add_picture(picture)
+        audio.save()
+        self.index.refresh()
+
+        with self.client() as client:
+            tracks = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"]
+            self.assertEqual({"有封面": True, "无封面": False}, {row["title"]: row["has_artwork"] for row in tracks})
+            ids = {row["title"]: row["id"] for row in tracks}
+            artwork = f"{self.TRACKS}/{ids['有封面']}/artwork"
+            self.assertEqual(401, client.get(artwork).status_code)
+            self.assertEqual(401, client.get(artwork, headers={"Authorization": "Bearer wrong"}).status_code)
+            self.assertEqual(401, client.get(artwork, headers={"X-Pulsar-Key": self.KEY}).status_code)
+            covered_row = next(row for row in tracks if row["id"] == ids["有封面"])
+            headers = {**self.AUTH, "If-Match": f'"{covered_row["revision"]}"'}
+            response = client.get(artwork, headers=headers)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual("image/png", response.headers["Content-Type"])
+            self.assertEqual(png, response.content)
+            self.assertIn("no-store", response.headers["Cache-Control"])
+            self.assertEqual(404, client.get(f"{self.TRACKS}/{ids['无封面']}/artwork", headers=self.AUTH).status_code)
+            self.assertEqual(404, client.get(f"{self.TRACKS}/{'0' * 64}/artwork", headers=self.AUTH).status_code)
+            original = client.get(f"{self.TRACKS}/{ids['有封面']}/audio", headers=self.AUTH)
+            self.assertEqual(covered.read_bytes(), original.content)
+            os.utime(covered, (1_800_000_000, 1_800_000_000))
+            self.assertEqual(412, client.get(artwork, headers=headers).status_code)
+
+    def test_mp3_artwork_uses_id3_and_bad_picture_does_not_hide_tracks(self):
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+        )
+        for title, picture in (("内嵌封面", png), ("封面链接", b"https://example.invalid/artwork.png")):
+            path = self.root / f"{title}.mp3"
+            # 只构造 Mutagen 可识别的 MP3 帧，不依赖 ffmpeg 或真实曲库。
+            path.write_bytes((bytes.fromhex("fffb9000") + bytes(413)) * 6)
+            tags = ID3()
+            tags.add(TIT2(encoding=3, text=[title]))
+            tags.add(TPE1(encoding=3, text=["歌手"]))
+            tags.add(TALB(encoding=3, text=["专辑"]))
+            tags.add(APIC(encoding=3, mime="image/png" if picture == png else "-->", type=3, data=picture))
+            tags.save(path)
+        self.index.refresh()
+        with self.client() as client:
+            rows = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"]
+            self.assertCountEqual(
+                [("内嵌封面", "歌手", "专辑", True), ("封面链接", "歌手", "专辑", False)],
+                [(row["title"], row["artist"], row["album"], row["has_artwork"]) for row in rows],
+            )
+            for row in rows:
+                response = client.get(f"{self.TRACKS}/{row['id']}/artwork", headers=self.AUTH)
+                if row["title"] == "内嵌封面":
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual(png, response.content)
+                else:
+                    self.assertEqual(404, response.status_code)
 
     def test_resume_only_accepts_the_original_file_revision(self):
         track = self.make_track("专辑/01 歌曲.flac")

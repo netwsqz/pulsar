@@ -24,7 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.pulsar.AlbumCover
-import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.CoverRequest
 import com.example.pulsar.ui.theme.Dimens
 
 /** 详情头的整组操作；没有整页播放语义时不创建它，不再用布尔开关加占位参数。 */
@@ -44,7 +44,7 @@ internal data class DetailActions(
  */
 @Composable
 internal fun DetailHeader(
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     coverDescription: String?,
     title: String,
     subtitle: String,

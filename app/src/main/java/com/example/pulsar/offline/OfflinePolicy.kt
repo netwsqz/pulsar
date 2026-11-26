@@ -32,7 +32,8 @@ internal fun offlineView(input: OfflineInput): OfflineView {
             albumTracks = input.albumTracks,
             playlistTracks = input.playlistTracks,
             searchResults = input.searchResults,
-            visibleTrackIds = input.downloadedTrackIds.orEmpty()
+            visibleTrackIds = input.downloadedTrackIds.orEmpty(),
+            prefilteredAlbumCards = input.prefilteredAlbumCards,
         )
     } else {
         VisibleLibrary(

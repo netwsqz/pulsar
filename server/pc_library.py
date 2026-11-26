@@ -85,6 +85,13 @@ class _VersionedAudioResponse(FileResponse):
             await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
 
 
+def _checked_revision(info: os.stat_result, if_match: str | None) -> str:
+    tag = f'"{audio_revision(info)}"'
+    if if_match is not None and not any(part.strip() in (tag, "*") for part in if_match.split(",")):
+        raise HTTPException(412, "电脑上的文件已变化，请刷新曲库")
+    return tag
+
+
 class EvidenceRequest(BaseModel):
     paths: list[StrictStr]
 
@@ -129,16 +136,27 @@ def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
             raise HTTPException(413, "本次核对的路径过多或过长")
         return JSONResponse({"tracks": index.evidence(request.paths)}, headers={"Cache-Control": "private, no-store"})
 
+    @router.get("/tracks/{track_id}/artwork", response_class=Response)
+    def artwork(track_id: str, if_match: str | None = Header(None)) -> Response:
+        source = index.audio_file(track_id)
+        if source is None:
+            raise HTTPException(404, "曲目不存在")
+        path, info = source
+        tag = _checked_revision(info, if_match)
+        picture = index.read_artwork(path, info)
+        if picture is None:
+            raise HTTPException(404, "没有内嵌封面")
+        data, mime = picture
+        return Response(data, media_type=mime, headers={"Cache-Control": "private, no-store", "ETag": tag})
+
     @router.get("/tracks/{track_id}/audio", response_class=FileResponse)
     def audio(track_id: str, if_match: str | None = Header(None)) -> FileResponse:
         file = index.audio_file(track_id)
         if file is None:
             raise HTTPException(404, "曲目不存在")
         path, info = file
-        tag = f'"{audio_revision(info)}"'
         # 手动下载补缺口时，旧版本的片段不能和新文件的字节拼在一起。
-        if if_match is not None and not any(part.strip() in (tag, "*") for part in if_match.split(",")):
-            raise HTTPException(412, "电脑上的文件已变化，请刷新曲库")
+        tag = _checked_revision(info, if_match)
         response = FileResponse if if_match is None else _VersionedAudioResponse
         return response(path, stat_result=info, headers={"Cache-Control": "private, no-store", "ETag": tag})
 

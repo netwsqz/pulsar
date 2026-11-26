@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.example.pulsar.data.CoverRequest
 import com.example.pulsar.domain.model.Track
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl
@@ -46,6 +48,17 @@ internal class CompanionLibraryConnection(
         private set
 
     fun streamUrl(mediaId: String): String? = current?.streamUrl(mediaId)
+
+    fun artwork(track: Track, scope: String): CompanionArtworkRequest? {
+        val pairing = current?.takeIf { it.scope == scope } ?: return null
+        val revision = track.imageTag?.takeIf(trackIdPattern::matches) ?: return null
+        val url = pairing.artworkUrl(track.id) ?: return null
+        return CompanionArtworkRequest(url, revision, scope)
+    }
+
+    fun artworkAuthorization(url: HttpUrl, scope: String): String? = current?.let { pairing ->
+        pairing.authorization.takeIf { pairing.scope == scope && pairing.ownsArtwork(url) }
+    }
 
     val savedScopeChanges = store.pairings.map { it?.scope }.distinctUntilChanged()
 
@@ -151,6 +164,12 @@ internal class CompanionLibraryConnection(
     }
 }
 
+internal data class CompanionArtworkRequest(
+    override val url: String,
+    val revision: String,
+    val scope: String,
+) : CoverRequest
+
 internal sealed class CompanionLibraryError(message: String) : Exception(message) {
     data object InvalidPairing : CompanionLibraryError("请填写局域网内的电脑 IP 和访问密钥")
     data object Unauthorized : CompanionLibraryError("访问密钥不正确，请重新配对")
@@ -169,9 +188,15 @@ private data class CompanionTracksResponse(val tracks: List<CompanionTrack>)
 @Serializable
 private data class CompanionTrack(
     val id: String, val title: String, val artist: String, val album: String, val revision: String? = null,
+    @SerialName("has_artwork") val hasArtwork: Boolean = false,
 ) {
-    fun toTrack(pairing: CompanionPairing) =
-        Track(pairing.mediaId(id), title, artist, album, null, null, sourceRevision = revision?.takeIf(trackIdPattern::matches))
+    fun toTrack(pairing: CompanionPairing): Track {
+        val validRevision = revision?.takeIf(trackIdPattern::matches)
+        return Track(
+            pairing.mediaId(id), title, artist, album, null, validRevision.takeIf { hasArtwork },
+            sourceRevision = validRevision,
+        )
+    }
 }
 
 @Serializable
@@ -184,8 +209,9 @@ private data class EvidenceResponse(val tracks: List<CompanionEvidenceRow>)
 private data class CompanionEvidenceRow(
     val path: String, val id: String, val title: String, val artist: String, val album: String,
     val revision: String, val size: Long, val sha256: String,
+    @SerialName("has_artwork") val hasArtwork: Boolean = false,
 ) {
-    fun toTrack(pairing: CompanionPairing) = CompanionTrack(id, title, artist, album, revision).toTrack(pairing)
+    fun toTrack(pairing: CompanionPairing) = CompanionTrack(id, title, artist, album, revision, hasArtwork).toTrack(pairing)
 }
 
 internal fun interface CompanionDownloadEvidenceSource {
@@ -200,6 +226,7 @@ private const val MEDIA_ID_PREFIX = "pc:"
 private const val DEFAULT_COMPANION_PORT = 8900
 private val trackIdPattern = Regex("[0-9a-f]{64}")
 private val audioPathPattern = Regex("$TRACKS_PATH/[0-9a-f]{64}/audio")
+private val artworkPathPattern = Regex("$TRACKS_PATH/[0-9a-f]{64}/artwork")
 private val accessKeyPattern = Regex("[A-Za-z0-9_-]+")
 
 internal fun isCompanionMediaId(id: String): Boolean = id.startsWith(MEDIA_ID_PREFIX)
@@ -228,18 +255,24 @@ internal class CompanionPairing private constructor(
     fun tracksUrl(): String = origin.newBuilder().encodedPath(TRACKS_PATH).build().toString()
     fun evidenceUrl(): String = origin.newBuilder().encodedPath("/api/library/evidence").build().toString()
 
-    fun streamUrl(mediaId: String): String? {
+    fun streamUrl(mediaId: String): String? = trackUrl(mediaId, "audio")
+    fun artworkUrl(mediaId: String): String? = trackUrl(mediaId, "artwork")
+
+    private fun trackUrl(mediaId: String, resource: String): String? {
         if (!mediaId.startsWith(mediaIdPrefix)) return null
         val id = mediaId.removePrefix(mediaIdPrefix)
         return if (trackIdPattern.matches(id)) {
-            origin.newBuilder().encodedPath("$TRACKS_PATH/$id/audio").build().toString()
+            origin.newBuilder().encodedPath("$TRACKS_PATH/$id/$resource").build().toString()
         } else null
     }
 
-    fun ownsStream(url: HttpUrl): Boolean =
+    fun ownsStream(url: HttpUrl): Boolean = ownsResource(url, audioPathPattern)
+    fun ownsArtwork(url: HttpUrl): Boolean = ownsResource(url, artworkPathPattern)
+
+    private fun ownsResource(url: HttpUrl, path: Regex): Boolean =
         origin.scheme == url.scheme && origin.host == url.host && origin.port == url.port &&
             url.encodedUsername.isEmpty() && url.encodedPassword.isEmpty() &&
-            url.encodedQuery == null && url.fragment == null && audioPathPattern.matches(url.encodedPath)
+            url.encodedQuery == null && url.fragment == null && path.matches(url.encodedPath)
 
     // 普通类不输出字段，防止因日志或断言意外把访问密钥写出去。
     companion object {

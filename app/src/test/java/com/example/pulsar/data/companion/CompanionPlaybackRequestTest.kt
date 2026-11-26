@@ -58,6 +58,50 @@ class CompanionPlaybackRequestTest {
     }
 
     @Test
+    fun `封面密钥只发给当前配对的封面接口 不跟跳转或旧配对`() = runTest {
+        MockWebServer().use { server ->
+            MockWebServer().use { other ->
+                val path = "/api/library/tracks/$trackId/artwork"
+                val otherUrl = other.url(path)
+                server.enqueue(MockResponse().setBody("内嵌封面"))
+                server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", otherUrl))
+                other.enqueue(MockResponse().setResponseCode(200))
+                HttpClient(MockEngine {
+                    respond("""{"tracks":[{"id":"$trackId","title":"浮夸","artist":"陈奕迅","album":"U 87",
+                        "has_artwork":true,"revision":"${"b".repeat(64)}"}]}""")
+                }).use { client ->
+                    val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+                        temp.root.resolve("pulsar.preferences_pb")
+                    }
+                    val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+                    val address = server.url("/").toString()
+                    val track = connection.pair(address, "test-pairing-key").getOrThrow().single()
+                    val artwork = checkNotNull(connection.artwork(track, checkNotNull(connection.savedScope())))
+                    assertEquals(server.url(path).toString(), artwork.url)
+                    val http = companionArtworkHttpClient(connection)
+                    val request = Request.Builder().url(artwork.url).tag(CompanionArtworkRequest::class.java, artwork).build()
+                    assertEquals(null, request.header("Authorization"))
+                    http.newCall(request).execute().use { assertEquals("内嵌封面", it.body!!.string()) }
+                    val seen = server.takeRequest(1, TimeUnit.SECONDS) ?: error("没有收到封面请求")
+                    assertEquals(path, seen.path)
+                    assertEquals("Bearer test-pairing-key", seen.getHeader("Authorization"))
+                    assertEquals("\"${"b".repeat(64)}\"", seen.getHeader("If-Match"))
+                    http.newCall(request).execute().use { assertEquals(302, it.code) }
+                    for (url in listOf(otherUrl, server.url(path.replace("/artwork", "/audio")))) {
+                        assertThrows(IOException::class.java) {
+                            http.newCall(request.newBuilder().url(url).build()).execute().close()
+                        }
+                    }
+                    connection.pair(address, "changed-key").getOrThrow()
+                    assertThrows(IOException::class.java) { http.newCall(request).execute().close() }
+                    assertEquals(2, server.requestCount)
+                    assertEquals(0, other.requestCount)
+                }
+            }
+        }
+    }
+
+    @Test
     fun `下载续传只接受当前配对和请求的文件版本`() = runTest {
         MockWebServer().use { server ->
             val revision = "b".repeat(64)

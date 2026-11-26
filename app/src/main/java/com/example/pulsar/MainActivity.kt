@@ -19,6 +19,8 @@ import com.example.pulsar.ui.components.OfflineNoticeText
 import com.example.pulsar.ui.components.PlaybackCover
 import com.example.pulsar.ui.components.QUEUE_DRAG_SETTLE_TIMEOUT_MS
 import com.example.pulsar.ui.components.QueueDragState
+import com.example.pulsar.ui.components.imageLoader
+import com.example.pulsar.ui.components.imageRequest
 import com.example.pulsar.ui.components.queueDragHandle
 import com.example.pulsar.ui.components.queuePlacement
 import com.example.pulsar.ui.components.rememberSegmentTick
@@ -277,7 +279,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
-import coil.request.ImageRequest
+import com.example.pulsar.data.companion.CompanionArtworkRequest
 import com.example.pulsar.data.companion.isCompanionMediaId
 import com.example.pulsar.download.CompanionDownloadTarget
 import com.example.pulsar.download.CompanionDownloadedAlbum
@@ -288,7 +290,7 @@ import com.example.pulsar.download.existingDownloadPlaybackUri
 import com.example.pulsar.download.isExistingDownloadMediaId
 import com.example.pulsar.library.CompanionLibraryTrial
 import com.example.pulsar.data.jellyfin.JellyfinError
-import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.CoverRequest
 import com.example.pulsar.data.jellyfin.JellyfinUrlBuilder
 import com.example.pulsar.domain.model.Album
 import com.example.pulsar.domain.model.Playlist
@@ -456,11 +458,15 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     val themePreferences = remember(application) { ThemePreferences(application.pulsarPreferencesDataStore) }
     val presetArgb by themePreferences.preset.collectAsStateWithLifecycle(initialValue = null)
     val preset = presetArgb?.let(::Color)
-    // 配对地址与 Jellyfin 会话分开，封面主题不跨来源复用。
-    val artworkAccount = if (trialActive) trialState.serviceUrl else if (state.library.tracks != null) {
+    // 试用封面按配对归属隔离；同地址重新配对也不沿用旧封面的取色。
+    val playbackCoverRequest = currentTrack?.let { track ->
+        if (trialActive) trial.trackArtwork(track) else viewModel.trackCover(track)
+    }
+    val artworkAccount = if (trialActive) {
+        (playbackCoverRequest as? CompanionArtworkRequest)?.scope
+    } else if (state.library.tracks != null) {
         state.session.serverUrl to state.session.username
     } else null
-    val playbackCoverRequest = if (trialActive) null else currentTrack?.let(viewModel::trackCover)
     val windowSize = LocalWindowInfo.current.containerSize
     val artworkSizePx = minOf(windowSize.width, windowSize.height).coerceIn(96, 1440)
     val coverTheme = rememberCoverGradient(
@@ -524,7 +530,8 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                 }
                 MusicLibraryScreen(
                     library = if (trialActive) LibraryState(
-                        tracks = trialState.tracks, search = trialState.search, isOffline = trialState.isOffline,
+                        tracks = trialState.tracks, albums = trialState.albums,
+                        search = trialState.search, isOffline = trialState.isOffline,
                     ) else state.library,
                     session = if (trialActive) SessionState(isLoading = trialState.isLoading, errorMessage = trialState.error?.message) else state.session,
                     downloads = if (trialActive) DownloadsState(visibleTrackIds = trialState.downloadedTrackIds) else state.downloads,
@@ -590,9 +597,10 @@ private fun LibraryGroupsContent(
     title: String,
     offlineNotice: String?,
     onOpenGroup: (String) -> Unit,
-    coverFor: (Album) -> JellyfinRequest?,
+    coverFor: (Album) -> CoverRequest?,
     onRetry: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRefreshTrial: (() -> Unit)? = null,
 ) {
     val groups = remember(albums) { libraryGroups(albums.orEmpty()) }
     LibraryScreenScaffold(
@@ -606,6 +614,9 @@ private fun LibraryGroupsContent(
             onRetry = onRetry
         ),
         offlineNotice = offlineNotice,
+        actions = onRefreshTrial?.let { refresh ->
+            { TextButton(onClick = refresh, enabled = !session.isLoading) { Text("刷新") } }
+        },
         // 改前这一页的空态 / 错误态是竖直居中的，保持一致。
         contentAlignment = Alignment.Center,
         modifier = modifier,
@@ -652,7 +663,7 @@ private fun LibraryGroupDetailContent(
     groupName: String,
     offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
-    coverFor: (Album) -> JellyfinRequest?,
+    coverFor: (Album) -> CoverRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -927,6 +938,9 @@ private fun MusicLibraryScreen(
     onCloseLocalDownloads: (() -> Unit)? = null,
 ) {
     val trialActive = companionTrial != null
+    val trackCover: (Track) -> CoverRequest? = if (companionTrial != null) companionTrial::trackArtwork else viewModel::trackCover
+    val albumCover: (Album) -> CoverRequest? = if (companionTrial != null) companionTrial::albumArtwork else viewModel::albumCover
+    val retryAlbums = if (companionTrial != null) companionTrial::retry else viewModel::loadAlbums
     val localDownloadsOnly = onCloseLocalDownloads != null
     val defaultSection = when {
         localDownloadsOnly -> LibrarySection.CachedCopies
@@ -1011,7 +1025,8 @@ private fun MusicLibraryScreen(
             mostPlayed = library.mostPlayed,
             recentlyAdded = library.recentlyAdded,
             tracksLoaded = library.tracks != null,
-            isLoading = session.isLoading
+            isLoading = session.isLoading,
+            prefilteredAlbumCards = trialActive,
         )
     )
     val visible = offline.visibleLibrary
@@ -1293,12 +1308,12 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search &&
-                    s != LibrarySection.CachedCopies && s !is LibrarySection.AlbumDetail
+                if (trialActive && (s == LibrarySection.Discover || s == LibrarySection.Playlists ||
+                        s is LibrarySection.PlaylistDetail || s == LibrarySection.Settings || s == LibrarySection.DownloadService)
                 ) {
                     LibraryScreenScaffold(
                         title = s.navLabel().orEmpty(),
-                        loadState = LoadState.Empty("电脑曲库试用目前支持歌曲、搜索和手动下载"),
+                        loadState = LoadState.Empty("电脑曲库试用目前支持歌曲、专辑、艺术家、搜索和手动下载"),
                         actions = { TextButton(onClick = { goTo(LibrarySection.Tracks) }) { Text("打开歌曲") } },
                         loading = {},
                         content = {},
@@ -1332,7 +1347,7 @@ private fun MusicLibraryScreen(
                         title = s.navLabel().orEmpty(),
                         offlineNotice = offlineNotice,
                         playback = playback,
-                        coverFor = viewModel::trackCover,
+                        coverFor = trackCover,
                         onLocalAudio = { localAudioLauncher.launch(arrayOf("audio/*")) },
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
@@ -1346,8 +1361,9 @@ private fun MusicLibraryScreen(
                         albums = visible.albums,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
-                        coverFor = viewModel::albumCover,
-                        onRetry = viewModel::loadAlbums,
+                        coverFor = albumCover,
+                        onRetry = retryAlbums,
+                        onRefreshTrial = companionTrial?.let { it::retry },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Playlists -> PlaylistsContent(
@@ -1367,8 +1383,9 @@ private fun MusicLibraryScreen(
                             detailOrigin = section
                             goTo(LibrarySection.GroupDetail(name))
                         },
-                        coverFor = viewModel::albumCover,
-                        onRetry = viewModel::loadAlbums,
+                        coverFor = albumCover,
+                        onRetry = retryAlbums,
+                        onRefreshTrial = companionTrial?.let { it::retry },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Search -> SearchContent(
@@ -1381,8 +1398,8 @@ private fun MusicLibraryScreen(
                             qq = qqState,
                             currentTrackId = currentTrack?.id,
                             isPlaying = playback.isPlaying,
-                            trackCover = viewModel::trackCover,
-                            albumCover = viewModel::albumCover,
+                            trackCover = trackCover,
+                            albumCover = albumCover,
                             playlistCover = viewModel::playlistCover,
                             isCompanionTrial = trialActive,
                         ),
@@ -1414,13 +1431,13 @@ private fun MusicLibraryScreen(
                     }
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         session = session,
-                        album = s.album,
+                        album = if (trialActive) visible.albums?.firstOrNull { it.id == s.album.id } ?: s.album else s.album,
                         albumTracks = if (companionTrial != null) companionTrial.albumTracks(s.album) else visible.albumTracks,
                         offlineNotice = offlineNotice,
-                        coverFor = if (trialActive) { { null } } else viewModel::trackCover,
+                        coverFor = trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
-                        albumCoverFor = if (trialActive) { { null } } else viewModel::albumCover,
+                        albumCoverFor = albumCover,
                         onRetry = if (companionTrial != null) companionTrial::retry else { { viewModel.loadAlbumTracks(s.album) } },
                         currentTrackId = currentTrack?.id,
                         isPlaying = playback.isPlaying,
@@ -1455,8 +1472,8 @@ private fun MusicLibraryScreen(
                         groupName = s.name,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
-                        coverFor = viewModel::albumCover,
-                        onRetry = viewModel::loadAlbums,
+                        coverFor = albumCover,
+                        onRetry = retryAlbums,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.CachedCopies -> CachedCopiesContent(
@@ -1985,7 +2002,7 @@ private fun TracksContent(
     title: String,
     offlineNotice: String?,
     playback: PlaybackUiState,
-    coverFor: (Track) -> JellyfinRequest?,
+    coverFor: (Track) -> CoverRequest?,
     onLocalAudio: () -> Unit,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
@@ -2045,7 +2062,7 @@ internal fun LazyListScope.trackList(
     tracks: List<Track>,
     currentTrackId: String?,
     isPlaying: Boolean,
-    coverFor: (Track) -> JellyfinRequest?,
+    coverFor: (Track) -> CoverRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: ((Track) -> Unit)? = null,
     leadingNumbers: Boolean = false,
@@ -2133,7 +2150,7 @@ private val LocalTrackMenu = compositionLocalOf<TrackMenuState?> { null }
 @Composable
 private fun TrackRow(
     track: Track,
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     onClick: () -> Unit,
     showDivider: Boolean,
     isCurrent: Boolean = false,
@@ -2700,8 +2717,8 @@ private fun DiscoverContent(
     isFiltering: Boolean,
     offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
-    coverFor: (Album) -> JellyfinRequest?,
-    trackCoverFor: (Track) -> JellyfinRequest?,
+    coverFor: (Album) -> CoverRequest?,
+    trackCoverFor: (Track) -> CoverRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     currentTrackId: String?,
@@ -2934,7 +2951,7 @@ private fun DiscoverTrackStrip(
     title: String,
     tracks: List<Track>?,
     showSkeleton: Boolean,
-    trackCoverFor: (Track) -> JellyfinRequest?,
+    trackCoverFor: (Track) -> CoverRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
     currentTrackId: String?,
@@ -2973,7 +2990,7 @@ private fun DiscoverAlbumStrip(
     albums: List<Album>?,
     showSkeleton: Boolean,
     onOpenAlbum: (Album) -> Unit,
-    coverFor: (Album) -> JellyfinRequest?
+    coverFor: (Album) -> CoverRequest?
 ) {
     if (albums != null && albums.isEmpty()) return
     if (albums == null && !showSkeleton) return
@@ -3049,7 +3066,7 @@ private val DiscoverCardShape = RoundedCornerShape(
 @Composable
 private fun DiscoverTrackCard(
     track: Track,
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     onClick: () -> Unit,
     onAddToQueue: () -> Unit,
     isCurrent: Boolean,
@@ -3100,7 +3117,7 @@ private fun DiscoverTrackCard(
 @Composable
 private fun DiscoverAlbumCard(
     album: Album,
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     onOpenAlbum: (Album) -> Unit
 ) {
     Column(
@@ -3137,7 +3154,7 @@ private fun DiscoverAlbumCard(
 @Composable
 private fun AlbumGridCard(
     album: Album,
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     onClick: () -> Unit
 ) {
     Card(
@@ -3279,9 +3296,10 @@ private fun AlbumsContent(
     albums: List<Album>?,
     offlineNotice: String?,
     onOpenAlbum: (Album) -> Unit,
-    coverFor: (Album) -> JellyfinRequest?,
+    coverFor: (Album) -> CoverRequest?,
     onRetry: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRefreshTrial: (() -> Unit)? = null,
 ) {
     LibraryScreenScaffold(
         title = "专辑",
@@ -3294,6 +3312,9 @@ private fun AlbumsContent(
             onRetry = onRetry
         ),
         offlineNotice = offlineNotice,
+        actions = onRefreshTrial?.let { refresh ->
+            { TextButton(onClick = refresh, enabled = !session.isLoading) { Text("刷新") } }
+        },
         modifier = modifier,
         loading = {
             // 骨架屏：与 AlbumGridCard 同构（封面方块 + 两行标题 + 一行副标题），切换不跳变。
@@ -3337,7 +3358,7 @@ private fun AlbumsContent(
  */
 @Composable
 private fun MediaDetailScaffold(
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     coverDescription: String?,
     title: String,
     subtitle: String,
@@ -3426,10 +3447,10 @@ private fun AlbumDetailContent(
     album: Album,
     albumTracks: List<Track>?,
     offlineNotice: String?,
-    coverFor: (Track) -> JellyfinRequest?,
+    coverFor: (Track) -> CoverRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
-    albumCoverFor: (Album) -> JellyfinRequest?,
+    albumCoverFor: (Album) -> CoverRequest?,
     onRetry: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
@@ -3537,7 +3558,7 @@ private fun PlaylistsContent(
     library: LibraryState,
     session: SessionState,
     onOpenPlaylist: (Playlist) -> Unit,
-    coverFor: (Playlist) -> JellyfinRequest?,
+    coverFor: (Playlist) -> CoverRequest?,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -3778,7 +3799,7 @@ private fun SearchContent(
  * 的槽位与分隔线基准，标题/副标题走 [MediaRowText]（工单 07）。 */
 @Composable
 private fun SearchResultRow(
-    cover: JellyfinRequest?,
+    cover: CoverRequest?,
     title: String,
     subtitle: String,
     onClick: () -> Unit,
@@ -3802,10 +3823,10 @@ private fun PlaylistDetailContent(
     playlist: Playlist,
     playlistTracks: List<Track>?,
     offlineNotice: String?,
-    coverFor: (Track) -> JellyfinRequest?,
+    coverFor: (Track) -> CoverRequest?,
     onPlayTrack: (List<Track>, String) -> Unit,
     onAddToQueue: (Track) -> Unit,
-    playlistCoverFor: (Playlist) -> JellyfinRequest?,
+    playlistCoverFor: (Playlist) -> CoverRequest?,
     onRetry: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
@@ -4310,7 +4331,7 @@ private fun RecycleBinSection(fileOps: FileOpsState, viewModel: JellyfinViewMode
 private fun CachedCopiesContent(
     downloads: DownloadsState,
     viewModel: JellyfinViewModel,
-    albumCoverFor: (Album) -> JellyfinRequest?,
+    albumCoverFor: (Album) -> CoverRequest?,
     playback: PlaybackUiState,
     onPlay: (List<Track>, String) -> Unit,
     onBack: () -> Unit,
@@ -4486,8 +4507,8 @@ private fun CompanionDownloadedAlbumRow(
 @Composable
 private fun DownloadedAlbumRow(
     entry: CachedAlbum,
-    cover: JellyfinRequest?,
-    trackCoverFor: (Track) -> JellyfinRequest?,
+    cover: CoverRequest?,
+    trackCoverFor: (Track) -> CoverRequest?,
     isPlayingCopy: (Track) -> Boolean,
     onDeleteTrack: (Track) -> Unit,
     onDeleteAlbum: () -> Unit,
@@ -5086,7 +5107,7 @@ private fun MiniPlayerBar(
  */
 @Composable
 internal fun AlbumCover(
-    request: JellyfinRequest?,
+    request: CoverRequest?,
     contentDescription: String?,
     modifier: Modifier = Modifier,
     cornerRadius: Dp = Dimens.SpaceSmall
@@ -5096,14 +5117,11 @@ internal fun AlbumCover(
             val context = LocalContext.current
             val crossfadeMs = (180f * systemMotionScale()).roundToInt()
             val model = remember(context, request, crossfadeMs) {
-                ImageRequest.Builder(context)
-                    .data(request.url)
-                    .addHeader("Authorization", request.headers["Authorization"].orEmpty())
-                    .crossfade(crossfadeMs)
-                    .build()
+                request.imageRequest(context).crossfade(crossfadeMs).build()
             }
             AsyncImage(
                 model = model,
+                imageLoader = request.imageLoader(context),
                 contentDescription = contentDescription,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

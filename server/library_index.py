@@ -29,6 +29,10 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from mutagen import File as MutagenFile
+from mutagen.id3 import ID3
+from mutagen.mp4 import MP4Tags
+
+from library_artwork import embedded_artwork
 
 log = logging.getLogger("library_index")
 
@@ -164,6 +168,33 @@ def read_tags(path: Path) -> dict:
         return {}
 
 
+def _read_catalog_tags(path: Path) -> dict:
+    """一次读出清单用的文字标签和有无封面；不把封面字节常驻在索引里。"""
+    try:
+        audio = MutagenFile(path)
+    except Exception:
+        return {}
+    if audio is None:
+        return {}
+    tags = audio.tags
+    if isinstance(tags, ID3):
+        fields = {name: tags.get(frame) for name, frame in zip(
+            ("title", "artist", "album", "albumartist"), ("TIT2", "TPE1", "TALB", "TPE2"),
+        )}
+        result = {name: value.text for name, value in fields.items() if value is not None}
+    elif isinstance(tags, MP4Tags):
+        result = {name: tags.get(atom) for name, atom in zip(
+            ("title", "artist", "album", "albumartist"), ("\xa9nam", "\xa9ART", "\xa9alb", "aART"),
+        )}
+    else:
+        result = dict(tags.items()) if tags is not None else {}
+    try:
+        result["has_artwork"] = embedded_artwork(audio) is not None
+    except Exception:  # 坏封面不影响歌名、艺术家或专辑。
+        result["has_artwork"] = False
+    return result
+
+
 def _unlinked_stat(path: Path) -> os.stat_result | None:
     try:
         info = path.lstat()
@@ -220,6 +251,7 @@ class LibraryTrack:
     title: str
     artist: str
     album: str
+    has_artwork: bool = False
 
 
 class LibraryIndex:
@@ -231,7 +263,7 @@ class LibraryIndex:
     「没有」，宁可漏判让用户多下一次，也不误判挡住用户。
     """
 
-    def __init__(self, root: Path, read_tags: Callable[[Path], dict] = read_tags):
+    def __init__(self, root: Path, read_tags: Callable[[Path], dict] = _read_catalog_tags):
         self._root = Path(root).absolute()
         self._read_tags = read_tags
         self._refresh_lock = threading.Lock()
@@ -290,6 +322,20 @@ class LibraryIndex:
             return None
         info = self._checked_audio_stat(path)
         return (path, info) if info is not None else None
+
+    @staticmethod
+    def read_artwork(path: Path, info: os.stat_result) -> tuple[bytes, str] | None:
+        """只读已核对的文件；读不到不影响音频或整份清单。"""
+        try:
+            with path.open("rb") as file:
+                if not same_audio_file(info, os.fstat(file.fileno())):
+                    return None
+                artwork = embedded_artwork(MutagenFile(file))
+                if not same_audio_file(info, os.fstat(file.fileno())):
+                    return None
+            return artwork
+        except Exception:  # 标签损坏、格式不支持或读取失败都走占位图。
+            return None
 
     def evidence(self, paths: list[str]) -> list[dict]:
         """按手机给的旧文件路径找索引里的同一份文件，返回大小与 SHA-256。
@@ -425,7 +471,7 @@ class LibraryIndex:
         # ID 只取曲库相对路径，不随内嵌标签、内容或进程重启改变。
         relative = path.relative_to(self._root).as_posix()
         track_id = sha256(relative.encode("utf-8", errors="surrogatepass")).hexdigest()
-        return LibraryTrack(track_id, title, artist, _tag_value(tags, "album"))
+        return LibraryTrack(track_id, title, artist, _tag_value(tags, "album"), tags.get("has_artwork") is True)
 
     def _checked_audio_stat(self, path: Path) -> os.stat_result | None:
         if path == self._root or not path.is_relative_to(self._root):

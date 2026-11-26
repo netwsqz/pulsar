@@ -1,5 +1,6 @@
 package com.example.pulsar.library
 
+import com.example.pulsar.data.companion.CompanionArtworkRequest
 import com.example.pulsar.data.companion.CompanionLibraryConnection
 import com.example.pulsar.data.companion.CompanionLibraryError
 import com.example.pulsar.domain.model.Album
@@ -10,10 +11,7 @@ import com.example.pulsar.download.CompanionDownloadTarget
 import com.example.pulsar.download.CompanionDownloadedAlbum
 import com.example.pulsar.download.LinkedDownload
 import com.example.pulsar.download.isCompanionDownloadMediaId
-import com.example.pulsar.offline.albumIdentityOf
-import com.example.pulsar.offline.normalizedNameKey
 import com.example.pulsar.offline.offlineUnplayableReason
-import com.example.pulsar.offline.toAlbumCard
 import com.example.pulsar.playback.PlaybackGate
 import com.example.pulsar.state.SearchState
 import kotlinx.coroutines.CoroutineDispatcher
@@ -29,7 +27,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal data class CompanionLibraryTrialState(
-    val tracks: List<Track>? = null,
+    val catalog: CompanionTrackCatalog? = null,
     val isLoading: Boolean = true,
     val error: CompanionLibraryError? = null,
     val needsPairing: Boolean = false,
@@ -39,9 +37,10 @@ internal data class CompanionLibraryTrialState(
     val downloadedTrackIds: Set<String> = emptySet(),
     val downloads: List<CompanionDownloadedAlbum> = emptyList(),
 ) {
-    private val tracksById by lazy(LazyThreadSafetyMode.NONE) { tracks.orEmpty().associateBy(Track::id) }
+    val tracks: List<Track>? get() = catalog?.tracks
+    val albums: List<Album>? get() = catalog?.albums
 
-    fun contains(track: Track): Boolean = tracksById[track.id] == track
+    fun contains(track: Track): Boolean = catalog?.track(track.id) == track
 }
 
 /** 电脑曲库试用：在线读电脑曲库，断网只展示完整的本机下载，不借用 Jellyfin 会话。入口在主线程调用。 */
@@ -93,7 +92,7 @@ internal class CompanionLibraryTrial(
         localJob?.cancel()
         val current = state.value
         _state.value = current.copy(
-            tracks = null,
+            catalog = null,
             isLoading = true,
             error = null,
             search = SearchState(query = current.search.query, isSearching = current.search.query.isNotBlank()),
@@ -150,8 +149,14 @@ internal class CompanionLibraryTrial(
         val current = state.value
         val query = current.search.query
         val resultsChanged = tracks != current.tracks || offline != current.isOffline
+        val albumsChanged = offline && groups != current.downloads
+        val browseCatalog = if (resultsChanged || albumsChanged) tracks?.let {
+            val knownTotals = if (offline) groups.associate { group -> group.album.id to group.totalCount }
+                else emptyMap()
+            CompanionTrackCatalog(it, knownTotals)
+        } else current.catalog
         _state.value = current.copy(
-            tracks = tracks,
+            catalog = browseCatalog,
             isLoading = false,
             error = error.takeUnless { offline },
             isOffline = offline,
@@ -175,20 +180,20 @@ internal class CompanionLibraryTrial(
         }
     }
 
-    fun albumFor(track: Track): Album? {
-        if (!state.value.contains(track)) return null
-        val identity = albumIdentityOf(track)
-        return if (identity.key.isNotEmpty()) identity.toAlbumCard().copy(id = albumId(track))
-            else Album(albumId(track), "未标注专辑", track.artist, null, null)
+    fun albumFor(track: Track): Album? = state.value.catalog?.takeIf { it.track(track.id) == track }?.albumFor(track)
+
+    fun albumTracks(album: Album): List<Track>? = state.value.catalog?.members(album)
+
+    fun trackArtwork(track: Track): CompanionArtworkRequest? {
+        val pairing = pairingScope ?: return null
+        val current = state.value
+        if (current.isOffline || current.isLoading) return null
+        // 播放会话恢复的曲目只有元数据；仍用当前清单的身份与版本解析封面。
+        return current.catalog?.track(track.id)?.let { connection.artwork(it, pairing) }
     }
 
-    // PC 清单还没有专辑 ID。至少用歌手区分同名专辑，避免点下载时混进别人的歌。
-    private fun albumId(track: Track): String {
-        val artist = normalizedNameKey(track.artist).orEmpty()
-        return "${artist.length}:$artist:${albumIdentityOf(track).key}"
-    }
-
-    fun albumTracks(album: Album): List<Track>? = state.value.tracks?.filter { albumId(it) == album.id }
+    fun albumArtwork(album: Album): CompanionArtworkRequest? =
+        state.value.catalog?.artworkTrack(album)?.let(::trackArtwork)
 
     fun downloadTarget(album: Album, tracks: List<Track>): CompanionDownloadTarget? {
         val pairing = pairingScope ?: return null

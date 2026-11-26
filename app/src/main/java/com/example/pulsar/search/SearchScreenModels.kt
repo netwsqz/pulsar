@@ -1,7 +1,7 @@
 package com.example.pulsar.search
 
 import com.example.pulsar.QQDownloadUiState
-import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.CoverRequest
 import com.example.pulsar.data.qqdownload.QQAlbumDto
 import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.domain.model.Album
@@ -29,9 +29,9 @@ internal data class SearchScreenState(
     val qq: QQDownloadUiState,
     val currentTrackId: String?,
     val isPlaying: Boolean,
-    val trackCover: (Track) -> JellyfinRequest?,
-    val albumCover: (Album) -> JellyfinRequest?,
-    val playlistCover: (Playlist) -> JellyfinRequest?,
+    val trackCover: (Track) -> CoverRequest?,
+    val albumCover: (Album) -> CoverRequest?,
+    val playlistCover: (Playlist) -> CoverRequest?,
     val isCompanionTrial: Boolean = false,
 )
 
@@ -50,9 +50,9 @@ internal fun searchScreenState(
     qq: QQDownloadUiState,
     currentTrackId: String?,
     isPlaying: Boolean,
-    trackCover: (Track) -> JellyfinRequest?,
-    albumCover: (Album) -> JellyfinRequest?,
-    playlistCover: (Playlist) -> JellyfinRequest?,
+    trackCover: (Track) -> CoverRequest?,
+    albumCover: (Album) -> CoverRequest?,
+    playlistCover: (Playlist) -> CoverRequest?,
     isCompanionTrial: Boolean = false,
 ): SearchScreenState = SearchScreenState(
     view = unifiedSearchViewState(

@@ -1,5 +1,6 @@
 package com.example.pulsar.data.jellyfin
 
+import com.example.pulsar.data.CoverRequest
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
@@ -159,9 +160,9 @@ class JellyfinUrlBuilder(baseUrl: String) {
 }
 
 data class JellyfinRequest(
-    val url: String,
+    override val url: String,
     val headers: Map<String, String>
-)
+) : CoverRequest
 
 /**
  * MediaBrowser 鉴权头的**唯一拼装实现**（#23）。URL 构建器、数据源、登录请求都走这里，

@@ -15,10 +15,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.graphics.drawable.toBitmap
 import androidx.core.graphics.scale
 import androidx.palette.graphics.Palette
-import coil.imageLoader
-import coil.request.ImageRequest
 import coil.request.SuccessResult
-import com.example.pulsar.data.jellyfin.JellyfinRequest
+import com.example.pulsar.data.CoverRequest
+import com.example.pulsar.ui.components.imageLoader
+import com.example.pulsar.ui.components.imageRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -40,7 +40,7 @@ internal data class CoverTheme(
  */
 @Composable
 internal fun rememberCoverGradient(
-    coverRequest: JellyfinRequest?,
+    coverRequest: CoverRequest?,
     darkTheme: Boolean,
     preset: Color? = null,
     sessionIdentity: Any? = null,
@@ -94,12 +94,10 @@ private class CoverSwatches(val vibrant: CoverSwatch?, val all: List<CoverSwatch
 private class CoverSample(val small: Bitmap, val swatches: CoverSwatches, val artwork: Bitmap?)
 
 /** 任一请求失败就显示同一套既有兜底；仍遵守协程取消。 */
-private suspend fun extractCoverSample(context: Context, request: JellyfinRequest, artworkSizePx: Int?): CoverSample? {
+private suspend fun extractCoverSample(context: Context, request: CoverRequest, artworkSizePx: Int?): CoverSample? {
     return try {
-        val result = context.imageLoader.execute(
-            ImageRequest.Builder(context)
-                .data(request.url)
-                .addHeader("Authorization", request.headers["Authorization"].orEmpty())
+        val result = request.imageLoader(context).execute(
+            request.imageRequest(context)
                 .size(artworkSizePx ?: 96)
                 .allowHardware(false) // Palette 要读像素。
                 .build()

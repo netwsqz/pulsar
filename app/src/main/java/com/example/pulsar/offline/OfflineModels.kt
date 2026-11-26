@@ -32,7 +32,9 @@ internal data class OfflineInput(
     val recentlyAdded: List<Album>? = null,
     /** 曲库是否已经拉到（即 `tracks != null`）：null 与空列表语义不同——前者是骨架，后者确实没有。 */
     val tracksLoaded: Boolean,
-    val isLoading: Boolean
+    val isLoading: Boolean,
+    /** 电脑曲库的专辑按自身 ID 归组，传入的是由已下载曲目反推的卡片。 */
+    val prefilteredAlbumCards: Boolean = false,
 )
 
 /**

@@ -204,7 +204,12 @@ def _file_stamp(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def _revision(info: os.stat_result) -> str:
+def same_audio_file(expected: os.stat_result, opened: os.stat_result) -> bool:
+    """比较索引查找与实际打开的文件，兼容 Windows lstat 与 fstat。"""
+    return stat.S_ISREG(opened.st_mode) and _file_stamp(expected) == _file_stamp(opened)
+
+
+def audio_revision(info: os.stat_result) -> str:
     # 仅用来发现文件变化，不能代替首次核对时的整份字节摘要。
     return sha256(repr((*_file_stamp(info), info.st_ctime_ns)).encode("ascii")).hexdigest()
 
@@ -274,7 +279,7 @@ class LibraryIndex:
             file = self.audio_file(track.id)
             if file is not None:
                 _, info = file
-                result.append({**asdict(track), "revision": _revision(info)})
+                result.append({**asdict(track), "revision": audio_revision(info)})
         return result
 
     def audio_file(self, track_id: str) -> tuple[Path, os.stat_result] | None:
@@ -311,7 +316,7 @@ class LibraryIndex:
                 continue
             results.append({
                 **asdict(track), "path": raw, "size": info.st_size,
-                "sha256": digest, "revision": _revision(info),
+                "sha256": digest, "revision": audio_revision(info),
             })
         return results
 

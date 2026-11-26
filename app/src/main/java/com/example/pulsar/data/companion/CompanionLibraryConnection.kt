@@ -17,7 +17,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -44,6 +46,8 @@ internal class CompanionLibraryConnection(
         private set
 
     fun streamUrl(mediaId: String): String? = current?.streamUrl(mediaId)
+
+    val savedScopeChanges = store.pairings.map { it?.scope }.distinctUntilChanged()
 
     /** 冷启动读取副本归属不发网络请求；服务地址相同但配对密钥变了也不是同一份确认。 */
     suspend fun savedScope(): String? = store.load()?.scope
@@ -81,6 +85,10 @@ internal class CompanionLibraryConnection(
 
     fun playbackAuthorization(url: HttpUrl): String? = current?.let { pairing ->
         if (pairing.ownsStream(url)) pairing.authorization else null
+    }
+
+    fun downloadAuthorization(url: HttpUrl, scope: String): String? = current?.let { pairing ->
+        pairing.authorization.takeIf { pairing.scope == scope && pairing.ownsStream(url) }
     }
 
     suspend fun pair(address: String, key: String): Result<List<Track>> = mutex.withLock {
@@ -163,7 +171,7 @@ private data class CompanionTrack(
     val id: String, val title: String, val artist: String, val album: String, val revision: String? = null,
 ) {
     fun toTrack(pairing: CompanionPairing) =
-        Track(pairing.mediaId(id), title, artist, album, null, null, sourceRevision = revision)
+        Track(pairing.mediaId(id), title, artist, album, null, null, sourceRevision = revision?.takeIf(trackIdPattern::matches))
 }
 
 @Serializable
@@ -269,12 +277,13 @@ internal class CompanionPairing private constructor(
 }
 
 internal class CompanionPairingStore(private val dataStore: DataStore<Preferences>) {
-    suspend fun load(): CompanionPairing? {
-        val preferences = dataStore.data.first()
-        val address = preferences[companionAddressKey] ?: return null
-        val key = preferences[companionAccessKey] ?: return null
-        return CompanionPairing.parse(address, key)
+    val pairings = dataStore.data.map { preferences ->
+        preferences[companionAddressKey] to preferences[companionAccessKey]
+    }.distinctUntilChanged().map { (address, key) ->
+        if (address == null || key == null) null else CompanionPairing.parse(address, key)
     }
+
+    suspend fun load(): CompanionPairing? = pairings.first()
 
     suspend fun save(pairing: CompanionPairing) {
         dataStore.edit(pairing::saveInto)

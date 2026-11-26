@@ -10,16 +10,18 @@ import androidx.media3.datasource.cache.CacheDataSource
 import com.example.pulsar.data.companion.isCompanionStreamUrl
 import com.example.pulsar.download.existingDownloadIdFromUri
 import com.example.pulsar.download.isExistingDownloadPlaybackUri
+import com.example.pulsar.download.isCompanionDownloadPlaybackUri
 import com.example.pulsar.download.isLinkedDownloadPlaybackUri
 import java.io.IOException
 import kotlinx.coroutines.runBlocking
 
-/** 原曲库可退回网络；「已有下载」单走没有网络上游的只读源。 */
+/** 流媒体可退回网络；本机下载单走没有网络上游的只读源。 */
 internal fun playbackDataSourceFactory(
     cache: Cache,
     jellyfin: DataSource.Factory,
     companion: DataSource.Factory,
     resolveLinkedKey: suspend (String) -> String? = { null },
+    resolveCompanionKey: suspend (String) -> String? = { null },
     resolveExistingKey: suspend (String) -> String?,
 ): DataSource.Factory {
     val online = CacheDataSource.Factory()
@@ -27,6 +29,8 @@ internal fun playbackDataSourceFactory(
         .setUpstreamDataSourceFactory(PlaybackUpstreamFactory { uri ->
             if (isCompanionStreamUrl(uri)) companion else jellyfin
         })
+        // 流地址只查自己的键；私有下载键只能经过下方的归属检查取得。
+        .setCacheKeyFactory { spec -> spec.uri.toString() }
         .setCacheWriteDataSinkFactory(null)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
     val existing = ResolvingDataSource.Factory(
@@ -35,14 +39,19 @@ internal fun playbackDataSourceFactory(
         // Media3 在加载线程打开数据源。重新校验本机归属和完整性，包括从队列续播或拖进度。
         val uri = spec.uri.toString()
         val key = runBlocking {
-            if (isLinkedDownloadPlaybackUri(uri)) resolveLinkedKey(uri)
-            else existingDownloadIdFromUri(uri)?.let { resolveExistingKey(it) }
-        } ?: throw IOException("已有下载的原副本暂不可读")
+            when {
+                isCompanionDownloadPlaybackUri(uri) -> resolveCompanionKey(uri)
+                isLinkedDownloadPlaybackUri(uri) -> resolveLinkedKey(uri)
+                else -> existingDownloadIdFromUri(uri)?.let { resolveExistingKey(it) }
+            }
+        } ?: throw IOException("手机上的下载暂不可读")
         // 只替换读取定位，保留 Media3 请求的字节范围；不采用调用方传来的键。
         spec.buildUpon().setKey(key).build()
     }
     return PlaybackUpstreamFactory { uri ->
-        if (isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri)) existing else online
+        if (isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri) || isCompanionDownloadPlaybackUri(uri)) {
+            existing
+        } else online
     }
 }
 

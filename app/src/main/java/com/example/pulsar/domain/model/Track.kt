@@ -22,6 +22,6 @@ data class Track(
      * 文件操作菜单对这首歌不可用。
      */
     val filePath: String? = null,
-    /** 电脑文件版本。只用于撤下过期的副本关联，不改变曲目 ID。 */
+    /** 电脑文件版本。用于确认关联仍有效，以及避免续传时混用不同版本的字节。 */
     val sourceRevision: String? = null,
 )

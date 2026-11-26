@@ -5,7 +5,15 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.example.pulsar.data.companion.CompanionLibraryConnection
+import com.example.pulsar.data.companion.companionDownloadHttpClient
+import com.example.pulsar.download.CompanionDownloads
+import com.example.pulsar.download.companionDownloadVersion
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.io.IOException
 import com.example.pulsar.data.companion.CompanionPairingStore
 import com.example.pulsar.data.jellyfin.JellyfinDataSource
 import com.example.pulsar.data.jellyfin.JellyfinLoginApi
@@ -173,11 +181,28 @@ class PulsarApplication : Application() {
         )
     }
 
-    /** 下载库。上游（网络）源与播放共用 [SessionManager] 的鉴权头：token 只进 header，绝不进 URL。 */
-    fun mediaDownloads(): MediaDownloads = SimpleCacheMediaDownloads(
-        cache = mediaCacheStore,
-        upstreamFactory = AuthHttpDataSourceFactory { sessionManager.authorizationHeader },
-    )
+    private val downloadHttpClient by lazy { companionDownloadHttpClient() }
+
+    /** 只在手动下载时选写入上游，原曲库的请求不带电脑访问密钥。 */
+    fun mediaDownloads(): MediaDownloads {
+        val jellyfin = AuthHttpDataSourceFactory { sessionManager.authorizationHeader }
+        return SimpleCacheMediaDownloads(mediaCacheStore, jellyfin) { key ->
+            val version = companionDownloadVersion(key)
+            if (version == null) jellyfin else companionDownloadSource(version.pairing, version.revision)
+        }
+    }
+
+    private fun companionDownloadSource(pairing: String, revision: String): DataSource.Factory =
+        ResolvingDataSource.Factory(OkHttpDataSource.Factory(downloadHttpClient)) { spec ->
+            val url = spec.uri.toString().toHttpUrlOrNull()
+            val auth = url?.let { companionLibrary.downloadAuthorization(it, pairing) }
+                ?: throw IOException("电脑曲库的下载地址不属于当前配对")
+            spec.withAdditionalHeaders(mapOf("Authorization" to auth, "If-Match" to "\"$revision\""))
+        }
+
+    internal val companionDownloads by lazy {
+        CompanionDownloads(pulsarPreferencesDataStore, mediaDownloads(), downloadScheduler, companionLibrary::savedScope)
+    }
 
     /** 曲库快照：一份 JSON 落在 App 私有目录，断网时顶上。 */
     fun librarySnapshotRepository(): LibrarySnapshotRepository =

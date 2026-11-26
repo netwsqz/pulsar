@@ -7,12 +7,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest, token_hex
 
-from fastapi import APIRouter, Depends, HTTPException
+import anyio
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, StrictStr
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, Response
 
-from library_index import LibraryIndex
+from library_index import LibraryIndex, audio_revision, same_audio_file
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,55 @@ def _load_access_key(path: Path) -> bytes:
     if not re.fullmatch(rb"[0-9a-f]{64}", key):
         raise ValueError("访问密钥文件格式不正确")
     return key
+
+
+class _VersionedAudioResponse(FileResponse):
+    """条件读取先打开再核对，实际读取与校验用同一个文件句柄。"""
+
+    async def __call__(self, scope, receive, send):
+        try:
+            file = await anyio.open_file(self.path, "rb")
+        except OSError:
+            return await Response(status_code=412)(scope, receive, send)
+        async with file:
+            opened = await anyio.to_thread.run_sync(os.fstat, file.wrapped.fileno())
+            if not same_audio_file(self.stat_result, opened):
+                return await Response(status_code=412)(scope, receive, send)
+            self._audio = file
+            await super().__call__(scope, receive, send)
+
+    async def _handle_simple(self, send, send_header_only, send_pathsend):
+        await send({"type": "http.response.start", "status": 200, "headers": self.raw_headers})
+        await self._send_audio(send, 0 if send_header_only else self.stat_result.st_size)
+
+    async def _handle_single_range(self, send, start, end, file_size, send_header_only):
+        headers = self.headers.mutablecopy()
+        headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
+        headers["content-length"] = str(end - start)
+        await self._audio.seek(start)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        await self._send_audio(send, 0 if send_header_only else end - start)
+
+    async def _handle_multiple_ranges(self, send, ranges, file_size, send_header_only):
+        # 手机续传每次只请求一段；普通播放的多段 Range 继续由 FileResponse 处理。
+        await send({"type": "http.response.start", "status": 400, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def _send_audio(self, send, remaining):
+        if not remaining:
+            await send({"type": "http.response.body", "body": b""})
+            return
+        while remaining:
+            chunk = await self._audio.read(min(remaining, self.chunk_size))
+            if not chunk:
+                raise OSError("读取期间文件长度发生变化")
+            remaining -= len(chunk)
+            if remaining == 0:
+                # 最后一块不确认就不交付；连接提前结束，手机不会把这份副本标为完整。
+                opened = await anyio.to_thread.run_sync(os.fstat, self._audio.wrapped.fileno())
+                if not same_audio_file(self.stat_result, opened):
+                    raise OSError("读取期间文件发生变化")
+            await send({"type": "http.response.body", "body": chunk, "more_body": remaining > 0})
 
 
 class EvidenceRequest(BaseModel):
@@ -80,11 +130,16 @@ def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
         return JSONResponse({"tracks": index.evidence(request.paths)}, headers={"Cache-Control": "private, no-store"})
 
     @router.get("/tracks/{track_id}/audio", response_class=FileResponse)
-    def audio(track_id: str) -> FileResponse:
+    def audio(track_id: str, if_match: str | None = Header(None)) -> FileResponse:
         file = index.audio_file(track_id)
         if file is None:
             raise HTTPException(404, "曲目不存在")
         path, info = file
-        return FileResponse(path, stat_result=info, headers={"Cache-Control": "private, no-store"})
+        tag = f'"{audio_revision(info)}"'
+        # 手动下载补缺口时，旧版本的片段不能和新文件的字节拼在一起。
+        if if_match is not None and not any(part.strip() in (tag, "*") for part in if_match.split(",")):
+            raise HTTPException(412, "电脑上的文件已变化，请刷新曲库")
+        response = FileResponse if if_match is None else _VersionedAudioResponse
+        return response(path, stat_result=info, headers={"Cache-Control": "private, no-store", "ETag": tag})
 
     return router

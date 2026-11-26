@@ -4,9 +4,11 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import com.example.pulsar.data.companion.CompanionLibraryConnection
 import com.example.pulsar.data.companion.CompanionPairingStore
 import com.example.pulsar.data.companion.CompanionLibraryError
-import com.example.pulsar.data.qqdownload.QQSongDto
 import com.example.pulsar.QueueTrack
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.domain.model.Album
+import com.example.pulsar.download.CompanionDownloadCopy
+import com.example.pulsar.download.CompanionDownloadedAlbum
 import com.example.pulsar.download.LinkedDownload
 import com.example.pulsar.playback.FakePlaybackRemote
 import com.example.pulsar.playback.FakeTrackMediaItemFactory
@@ -95,7 +97,7 @@ class CompanionLibraryTrialTest {
     }
 
     @Test
-    fun `已有配对时断连 扫描中 密钥失效和空库可区分 QQ 有结果也不遮住重试提示`() = runTest {
+    fun `已有配对时离线空态 扫描中 密钥失效和在线空库可区分`() = runTest {
         val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
             temp.root.resolve("pulsar.preferences_pb")
         }
@@ -113,18 +115,13 @@ class CompanionLibraryTrialTest {
             trial.enter()
             trial.updateSearchQuery("浮夸")
             val offline = trial.state.first { !it.isLoading }
-            assertEquals(CompanionLibraryError.Network, offline.error)
-            assertNull(offline.tracks)
+            assertTrue(offline.isOffline)
+            assertEquals(emptyList<Track>(), offline.tracks)
+            assertNull(offline.error)
             assertEquals(false, offline.needsPairing)
             assertEquals("http://192.168.1.8:8900", offline.serviceUrl)
 
-            val qqSong = QQSongDto(title = "浮夸", singer = "陈奕迅", songMid = "qq-song")
-            val combined = unifiedSearchViewState(
-                SearchInput(offline.search.query, errorMessage = offline.error?.message, showLibraryErrorWithQqResults = true),
-                QqSearchInput(songs = listOf(qqSong)),
-            ) as SearchViewState.Results
-            assertEquals(listOf(qqSong), combined.qqSongs)
-            assertEquals(CompanionLibraryError.Network.message, combined.libraryError)
+            assertTrue(offline.search.isOfflineSearch)
 
             status = HttpStatusCode.ServiceUnavailable
             trial.retry()
@@ -206,10 +203,10 @@ class CompanionLibraryTrialTest {
             )
             online = false
             trial.enter()
-            assertEquals(CompanionLibraryError.Network, trial.state.first { !it.isLoading }.error)
+            assertTrue(trial.state.first { !it.isLoading }.tracks!!.isEmpty())
             available = listOf(original)
-            trial.reloadLinkedDownloads()
-            val offline = trial.state.first { it.isOffline }
+            trial.reloadLocalDownloads()
+            val offline = trial.state.first { it.tracks == listOf(old) }
             assertTrue(offline.isOffline)
             assertEquals(listOf(old), offline.tracks)
             trial.updateSearchQuery("同名歌")
@@ -228,6 +225,69 @@ class CompanionLibraryTrialTest {
             val changed = refreshed.tracks.first()
             assertEquals(old.id, changed.id)
             assertEquals("http://192.168.1.8:8900/api/library/tracks/$id/audio", trial.streamUrl(changed))
+        }
+    }
+
+    @Test
+    fun `已下载列表的电脑曲目断网重开后仍能从歌曲和搜索点播 只显示完整副本`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        var online = true
+        val revision = "c".repeat(64)
+        HttpClient(MockEngine {
+            if (!online) throw IOException("电脑关机")
+            respond("""{"tracks":[{"id":"$id","title":"已下载","artist":"歌手","album":"专辑","revision":"$revision"},
+                {"id":"${"b".repeat(64)}","title":"未下载","artist":"歌手","album":"专辑","revision":"$revision"}]}""")
+        }).use { client ->
+            val store = CompanionPairingStore(preferences)
+            val connection = CompanionLibraryConnection(client, store)
+            val saved = connection.pair("192.168.1.8", "test-key").getOrThrow().first()
+            val pairing = checkNotNull(connection.savedScope())
+            val copy = CompanionDownloadCopy(pairing, saved)
+            val album = Album("专辑", "专辑", "歌手", 2, null)
+            val group = CompanionDownloadedAlbum(pairing, album, listOf(copy), totalCount = 2)
+            val restart = CompanionLibraryTrial(
+                CompanionLibraryConnection(client, store), backgroundScope, StandardTestDispatcher(testScheduler),
+                loadDownloads = { listOf(group) },
+            )
+            online = false
+            restart.enter()
+            val offline = restart.state.first { !it.isLoading }
+            assertTrue(offline.isOffline)
+            assertEquals(listOf(saved), offline.tracks)
+            assertEquals(copy.playbackUri, restart.streamUrl(offline.tracks!!.single()))
+            assertEquals(copy.playbackUri, restart.streamUrl(offline.downloads.single().copies.single().savedTrack))
+            restart.updateSearchQuery("载")
+            advanceTimeBy(LIBRARY_SEARCH_DEBOUNCE_MS)
+            runCurrent()
+            assertEquals(listOf(saved), restart.state.value.search.results?.tracks)
+        }
+    }
+
+    @Test
+    fun `从歌曲打开专辑下载只选同一专辑原文件 不把同名专辑和旧副本当下载地址`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val revision = "c".repeat(64)
+        HttpClient(MockEngine {
+            respond("""{"tracks":[{"id":"$id","title":"原曲","artist":"歌手","album":"专辑","revision":"$revision"},
+                {"id":"${"b".repeat(64)}","title":"另一首","artist":"另一位歌手","album":"专辑","revision":"$revision"}]}""")
+        }).use { client ->
+            val store = CompanionPairingStore(preferences)
+            val connection = CompanionLibraryConnection(client, store)
+            val saved = connection.pair("192.168.1.8", "test-key").getOrThrow().first()
+            val trial = CompanionLibraryTrial(connection, backgroundScope, StandardTestDispatcher(testScheduler),
+                loadLinked = { listOf(LinkedDownload(saved, "existing:account:copy", "stamp")) })
+            trial.enter()
+            trial.state.first { !it.isLoading }
+            val album = checkNotNull(trial.albumFor(saved))
+            val tracks = checkNotNull(trial.albumTracks(album))
+            assertEquals(listOf(saved), tracks)
+            assertTrue(trial.streamUrl(saved)!!.startsWith("pulsar-linked:"))
+            val target = checkNotNull(trial.downloadTarget(album, tracks))
+            assertEquals(listOf(saved to "http://192.168.1.8:8900/api/library/tracks/$id/audio"), target.tracks)
         }
     }
 

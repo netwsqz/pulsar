@@ -167,6 +167,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -278,6 +279,11 @@ import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.example.pulsar.data.companion.isCompanionMediaId
+import com.example.pulsar.download.CompanionDownloadTarget
+import com.example.pulsar.download.CompanionDownloadedAlbum
+import com.example.pulsar.download.DownloadActionState
+import com.example.pulsar.download.downloadDeletedMessage
+import com.example.pulsar.download.isCompanionDownloadMediaId
 import com.example.pulsar.download.existingDownloadPlaybackUri
 import com.example.pulsar.download.isExistingDownloadMediaId
 import com.example.pulsar.library.CompanionLibraryTrial
@@ -391,12 +397,16 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
             application.companionLibrary, scope,
             loadLinked = { application.downloadLibrary.loadLinkedDownloads(it) },
             checkCatalog = { pairing, tracks -> application.downloadLibrary.checkLinkedCatalog(pairing, tracks) },
+            loadDownloads = { application.companionDownloads.load(it) },
         )
     }
     LaunchedEffect(trial) {
         application.sessionManager.savedDownloadAccountChanges.catch { emit(null) }.collect {
-            trial.reloadLinkedDownloads()
+            trial.reloadLocalDownloads()
         }
+    }
+    LaunchedEffect(trial) {
+        application.companionDownloads.changes.catch { emit(Unit) }.collect { trial.reloadLocalDownloads() }
     }
     val trialState by trial.state.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -416,7 +426,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
         TrackMediaItemFactory { track ->
             val url = when {
                 isExistingDownloadMediaId(track.id) -> existingDownloadPlaybackUri(track.id)
-                isCompanionMediaId(track.id) -> trial.streamUrl(track)
+                isCompanionMediaId(track.id) || isCompanionDownloadMediaId(track.id) -> trial.streamUrl(track)
                 else -> viewModel.streamUrl(track)
             }
             url?.let { buildMediaItem(track, it) }
@@ -429,7 +439,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
             override fun unplayableReason(track: Track): String? = when {
                 isExistingDownloadMediaId(track.id) -> null // 播放数据源打开时重新核对落盘归属与原字节。
                 showCompanionLibrary -> trial.unplayableReason(track)
-                isCompanionMediaId(track.id) -> "请从当前曲库重新选择歌曲"
+                isCompanionMediaId(track.id) || isCompanionDownloadMediaId(track.id) -> "请从当前曲库重新选择歌曲"
                 else -> viewModel.unplayableReason(track)
             }
         }
@@ -517,7 +527,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                         tracks = trialState.tracks, search = trialState.search, isOffline = trialState.isOffline,
                     ) else state.library,
                     session = if (trialActive) SessionState(isLoading = trialState.isLoading, errorMessage = trialState.error?.message) else state.session,
-                    downloads = if (trialActive) DownloadsState(visibleTrackIds = trialState.reusedTrackIds) else state.downloads,
+                    downloads = if (trialActive) DownloadsState(visibleTrackIds = trialState.downloadedTrackIds) else state.downloads,
                     viewModel = viewModel,
                     playbackSession = playbackSession,
                     qqState = qqState,
@@ -528,6 +538,7 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                     themePreferences = themePreferences,
                     onOpenCompanionLibrary = { setTrial(true) },
                     companionTrial = trial.takeIf { trialActive },
+                    companionGroups = trialState.downloads.takeIf { trialActive },
                     onRePair = { showPairing = true },
                     onExitTrial = { setTrial(false) },
                 )
@@ -910,6 +921,7 @@ private fun MusicLibraryScreen(
     themePreferences: ThemePreferences,
     onOpenCompanionLibrary: () -> Unit,
     companionTrial: CompanionLibraryTrial?,
+    companionGroups: List<CompanionDownloadedAlbum>? = null,
     onRePair: () -> Unit,
     onExitTrial: () -> Unit,
     onCloseLocalDownloads: (() -> Unit)? = null,
@@ -1281,10 +1293,12 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search && s != LibrarySection.CachedCopies) {
+                if (trialActive && s != LibrarySection.Tracks && s != LibrarySection.Search &&
+                    s != LibrarySection.CachedCopies && s !is LibrarySection.AlbumDetail
+                ) {
                     LibraryScreenScaffold(
                         title = s.navLabel().orEmpty(),
-                        loadState = LoadState.Empty("电脑曲库试用目前支持歌曲和搜索"),
+                        loadState = LoadState.Empty("电脑曲库试用目前支持歌曲、搜索和手动下载"),
                         actions = { TextButton(onClick = { goTo(LibrarySection.Tracks) }) { Text("打开歌曲") } },
                         loading = {},
                         content = {},
@@ -1401,17 +1415,20 @@ private fun MusicLibraryScreen(
                     is LibrarySection.AlbumDetail -> AlbumDetailContent(
                         session = session,
                         album = s.album,
-                        albumTracks = visible.albumTracks,
+                        albumTracks = if (companionTrial != null) companionTrial.albumTracks(s.album) else visible.albumTracks,
                         offlineNotice = offlineNotice,
-                        coverFor = viewModel::trackCover,
+                        coverFor = if (trialActive) { { null } } else viewModel::trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
-                        albumCoverFor = viewModel::albumCover,
-                        onRetry = { viewModel.loadAlbumTracks(s.album) },
+                        albumCoverFor = if (trialActive) { { null } } else viewModel::albumCover,
+                        onRetry = if (companionTrial != null) companionTrial::retry else { { viewModel.loadAlbumTracks(s.album) } },
                         currentTrackId = currentTrack?.id,
                         isPlaying = playback.isPlaying,
                         streamUrl = viewModel::streamUrl,
                         onDownloadMessage = showMessage,
+                        companionDownloadTarget = companionTrial?.let { trial ->
+                            { tracks -> trial.downloadTarget(s.album, tracks) }
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
                     is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
@@ -1452,7 +1469,9 @@ private fun MusicLibraryScreen(
                             goTo(if (trialActive) defaultSection else LibrarySection.Settings, isBack = true)
                         },
                         showOriginalGroups = !localDownloadsOnly && !trialActive,
-                        onLinked = companionTrial?.let { it::reloadLinkedDownloads },
+                        onLinked = companionTrial?.let { it::reloadLocalDownloads },
+                        companionGroups = companionGroups,
+                        onDownloadMessage = showMessage,
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Settings -> SettingsContent(
@@ -1636,7 +1655,9 @@ private fun MusicLibraryScreen(
             state = trackMenu,
             currentTrackId = currentTrack?.id,
             backdrop = backdrop,
-            windowSize = LocalWindowInfo.current.containerSize
+            windowSize = LocalWindowInfo.current.containerSize,
+            albumFor = companionTrial?.let { it::albumFor },
+            onOpenAlbum = openAlbum,
         )
         }
     }
@@ -2359,7 +2380,9 @@ private fun TrackContextMenu(
     state: TrackMenuState,
     currentTrackId: String?,
     backdrop: Backdrop,
-    windowSize: IntSize
+    windowSize: IntSize,
+    albumFor: ((Track) -> Album?)?,
+    onOpenAlbum: (Album) -> Unit,
 ) {
     // 在这里读状态（而不是在调用方读、再作为参数传进来）：菜单没开时读出来是 null，
     // 状态一变只会让本函数重组，不会把整个主界面拖进来。
@@ -2452,6 +2475,15 @@ private fun TrackContextMenu(
                         text = "添加到播放队列",
                         onClick = { closeAnd { onAddToQueue() } }
                     )
+                    albumFor?.invoke(track)?.let { album ->
+                        StaggeredMenuItem(
+                            visible = menuItemVisible,
+                            delayMs = 40,
+                            icon = { tint -> Icon(Icons.Filled.Album, null, Modifier.size(Dimens.SpaceMedium), tint = tint) },
+                            text = "打开专辑",
+                            onClick = { closeAnd { onOpenAlbum(album) } },
+                        )
+                    }
                     fileOps?.let { ops ->
                         StaggeredMenuItem(
                             visible = menuItemVisible,
@@ -3403,7 +3435,8 @@ private fun AlbumDetailContent(
     isPlaying: Boolean,
     streamUrl: (Track) -> String?,
     onDownloadMessage: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    companionDownloadTarget: ((List<Track>) -> CompanionDownloadTarget?)? = null,
 ) {
     // 详情页顶部玻璃岛已隐藏：只让出状态栏高度，不用再给浮岛留位。
     // Apple Music 式专辑页：整页染上这张专辑的封面主色（顶部柔光向下淡出），
@@ -3435,7 +3468,9 @@ private fun AlbumDetailContent(
                 null
             } else {
                 {
-                    DownloadActionButton(
+                    if (companionDownloadTarget != null) {
+                        CompanionDownloadButton(companionDownloadTarget(trackList), currentTrackId, onDownloadMessage)
+                    } else DownloadActionButton(
                         kind = DownloadKind.ALBUM,
                         id = album.id,
                         name = album.name,
@@ -4281,6 +4316,8 @@ private fun CachedCopiesContent(
     onBack: () -> Unit,
     showOriginalGroups: Boolean,
     onLinked: (() -> Unit)?,
+    companionGroups: List<CompanionDownloadedAlbum>?,
+    onDownloadMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -4304,6 +4341,13 @@ private fun CachedCopiesContent(
         ) {
             if (onLinked != null) item { LinkedDownloadButton(application.downloadLibrary, onLinked) }
             existingDownloadGroup(existing, playback, onPlay, reloadExisting)
+            if (companionGroups != null) {
+                item { SectionHeader("电脑曲库下载", style = SectionHeaderStyle.Section) }
+                if (companionGroups.isEmpty()) item { Text("还没有电脑曲库下载") }
+                items(companionGroups, key = { "pc:${it.pairing}:${it.album.id}" }) { group ->
+                    CompanionDownloadedAlbumRow(group, playback, onPlay, onDownloadMessage)
+                }
+            }
             if (showOriginalGroups) when {
                 cachedAlbums == null -> item { CircularProgressIndicator() }
                 cachedAlbums.isEmpty() -> item { Text("还没有按专辑分组的下载") }
@@ -4356,6 +4400,87 @@ private fun CachedCopiesContent(
     }
 }
 
+@Composable
+private fun CompanionDownloadButton(
+    target: CompanionDownloadTarget?, playingId: String?, onMessage: (String) -> Unit,
+) {
+    val app = LocalContext.current.applicationContext as PulsarApplication
+    val library = app.companionDownloads
+    key(target) {
+        val states = remember(target, library) { target?.let(library::actionStates) }
+        val action = if (states == null) DownloadActionState.NotDownloaded
+            else states.collectAsStateWithLifecycle(initialValue = DownloadActionState.Checking).value
+        DownloadActionControl(
+            name = target?.album?.name.orEmpty(),
+            tracks = target?.tracks.orEmpty().map { it.first },
+            actionState = action,
+            enabled = target != null,
+            onMessage = onMessage,
+            enqueue = { target?.let(library::enqueue) },
+            cancel = { target?.let(library::cancel) },
+            delete = { if (target == null) 0 else library.deleteAlbum(target.pairing, target.album.id, playingId) },
+        )
+    }
+}
+
+@Composable
+private fun CompanionDownloadedAlbumRow(
+    group: CompanionDownloadedAlbum,
+    playback: PlaybackUiState,
+    onPlay: (List<Track>, String) -> Unit,
+    onMessage: (String) -> Unit,
+) {
+    val app = LocalContext.current.applicationContext as PulsarApplication
+    val scope = rememberCoroutineScope()
+    val tracks = remember(group) { group.copies.map { it.savedTrack } }
+    val byId = remember(group) { group.copies.associateBy { it.savedTrack.id } }
+    val playingId = playback.currentMediaItem?.mediaId
+    var confirmation by remember { mutableStateOf<Track?>(null) }
+    var confirmAlbum by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
+    DownloadedAlbumRow(
+        entry = CachedAlbum(group.album, tracks, group.totalCount),
+        cover = null,
+        trackCoverFor = { null },
+        isPlayingCopy = { track -> track.id == playingId || byId[track.id]?.track?.id == playingId },
+        onDeleteTrack = { confirmation = it },
+        onDeleteAlbum = { confirmAlbum = true },
+        onPlayTrack = { onPlay(tracks, it.id) },
+    )
+    if (confirmAlbum || confirmation != null) {
+        val track = confirmation
+        fun close() { confirmAlbum = false; confirmation = null }
+        AlertDialog(
+            onDismissRequest = { if (!deleting) close() },
+            title = { Text("删除下载？") },
+            text = {
+                Column {
+                    Text("只删除《${track?.title ?: group.album.name}》在手机上的下载，不动电脑上的文件。正在播放的副本会保留。")
+                    if (deleting) DeleteProgressNotice()
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !deleting, onClick = {
+                    deleting = true
+                    scope.launch {
+                        try {
+                            val library = app.companionDownloads
+                            val copy = track?.let { byId[it.id] }
+                            val deleted = if (track == null) library.deleteAlbum(group.pairing, group.album.id, playingId)
+                                else if (copy != null && library.deleteTrack(copy, playingId)) 1 else 0
+                            onMessage(downloadDeletedMessage(deleted) ?: "没有删除下载，可能正在播放或下载")
+                        } finally {
+                            deleting = false
+                            close()
+                        }
+                    }
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(enabled = !deleting, onClick = ::close) { Text("取消") } },
+        )
+    }
+}
+
 /** 已下载列表的一行：封面 + 专辑名 + 进度，右侧展开/整张删。点行体展开逐首列表。
  * 与设置页 / QQ 音乐导入页同用 [SurfaceCard]（列表里的卡片语言）。 */
 @Composable
@@ -4365,7 +4490,8 @@ private fun DownloadedAlbumRow(
     trackCoverFor: (Track) -> JellyfinRequest?,
     isPlayingCopy: (Track) -> Boolean,
     onDeleteTrack: (Track) -> Unit,
-    onDeleteAlbum: () -> Unit
+    onDeleteAlbum: () -> Unit,
+    onPlayTrack: ((Track) -> Unit)? = null,
 ) {
     var expanded by rememberSaveable(entry.album.id) { mutableStateOf(false) }
     SurfaceCard {
@@ -4400,10 +4526,11 @@ private fun DownloadedAlbumRow(
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             entry.tracks.forEach { track ->
                 val playing = isPlayingCopy(track)
+                val click = if (onPlayTrack == null) Modifier else Modifier.clickable { onPlayTrack(track) }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    AlbumCover(trackCoverFor(track), track.title, Modifier.size(Dimens.TouchTargetSmall))
+                    AlbumCover(trackCoverFor(track), track.title, Modifier.size(Dimens.TouchTargetSmall).then(click))
                     Spacer(Modifier.width(Dimens.SpaceMidMedium))
-                    Column(Modifier.weight(1f)) {
+                    Column(Modifier.weight(1f).then(click)) {
                         Text(
                             track.title,
                             style = MaterialTheme.typography.bodyMedium,

@@ -57,6 +57,39 @@ class CompanionPlaybackRequestTest {
         }
     }
 
+    @Test
+    fun `下载续传只接受当前配对和请求的文件版本`() = runTest {
+        MockWebServer().use { server ->
+            val revision = "b".repeat(64)
+            val tag = "\"$revision\""
+            server.enqueue(MockResponse().setResponseCode(206).setHeader("ETag", tag).setBody("original"))
+            server.enqueue(MockResponse().setResponseCode(206).setBody("different"))
+            HttpClient(MockEngine {
+                respond("""{"tracks":[{"id":"$trackId","title":"浮夸","artist":"陈奕迅","album":"U 87","revision":"$revision"}]}""")
+            }).use { client ->
+                val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+                    temp.root.resolve("pulsar.preferences_pb")
+                }
+                val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+                val track = connection.pair(server.url("/").toString(), "test-pairing-key").getOrThrow().single()
+                val pairing = checkNotNull(connection.savedScope())
+                val request = Request.Builder().url(checkNotNull(connection.streamUrl(track.id)))
+                    .header("Range", "bytes=8-").header("If-Match", tag)
+                    .header("Authorization", checkNotNull(connection.downloadAuthorization(server.url("/api/library/tracks/$trackId/audio"), pairing)))
+                    .build()
+                val download = companionDownloadHttpClient()
+                download.newCall(request).execute().use { assertEquals("original", it.body!!.string()) }
+                val seen = server.takeRequest(1, TimeUnit.SECONDS)!!
+                assertEquals("Bearer test-pairing-key", seen.getHeader("Authorization"))
+                assertEquals("bytes=8-", seen.getHeader("Range"))
+                assertEquals(tag, seen.getHeader("If-Match"))
+                assertThrows(IOException::class.java) { download.newCall(request).execute().close() }
+                connection.pair(server.url("/").toString(), "changed-key").getOrThrow()
+                assertEquals(null, connection.downloadAuthorization(request.url, pairing))
+            }
+        }
+    }
+
     private companion object {
         val trackId = "a".repeat(64)
     }

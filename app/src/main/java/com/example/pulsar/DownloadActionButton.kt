@@ -76,7 +76,6 @@ internal fun DownloadActionButton(
     // streamUrl 是 viewModel 的方法引用，每次重组都是新对象；不放进 remember 的 key，
     // 否则每次都重建 target。用 rememberUpdatedState 拿最新的那份。onMessage 同理。
     val currentStreamUrl by rememberUpdatedState(streamUrl)
-    val currentOnMessage by rememberUpdatedState(onMessage)
 
     // 归属（serverUrl + 用户 ID）从会话取：target 需要知道这批字节属于谁。
     // null = 还没读出来（此时按钮停在「检查中…」）；
@@ -112,30 +111,46 @@ internal fun DownloadActionButton(
         )
     }
     val actionState by stateFlow.collectAsStateWithLifecycle()
-    // UI 边界做一次映射，五态视觉与文案保持改前一字不差。
-    val state = actionState.toLegacyRenderState()
+    DownloadActionControl(
+        name, tracks, actionState, target != null, onMessage, modifier,
+        enqueue = { target?.let(library::enqueue) },
+        cancel = { target?.let(library::cancel) },
+        delete = { target?.let { library.delete(it, currentTrackId).deletedCount } ?: 0 },
+    )
+}
 
+@Composable
+internal fun DownloadActionControl(
+    name: String,
+    tracks: List<Track>,
+    actionState: DownloadActionState,
+    enabled: Boolean,
+    onMessage: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    enqueue: () -> Unit,
+    cancel: () -> Unit,
+    delete: suspend () -> Int,
+) {
+    val context = LocalContext.current
+    val currentOnMessage by rememberUpdatedState(onMessage)
+    val state = actionState.toLegacyRenderState()
     var showCellularConfirm by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    fun enqueue() {
-        target?.let(library::enqueue)
-    }
-
     /** 唯一的入队漏斗：蜂窝流量下先问一次，Wi-Fi 直接下。重试与首次下载共用它。 */
     fun requestDownload() {
+        if (!enabled) return
         if (isOnCellular(context)) showCellularConfirm = true else enqueue()
     }
 
     fun confirmDelete() {
-        val deleteTarget = target ?: return
+        if (!enabled) return
         scope.launch {
             deleting = true
-            var deleted = 0
-            try {
-                deleted = library.delete(deleteTarget, currentTrackId).deletedCount
+            val deleted = try {
+                delete()
             } finally {
                 // 成没成都要收尾：卡在「删除中…」的对话框连返回键都关不掉。
                 deleting = false
@@ -155,7 +170,8 @@ internal fun DownloadActionButton(
         }
 
         is DownloadState.Downloading -> FilledTonalButton(
-            onClick = { target?.let(library::cancel) },
+            onClick = cancel,
+            enabled = enabled,
             modifier = modifier
         ) {
             val fraction = downloadProgressFraction(state)
@@ -173,7 +189,8 @@ internal fun DownloadActionButton(
         }
 
         DownloadState.Downloaded -> FilledTonalButton(
-            onClick = { if (target != null) showDeleteConfirm = true },
+            onClick = { showDeleteConfirm = true },
+            enabled = enabled,
             modifier = modifier
         ) {
             Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(Dimens.SpaceMedium))
@@ -197,7 +214,7 @@ internal fun DownloadActionButton(
             Text("${state.failed} 首失败 · 重试")
         }
 
-        else -> FilledTonalButton(onClick = ::requestDownload, enabled = target != null, modifier = modifier) {
+        else -> FilledTonalButton(onClick = ::requestDownload, enabled = enabled, modifier = modifier) {
             Icon(Icons.Filled.Download, contentDescription = null, modifier = Modifier.size(Dimens.SpaceMedium))
             Spacer(Modifier.width(Dimens.SpaceSmall))
             Text("下载")
@@ -209,10 +226,9 @@ internal fun DownloadActionButton(
             onDismissRequest = { showCellularConfirm = false },
             title = { Text("用移动数据下载？") },
             text = {
-                Text(
-                    "这会在移动数据下用约 ${formatBytes(estimateDownloadBytes(tracks))}。\n" +
-                        "建议连上 Wi-Fi 再下载。"
-                )
+                val usage = if (tracks.all { it.durationMs != null }) "约 ${formatBytes(estimateDownloadBytes(tracks))}"
+                    else "移动流量（大小未知）"
+                Text("这次下载会使用$usage。\n建议连上 Wi-Fi 再下载。")
             },
             confirmButton = {
                 TextButton(

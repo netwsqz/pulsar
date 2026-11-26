@@ -185,6 +185,7 @@ class SimpleCacheMediaDownloads(
     private val cache: Cache,
     /** 下载的上游（网络）源。生产传 `AuthHttpDataSourceFactory`：token 只进 header。 */
     private val upstreamFactory: DataSource.Factory,
+    private val upstreamForKey: (String) -> DataSource.Factory = { upstreamFactory },
 ) : MediaDownloads {
 
     override suspend fun hasCompleteCopy(key: String): Boolean = guardedIo(false) {
@@ -216,7 +217,7 @@ class SimpleCacheMediaDownloads(
                 // 所以下载和播放可以共用同一个 SimpleCache 实例。
                 CacheDataSource.Factory()
                     .setCache(cache)
-                    .setUpstreamDataSourceFactory(upstreamFactory)
+                    .setUpstreamDataSourceFactory(upstreamForKey(key))
                     .createDataSourceForDownloading(),
                 // key 必须显式设：不设的话 DataSpec 的 key 为 null，CacheKeyFactory 会退回
                 // 用 URL 当键，就跟播放侧算出来的 cacheKey 对不上了。
@@ -237,7 +238,8 @@ class SimpleCacheMediaDownloads(
             }
             try {
                 writer.cache()
-                true
+                // 空文件或上游没交付整段都不能报完成。
+                hasCompleteCopy(key)
             } finally {
                 watchdog.cancel()
                 // 幂等：取消时再掐一次，正常跑完也把数据源关掉（CacheWriter 只关自己的循环）。

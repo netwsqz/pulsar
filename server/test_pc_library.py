@@ -112,6 +112,46 @@ class PcLibraryHttpTest(unittest.TestCase):
         self.assertTrue(unsatisfiable.headers["Content-Range"].endswith(f"*/{len(source)}"))
         self.assertEqual(source, track.read_bytes())
 
+    def test_resume_only_accepts_the_original_file_revision(self):
+        track = self.make_track("专辑/01 歌曲.flac")
+        original = track.read_bytes()
+        self.index.refresh()
+        with self.client() as client:
+            row = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]
+            url = f"{self.TRACKS}/{row['id']}/audio"
+            version = f'"{row["revision"]}"'
+            before = client.get(url, headers={**self.AUTH, "If-Match": version, "Range": "bytes=4-11"})
+            track.write_bytes(original[:-1] + b"X")
+            os.utime(track, (1_800_000_000, 1_800_000_000))
+            after = client.get(url, headers={**self.AUTH, "If-Match": version, "Range": "bytes=12-"})
+            ordinary = client.get(url, headers=self.AUTH)
+        self.assertEqual(206, before.status_code)
+        self.assertEqual(version, before.headers["ETag"])
+        self.assertEqual(original[4:12], before.content)
+        self.assertEqual(412, after.status_code)
+        self.assertEqual(200, ordinary.status_code)
+        self.assertEqual(track.read_bytes(), ordinary.content)
+
+    def test_conditioned_read_does_not_serve_a_file_replaced_after_lookup(self):
+        track = self.make_track("专辑/01 歌曲.flac")
+        self.index.refresh()
+        lookup = self.index.audio_file
+        with self.client() as client:
+            row = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]
+
+            def replace_after_lookup(track_id):
+                result = lookup(track_id)
+                replacement = track.with_suffix(".tmp")
+                replacement.write_bytes(minimal_flac()[:-1] + b"X")
+                replacement.replace(track)
+                return result
+
+            self.index.audio_file = replace_after_lookup
+            response = client.get(f"{self.TRACKS}/{row['id']}/audio", headers={
+                **self.AUTH, "If-Match": f'"{row["revision"]}"', "Range": "bytes=4-11",
+            })
+        self.assertEqual(412, response.status_code)
+
     def test_access_key_is_created_once_and_still_works_on_next_start(self):
         self.key_file.unlink()
         self.index.refresh()

@@ -37,6 +37,8 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.example.pulsar.data.companion.companionPlaybackHttpClient
 import com.example.pulsar.download.existingDownloadBelongsTo
 import com.example.pulsar.download.isExistingDownloadMediaId
+import com.example.pulsar.download.isCompanionDownloadMediaId
+import com.example.pulsar.download.isCompanionDownloadPlaybackUri
 import com.example.pulsar.download.isExistingDownloadPlaybackUri
 import com.example.pulsar.download.isLinkedDownloadPlaybackUri
 import com.example.pulsar.download.linkedOriginalId
@@ -178,11 +180,11 @@ class PlaybackService : MediaSessionService() {
             controller: ControllerInfo,
             mediaItems: List<MediaItem>,
         ): ListenableFuture<List<MediaItem>> {
-            // 外部控制器仍能操作队列和进度，但不能要求读取应用私有的旧副本。
+            // 外部控制器仍能操作队列和进度，但不能要求读取应用私有的下载。
             if (controller.uid != applicationInfo.uid && mediaItems.any { item ->
-                    isExistingDownloadMediaId(item.mediaId) ||
+                    isExistingDownloadMediaId(item.mediaId) || isCompanionDownloadMediaId(item.mediaId) ||
                         item.localConfiguration?.uri?.toString()?.let { uri ->
-                            isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri)
+                            isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri) || isCompanionDownloadPlaybackUri(uri)
                         } == true
                 }) {
                 return com.google.common.util.concurrent.Futures.immediateFailedFuture(SecurityException())
@@ -343,6 +345,24 @@ class PlaybackService : MediaSessionService() {
                         activePlayer.clearMediaItems()
                     }
                 }
+        }
+        serviceScope.launch {
+            val app = application as PulsarApplication
+            app.companionLibrary.savedScopeChanges.catch { emit(null) }.collect { scope ->
+                val activePlayer = player ?: return@collect
+                val queued = (0 until activePlayer.mediaItemCount).map(activePlayer::getMediaItemAt)
+                val local = queued.mapNotNull { item ->
+                    item.localConfiguration?.uri?.toString()?.takeIf(::isCompanionDownloadPlaybackUri)?.let { item to it }
+                }
+                if (local.isEmpty()) return@collect
+                val revoked = local.filter { (_, uri) ->
+                    scope == null || app.companionDownloads.playbackKey(uri) == null
+                }.mapTo(hashSetOf()) { it.first }
+                val latestPlayer = player ?: return@collect
+                for (index in latestPlayer.mediaItemCount - 1 downTo 0) {
+                    if (latestPlayer.getMediaItemAt(index) in revoked) latestPlayer.removeMediaItem(index)
+                }
+            }
         }
         serviceScope.launch {
             usbExclusivePreferences.volumePercent.collect { percent ->
@@ -628,6 +648,7 @@ class PlaybackService : MediaSessionService() {
         return playbackDataSourceFactory(
             app.mediaCacheStore, jellyfin, companion,
             resolveLinkedKey = app.downloadLibrary::linkedPlaybackKey,
+            resolveCompanionKey = { app.companionDownloads.playbackKey(it) },
             resolveExistingKey = app.downloadLibrary::existingPlaybackKey,
         )
     }

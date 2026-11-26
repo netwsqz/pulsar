@@ -81,20 +81,27 @@ class DownloadScheduler(
      * 入队。同一个目标重复入队 = 重新跑一遍（已完整的曲目会被跳过，所以天然是「补缺口」）。
      * 正在排队/下载的旧任务先取消——旧任务已下完的部分不会回滚。
      */
-    fun enqueue(target: DownloadTarget) {
+    fun enqueue(target: DownloadTarget) = enqueue(target, record = null)
+
+    // 电脑曲库用独立名单；登记失败不开始写音频。仍和原下载共用同一条队列。
+    internal fun enqueue(target: DownloadTarget, onCopyComplete: () -> Unit = {}, record: (suspend () -> Boolean)?) {
         val id = target.targetId
         jobs.remove(id)?.cancel()
         _state.update { it + (id to DownloadState.Downloading(0, 0)) }
 
-        // 名单立刻写，不等队列（排队中的目标也算「打算下」）。
-        scope.launch { recordInLedger(target) }
+        // 原曲库名单仍在入队时独立写入。
+        if (record == null) scope.launch { recordInLedger(target) }
 
         val job = scope.launch {
+            if (record != null && !record()) {
+                _state.update { it + (id to DownloadState.PartiallyFailed(target.tracks.size)) }
+                return@launch
+            }
             // 排队期间被取消就别再开始
             if (!isActive) return@launch
             queueMutex.withLock {
                 if (!isActive) return@withLock
-                runTarget(target)
+                runTarget(target, onCopyComplete)
             }
         }
         jobs[id] = job
@@ -136,7 +143,7 @@ class DownloadScheduler(
      * 跑完一个目标。进度只聚合**本次运行**尝试过的曲目：已完成带动总长的按满算，
      * 当前曲目按回调实时算。被跳过的（本来就有完整副本）不进分母。
      */
-    private suspend fun runTarget(target: DownloadTarget) {
+    private suspend fun runTarget(target: DownloadTarget, onCopyComplete: () -> Unit) {
         val id = target.targetId
         var doneBytes = 0L
         var doneTotal = 0L
@@ -161,6 +168,7 @@ class DownloadScheduler(
                 publish()
             }
             if (ok) {
+                onCopyComplete()
                 // 已完成曲目按最后一次回调的字节累计（总长未知时 total 保持 0）
                 doneBytes += currentBytes
                 doneTotal += currentTotal

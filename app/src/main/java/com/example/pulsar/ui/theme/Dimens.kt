@@ -72,6 +72,9 @@ internal object Dimens {
     /** 展开面板里播放队列列表的最大高度：队列再长也只占固定高度，其余靠列表自己滚。 */
     val QueueListMaxHeight = 240.dp
 
+    /** 播放列表选曲和调序弹窗中的滚动区高度上限。 */
+    val PlaylistEditorListMaxHeight = 320.dp
+
     /** 长按菜单的安全区与内容内边距（阴影需要同宽的安全区，两处共用这一个值）。 */
     val MenuEdgePadding = 16.dp
 

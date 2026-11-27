@@ -4,6 +4,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import com.example.pulsar.data.companion.CompanionLibraryConnection
 import com.example.pulsar.data.companion.CompanionPairingStore
 import com.example.pulsar.data.companion.CompanionLibraryError
+import com.example.pulsar.LibrarySection
 import com.example.pulsar.QueueTrack
 import com.example.pulsar.libraryGroups
 import com.example.pulsar.domain.model.Track
@@ -27,7 +28,14 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.TextContent
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.IOException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -367,6 +375,103 @@ class CompanionLibraryTrialTest {
             assertTrue(trial.streamUrl(saved)!!.startsWith("pulsar-linked:"))
             val target = checkNotNull(trial.downloadTarget(album, tracks))
             assertEquals(listOf(saved to "http://192.168.1.8:8900/api/library/tracks/$id/audio"), target.tracks)
+        }
+    }
+
+    @Test
+    fun `从原播放列表新建加歌删除和调序 重开后按保存顺序点播`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val store = CompanionPairingStore(preferences)
+        val ids = listOf(id, "b".repeat(64), "c".repeat(64))
+        val playlistId = "d".repeat(32)
+        val tracksJson = ids.mapIndexed { index, id ->
+            """{"id":"$id","title":"曲目${index + 1}","artist":"歌手","album":"专辑"}"""
+        }.joinToString(",")
+        var savedPlaylist: String? = null
+        var failSave = false
+        var playlistListStatus: HttpStatusCode? = HttpStatusCode.OK
+        fun saved(order: List<String>) = """{"id":"$playlistId","name":"通勤","track_ids":${Json.encodeToString(order)}}"""
+        HttpClient(MockEngine { request ->
+            assertEquals("192.168.1.8", request.url.host)
+            assertTrue(request.url.encodedQuery.isEmpty())
+            assertEquals("Bearer test-key", request.headers[HttpHeaders.Authorization])
+            when (request.method to request.url.encodedPath) {
+                HttpMethod.Get to "/api/library/tracks" -> respond("""{"tracks":[$tracksJson]}""")
+                HttpMethod.Get to "/api/library/playlists" -> respond(
+                    """{"playlists":[${savedPlaylist.orEmpty()}]}""", playlistListStatus ?: throw IOException("电脑关机"),
+                )
+                HttpMethod.Post to "/api/library/playlists" -> {
+                    val sent = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+                    assertEquals("通勤", sent.getValue("name").jsonPrimitive.content)
+                    savedPlaylist = saved(emptyList())
+                    respond(savedPlaylist!!, HttpStatusCode.Created)
+                }
+                HttpMethod.Put to "/api/library/playlists/$playlistId" -> {
+                    if (failSave) respond("", HttpStatusCode.InternalServerError) else {
+                        val sent = Json.parseToJsonElement((request.body as TextContent).text).jsonObject
+                        savedPlaylist = saved(sent.getValue("track_ids").jsonArray.map { it.jsonPrimitive.content })
+                        respond(savedPlaylist!!)
+                    }
+                }
+                else -> error("未预期的请求：${request.method} ${request.url.encodedPath}")
+            }
+        }).use { client ->
+            CompanionLibraryConnection(client, store).pair("192.168.1.8", "test-key").getOrThrow()
+            fun trial() = CompanionLibraryTrial(
+                CompanionLibraryConnection(client, store), backgroundScope, StandardTestDispatcher(testScheduler),
+            )
+            val first = trial()
+            first.enter()
+            first.onSectionEntered(LibrarySection.Playlists)
+            assertTrue(first.playlists.first { it.items != null }.items!!.isEmpty())
+            val songs = first.state.value.tracks!!
+            val playlist = first.createPlaylist("通勤").getOrThrow()
+            assertEquals(emptyList<Track>(), first.playlistTracks(playlist))
+            first.savePlaylistOrder(playlist, songs.map(Track::id)).getOrThrow()
+            assertEquals(songs, first.playlistTracks(playlist))
+            failSave = true
+            assertEquals(CompanionLibraryError.PlaylistStorage,
+                first.savePlaylistOrder(playlist, emptyList()).exceptionOrNull())
+            assertEquals(songs, first.playlistTracks(playlist))
+            failSave = false
+            first.savePlaylistOrder(playlist, listOf(songs[2].id, songs[0].id)).getOrThrow()
+            first.leave()
+
+            val reopened = trial()
+            reopened.enter()
+            reopened.onSectionEntered(LibrarySection.PlaylistDetail(playlist))
+            val restored = reopened.playlists.first { it.items != null }.items!!.single()
+            assertEquals("通勤", restored.name)
+            assertEquals(2, restored.trackCount)
+            val ordered = checkNotNull(reopened.playlistTracks(restored))
+            assertEquals(listOf(songs[2], songs[0]), ordered)
+            val remote = FakePlaybackRemote().apply { snapshot = RemoteSnapshot(isConnected = true) }
+            val playback = PlaybackSession(remote, FakeTrackMediaItemFactory(), reopened, backgroundScope)
+            assertTrue(playback.dispatch(PlaybackIntent.PlayPlaylist(ordered, ordered.last().id)))
+            val queue = remote.setQueueCalls.single()
+            assertEquals(listOf(songs[2].id, songs[0].id), queue.items.map { it.mediaId })
+            assertEquals(1, queue.startIndex)
+            playback.close()
+
+            playlistListStatus = HttpStatusCode.ServiceUnavailable
+            reopened.refreshPlaylists()
+            val failed = reopened.playlists.first { it.error != null }
+            assertNull(failed.items) // 不能把暂时失败误当成列表被清空。
+            assertNull(reopened.playlistTracks(restored))
+            assertEquals(songs, reopened.state.value.tracks)
+            playlistListStatus = HttpStatusCode.OK
+            reopened.refreshPlaylists()
+            reopened.playlists.first { it.items != null }
+            assertEquals(ordered, reopened.playlistTracks(restored))
+            playlistListStatus = null
+            reopened.refreshPlaylists()
+            val offline = reopened.state.first { it.isOffline }
+            assertEquals(emptyList<Track>(), offline.tracks)
+            assertNull(reopened.playlistTracks(restored))
+            assertEquals(false, reopened.playlists.value.isLoading)
+            assertEquals(false, offline.needsPairing)
         }
     }
 

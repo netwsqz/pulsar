@@ -1,4 +1,4 @@
-"""现有 PC 伴生服务的只读曲库接口。"""
+"""现有 PC 伴生服务的曲库接口：只读音频，独立保存新播放列表。"""
 
 import logging
 import os
@@ -14,6 +14,9 @@ from pydantic import BaseModel, StrictStr
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from library_index import LibraryIndex, audio_revision, same_audio_file
+from library_playlists import (
+    InvalidPlaylistTracks, LibraryPlaylist, LibraryPlaylists, NewPlaylist, PlaylistEdit, PlaylistEditConflict,
+)
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ class EvidenceRequest(BaseModel):
 
 def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
     access_key: bytes | None = None
+    playlists = LibraryPlaylists(key_file.with_name(".library_playlists.json"))
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -129,6 +133,25 @@ def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
     @router.get("/tracks")
     def tracks() -> dict:
         return {"tracks": index.catalog()}
+
+    @router.get("/playlists")
+    def list_playlists() -> dict[str, list[LibraryPlaylist]]:
+        return {"playlists": playlists.all()}
+
+    @router.post("/playlists", status_code=201)
+    def create_playlist(request: NewPlaylist) -> LibraryPlaylist:
+        return playlists.create(request.name)
+
+    @router.put("/playlists/{playlist_id}")
+    def update_playlist(playlist_id: str, request: PlaylistEdit) -> LibraryPlaylist:
+        try:
+            return playlists.replace_order(playlist_id, request, lambda track_id: index.audio_file(track_id) is not None)
+        except KeyError:
+            raise HTTPException(404, "播放列表不存在") from None
+        except InvalidPlaylistTracks:
+            raise HTTPException(422, "不能加入重复或不存在的曲目") from None
+        except PlaylistEditConflict:
+            raise HTTPException(409, "播放列表已在其他设备修改，请刷新后再编辑") from None
 
     @router.post("/evidence")
     def evidence(request: EvidenceRequest) -> JSONResponse:

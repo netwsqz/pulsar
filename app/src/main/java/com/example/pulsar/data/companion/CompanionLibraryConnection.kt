@@ -6,15 +6,18 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.example.pulsar.data.CoverRequest
+import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.Track
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
@@ -136,23 +139,82 @@ internal class CompanionLibraryConnection(
         fetchTracks(pairing).also { if (it.isSuccess) current = pairing }
     }
 
-    private suspend fun fetchTracks(pairing: CompanionPairing): Result<List<Track>> = try {
+    suspend fun playlists(scope: String): Result<List<CompanionPlaylist>> =
+        playlistRequest(scope, HttpMethod.Get) { pairing, body ->
+            json.decodeFromString<CompanionPlaylistsResponse>(body).playlists.map { it.toPlaylist(pairing) }
+                .also { rows -> require(rows.distinctBy { it.playlist.id }.size == rows.size) }
+        }
+
+    suspend fun createPlaylist(scope: String, name: String): Result<CompanionPlaylist> =
+        playlistRequest(scope, HttpMethod.Post, body = json.encodeToString(NewPlaylist.serializer(), NewPlaylist(name))) { pairing, body ->
+            json.decodeFromString<CompanionPlaylistRow>(body).toPlaylist(pairing)
+        }
+
+    suspend fun savePlaylistOrder(
+        scope: String, playlist: Playlist, previous: List<String>, order: List<String>,
+    ): Result<CompanionPlaylist> {
+        val pairing = current?.takeIf { it.scope == scope }
+            ?: return Result.failure(CompanionLibraryError.InvalidPairing)
+        val serverId = pairing.playlistId(playlist.id) ?: return Result.failure(CompanionLibraryError.PlaylistMissing)
+        val previousIds = previous.map { pairing.trackId(it) ?: return Result.failure(CompanionLibraryError.PlaylistTracks) }
+        val trackIds = order.map { pairing.trackId(it) ?: return Result.failure(CompanionLibraryError.PlaylistTracks) }
+        val payload = json.encodeToString(PlaylistEdit.serializer(), PlaylistEdit(previousIds, trackIds))
+        return playlistRequest(scope, HttpMethod.Put, serverId, payload) { samePairing, body ->
+            json.decodeFromString<CompanionPlaylistRow>(body).toPlaylist(samePairing).also {
+                require(it.playlist.id == playlist.id && it.trackIds == order)
+            }
+        }
+    }
+
+    private suspend fun <T> playlistRequest(
+        scope: String,
+        method: HttpMethod,
+        id: String? = null,
+        body: String? = null,
+        decode: (CompanionPairing, String) -> T,
+    ): Result<T> = execute {
+        val pairing = current?.takeIf { it.scope == scope } ?: throw CompanionLibraryError.InvalidPairing
+        val response = client.request(pairing.playlistsUrl(id)) {
+            this.method = method
+            header(HttpHeaders.Authorization, pairing.authorization)
+            if (body != null) {
+                contentType(ContentType.Application.Json)
+                setBody(body)
+            }
+        }
+        when (response.status) {
+            HttpStatusCode.OK, HttpStatusCode.Created -> decode(pairing, response.bodyAsText())
+            HttpStatusCode.NotFound -> throw if (id == null) CompanionLibraryError.Unavailable else CompanionLibraryError.PlaylistMissing
+            HttpStatusCode.Conflict -> throw CompanionLibraryError.PlaylistConflict
+            HttpStatusCode.UnprocessableEntity -> throw CompanionLibraryError.PlaylistTracks
+            HttpStatusCode.InternalServerError -> throw CompanionLibraryError.PlaylistStorage
+            else -> throw errorFor(response.status)
+        }
+    }
+
+    private suspend fun fetchTracks(pairing: CompanionPairing): Result<List<Track>> = execute {
         val response = client.get(pairing.tracksUrl()) {
             header(HttpHeaders.Authorization, pairing.authorization)
         }
-        when (response.status) {
-            HttpStatusCode.OK -> {
-                val tracks = json.decodeFromString<CompanionTracksResponse>(response.bodyAsText()).tracks
-                require(tracks.all { trackIdPattern.matches(it.id) } && tracks.distinctBy { it.id }.size == tracks.size)
-                Result.success(tracks.map { it.toTrack(pairing) })
-            }
-            HttpStatusCode.Unauthorized -> Result.failure(CompanionLibraryError.Unauthorized)
-            HttpStatusCode.ServiceUnavailable -> Result.failure(CompanionLibraryError.LibraryNotReady)
-            HttpStatusCode.InternalServerError -> Result.failure(CompanionLibraryError.KeyUnavailable)
-            else -> Result.failure(CompanionLibraryError.Unavailable)
-        }
+        if (response.status != HttpStatusCode.OK) throw errorFor(response.status)
+        val tracks = json.decodeFromString<CompanionTracksResponse>(response.bodyAsText()).tracks
+        require(tracks.all { trackIdPattern.matches(it.id) } && tracks.distinctBy { it.id }.size == tracks.size)
+        tracks.map { it.toTrack(pairing) }
+    }
+
+    private fun errorFor(status: HttpStatusCode): CompanionLibraryError = when (status) {
+        HttpStatusCode.Unauthorized -> CompanionLibraryError.Unauthorized
+        HttpStatusCode.ServiceUnavailable -> CompanionLibraryError.LibraryNotReady
+        HttpStatusCode.InternalServerError -> CompanionLibraryError.KeyUnavailable
+        else -> CompanionLibraryError.Unavailable
+    }
+
+    private inline fun <T> execute(block: () -> T): Result<T> = try {
+        Result.success(block())
     } catch (error: CancellationException) {
         throw error
+    } catch (error: CompanionLibraryError) {
+        Result.failure(error)
     } catch (_: IOException) {
         Result.failure(CompanionLibraryError.Network)
     } catch (_: Exception) {
@@ -180,7 +242,39 @@ internal sealed class CompanionLibraryError(message: String) : Exception(message
     data object Network : CompanionLibraryError("连不上电脑，请确认两台设备在同一网络、PC 服务已启动")
     data object Storage : CompanionLibraryError("无法读取或保存配对，请检查手机存储空间后重试")
     data object Unavailable : CompanionLibraryError("暂时无法读取电脑曲库，请确认已更新 PC 服务")
+    data object PlaylistName : CompanionLibraryError("请输入 1 到 120 个字符的播放列表名称")
+    data object PlaylistMissing : CompanionLibraryError("播放列表不存在或不属于当前配对")
+    data object PlaylistConflict : CompanionLibraryError("播放列表已在其他设备修改，请重新打开编辑")
+    data object PlaylistTracks : CompanionLibraryError("不能加入重复、不在曲库或不属于当前配对的歌曲")
+    data object PlaylistStorage : CompanionLibraryError("无法读写电脑上的播放列表，请检查 PC 服务目录")
 }
+
+internal data class CompanionPlaylist(val playlist: Playlist, val trackIds: List<String>)
+
+@Serializable
+private data class CompanionPlaylistsResponse(val playlists: List<CompanionPlaylistRow>)
+
+@Serializable
+private data class CompanionPlaylistRow(
+    val id: String,
+    val name: String,
+    @SerialName("track_ids") val trackIds: List<String>,
+) {
+    fun toPlaylist(pairing: CompanionPairing): CompanionPlaylist {
+        require(playlistIdPattern.matches(id) && name.isNotBlank() &&
+            trackIds.all(trackIdPattern::matches) && trackIds.distinct().size == trackIds.size)
+        return CompanionPlaylist(Playlist(pairing.playlistMediaId(id), name, trackIds.size, null), trackIds.map(pairing::mediaId))
+    }
+}
+
+@Serializable
+private data class NewPlaylist(val name: String)
+
+@Serializable
+private data class PlaylistEdit(
+    @SerialName("previous_track_ids") val previous: List<String>,
+    @SerialName("track_ids") val order: List<String>,
+)
 
 @Serializable
 private data class CompanionTracksResponse(val tracks: List<CompanionTrack>)
@@ -222,9 +316,11 @@ internal data class CompanionDownloadEvidence(val scope: String, val candidates:
 internal data class CompanionCopyCandidate(val path: String, val track: Track, val size: Long, val sha256: String)
 
 private const val TRACKS_PATH = "/api/library/tracks"
+private const val PLAYLISTS_PATH = "/api/library/playlists"
 private const val MEDIA_ID_PREFIX = "pc:"
 private const val DEFAULT_COMPANION_PORT = 8900
 private val trackIdPattern = Regex("[0-9a-f]{64}")
+private val playlistIdPattern = Regex("[0-9a-f]{32}")
 private val audioPathPattern = Regex("$TRACKS_PATH/[0-9a-f]{64}/audio")
 private val artworkPathPattern = Regex("$TRACKS_PATH/[0-9a-f]{64}/artwork")
 private val accessKeyPattern = Regex("[A-Za-z0-9_-]+")
@@ -246,6 +342,15 @@ internal class CompanionPairing private constructor(
     val scope: String = serviceUrl.encodeUtf8().hmacSha256(accessKey.encodeUtf8()).hex()
 
     fun mediaId(trackId: String): String = "$mediaIdPrefix$trackId"
+    fun trackId(mediaId: String): String? = mediaId.removePrefix(mediaIdPrefix)
+        .takeIf { mediaId.startsWith(mediaIdPrefix) && trackIdPattern.matches(it) }
+
+    fun playlistMediaId(id: String): String = "pc-playlist:$scope:$id"
+    fun playlistId(mediaId: String): String? = mediaId.removePrefix("pc-playlist:$scope:")
+        .takeIf { it != mediaId && playlistIdPattern.matches(it) }
+
+    fun playlistsUrl(id: String?): String = origin.newBuilder()
+        .encodedPath(if (id == null) PLAYLISTS_PATH else "$PLAYLISTS_PATH/$id").build().toString()
 
     fun saveInto(edit: MutablePreferences) {
         edit[companionAddressKey] = address

@@ -27,6 +27,9 @@ Thumbs.db
 # 文件操作密钥及电脑曲库访问密钥：服务启动时自动生成，别提交
 server/.file_ops_key
 server/.library_access_key
+# 伴生服务持久化的播放列表与原子写入临时文件
+server/.library_playlists.json
+server/.library_playlists.json.*.tmp
 
 # Project-local experiments and downloaded assets
 node_modules/

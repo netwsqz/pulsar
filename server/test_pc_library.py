@@ -20,6 +20,7 @@ from test_library_files import minimal_flac
 class PcLibraryHttpTest(unittest.TestCase):
     TRACKS = "/api/library/tracks"
     EVIDENCE = "/api/library/evidence"
+    PLAYLISTS = "/api/library/playlists"
     KEY = "a" * 64
     AUTH = {"Authorization": f"Bearer {KEY}"}
 
@@ -51,6 +52,47 @@ class PcLibraryHttpTest(unittest.TestCase):
                         self.assertEqual(401, denied.status_code)
                         self.assertEqual("Bearer", denied.headers.get("WWW-Authenticate"))
                     self.assertEqual(503, client.get(url, headers=self.AUTH).status_code)
+
+    def test_paired_device_edits_new_playlist_and_saved_order_survives_restart(self):
+        files = [self.make_track(f"专辑/{name}.flac", title=name) for name in ("甲", "乙", "丙")]
+        original_audio = [file.read_bytes() for file in files]
+        self.index.refresh()
+        with self.client() as client:
+            self.assertEqual({"playlists": []}, client.get(self.PLAYLISTS, headers=self.AUTH).json())
+            created = client.post(self.PLAYLISTS, headers=self.AUTH, json={"name": "通勤"})
+            self.assertEqual(201, created.status_code)
+            playlist = created.json()
+            self.assertEqual("通勤", playlist["name"])
+            self.assertEqual([], playlist["track_ids"])
+            url = f"{self.PLAYLISTS}/{playlist['id']}"
+            ids = {row["title"]: row["id"] for row in client.get(self.TRACKS, headers=self.AUTH).json()["tracks"]}
+            added = [ids["甲"], ids["乙"], ids["丙"]]
+            saved = client.put(url, headers=self.AUTH, json={"track_ids": added, "previous_track_ids": []})
+            self.assertEqual(200, saved.status_code)
+            self.assertEqual(added, saved.json()["track_ids"])
+            ordered = [ids["丙"], ids["甲"]]
+            for wrong in ({}, {"Authorization": "Bearer wrong"}, {"X-Pulsar-Key": self.KEY}):
+                self.assertEqual(401, client.get(self.PLAYLISTS, headers=wrong).status_code)
+                self.assertEqual(401, client.post(self.PLAYLISTS, headers=wrong, json={"name": "其他"}).status_code)
+                self.assertEqual(401, client.put(url, headers=wrong, json={"track_ids": [], "previous_track_ids": added}).status_code)
+            stale = client.put(url, headers=self.AUTH, json={"track_ids": [], "previous_track_ids": []})
+            self.assertEqual(409, stale.status_code)
+            self.assertEqual(added, client.get(self.PLAYLISTS, headers=self.AUTH).json()["playlists"][0]["track_ids"])
+            self.assertEqual(200, client.put(url, headers=self.AUTH, json={"track_ids": ordered, "previous_track_ids": added}).status_code)
+            retry = client.put(url, headers=self.AUTH, json={"track_ids": ordered, "previous_track_ids": added})
+            self.assertEqual(200, retry.status_code)
+            for invalid in ([ids["甲"], ids["甲"]], ["e" * 64]):
+                with self.subTest(invalid=invalid):
+                    self.assertEqual(422, client.put(url, headers=self.AUTH, json={
+                        "track_ids": invalid, "previous_track_ids": ordered,
+                    }).status_code)
+
+        self.index = LibraryIndex(self.root)
+        self.index.refresh()
+        with self.client() as restarted:
+            self.assertEqual({"playlists": [{**playlist, "track_ids": ordered}]},
+                             restarted.get(self.PLAYLISTS, headers=self.AUTH).json())
+        self.assertEqual(original_audio, [file.read_bytes() for file in files])
 
     def make_track(self, name, **tags):
         path = self.root / name

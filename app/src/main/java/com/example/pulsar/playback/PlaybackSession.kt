@@ -48,6 +48,9 @@ internal sealed interface PlaybackIntent {
     /** 点歌播放：从 [startTrackId] 开始，队列顺序由会话旋转。 */
     data class Play(val tracks: List<Track>, val startTrackId: String) : PlaybackIntent
 
+    /** 点播已保存的播放列表：从所点曲目开始，但队列沿用列表顺序。 */
+    data class PlayPlaylist(val tracks: List<Track>, val startTrackId: String) : PlaybackIntent
+
     /** 打开手机里的本地音频（SAF `content://`）：单曲 set + prepare + play。 */
     data class PlayLocalFile(val uri: Uri) : PlaybackIntent
 
@@ -234,6 +237,7 @@ internal class PlaybackSession(
         if (closed) return false
         return when (intent) {
             is PlaybackIntent.Play -> play(intent.tracks, intent.startTrackId)
+            is PlaybackIntent.PlayPlaylist -> play(intent.tracks, intent.startTrackId, preserveOrder = true)
             is PlaybackIntent.PlayLocalFile -> playLocalFile(intent.uri)
             is PlaybackIntent.PlayQueueItem -> playQueueItem(intent.mediaId)
             is PlaybackIntent.AddToQueue -> addToQueue(intent.track)
@@ -364,11 +368,11 @@ internal class PlaybackSession(
      * 点歌播放。不可播的曲目从队列里筛掉；**点的那首不可播 → 只发 [PlaybackEvent.Unplayable]，
      * 不写队列**（旧界面就是这个口径，避免「正在播」镜像指向一首根本没在放的歌）。
      *
-     * 队列顺序仍用 [buildPlaybackOrder] 旋转到点的那首开头。**某首算不出播放条目就跳过它**
-     * （#29）：其余曲目照常入队播放；如果算不出地址的正是点的那首，给一条明确提示，不静默失败。
+     * 默认旋转到点的那首开头，已保存的播放列表则从原顺序中的位置起播。
+     * 某首算不出播放条目就跳过它；如果正是点的那首，给明确提示，不播其他歌（#29）。
      * 发 [PlaybackEvent.PlaybackQueuePrepared] 的列表与真正入队的列表保持一致（都跳过坏曲目）。
      */
-    private fun play(tracks: List<Track>, startTrackId: String): Boolean {
+    private fun play(tracks: List<Track>, startTrackId: String, preserveOrder: Boolean = false): Boolean {
         if (!remote.snapshot().isConnected) return false
         val start = tracks.firstOrNull { it.id == startTrackId }
         val reason = start?.let(gate::unplayableReason)
@@ -377,17 +381,15 @@ internal class PlaybackSession(
             return true
         }
         val playable = tracks.filter(gate::isPlayable)
-        val order = buildPlaybackOrder(playable, startTrackId) ?: return false
+        if (playable.none { it.id == startTrackId }) return false
+        val order = if (preserveOrder) playable else buildPlaybackOrder(playable, startTrackId) ?: return false
         // 先按顺序构造播放条目，算不出地址的跳过；点的那首若被跳过则明确提示、不写队列。
         val entries = order.mapNotNull { track ->
             val item = mediaItems.create(track)
             if (item == null) null else track to item
         }
-        if (entries.isEmpty()) {
-            _events.tryEmit(PlaybackEvent.Unplayable(UNPLAYABLE_NO_STREAM_URL))
-            return true
-        }
-        if (entries.first().first.id != startTrackId) {
+        val startIndex = entries.indexOfFirst { it.first.id == startTrackId }
+        if (startIndex < 0) {
             _events.tryEmit(PlaybackEvent.Unplayable(UNPLAYABLE_NO_STREAM_URL))
             return true
         }
@@ -401,7 +403,7 @@ internal class PlaybackSession(
             )
         )
         remote.applyPlaybackMode(state.value.mode)
-        remote.setQueue(entries.map { it.second }, 0)
+        remote.setQueue(entries.map { it.second }, startIndex)
         remote.prepare()
         remote.play()
         return true

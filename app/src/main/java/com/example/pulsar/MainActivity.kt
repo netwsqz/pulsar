@@ -280,6 +280,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import coil.compose.AsyncImage
 import com.example.pulsar.data.companion.CompanionArtworkRequest
+import com.example.pulsar.data.companion.CompanionLibraryError
 import com.example.pulsar.data.companion.isCompanionMediaId
 import com.example.pulsar.download.CompanionDownloadTarget
 import com.example.pulsar.download.CompanionDownloadedAlbum
@@ -516,7 +517,8 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                 LoginScreen(state.session, viewModel, openLocalDownloads) { setTrial(true) }
             }
         } else {
-            val sourceKey = if (trialActive) "companion-library" else "jellyfin-library"
+            // 换配对后不恢复上一台电脑的详情页或列表名称；同一配对转屏仍保留导航。
+            val sourceKey = if (trialActive) "companion-library:${trialState.pairingScope.orEmpty()}" else "jellyfin-library"
             pageState.SaveableStateProvider(sourceKey) {
                 val qqViewModel = rememberQqViewModel(application, if (trialActive) trialState.serviceUrl.orEmpty() else null)
                 val qqState by qqViewModel.state.collectAsStateWithLifecycle()
@@ -938,6 +940,10 @@ private fun MusicLibraryScreen(
     onCloseLocalDownloads: (() -> Unit)? = null,
 ) {
     val trialActive = companionTrial != null
+    val trialPlaylists = companionTrial?.playlists?.collectAsStateWithLifecycle()?.value
+    val retryPlaylists = if (companionTrial != null && (library.isOffline || session.errorMessage != null)) {
+        companionTrial::retry
+    } else companionTrial?.let { it::refreshPlaylists }
     val trackCover: (Track) -> CoverRequest? = if (companionTrial != null) companionTrial::trackArtwork else viewModel::trackCover
     val albumCover: (Album) -> CoverRequest? = if (companionTrial != null) companionTrial::albumArtwork else viewModel::albumCover
     val retryAlbums = if (companionTrial != null) companionTrial::retry else viewModel::loadAlbums
@@ -1000,7 +1006,8 @@ private fun MusicLibraryScreen(
     // `LibraryCache` 里；会话就绪、离线翻转、切歌后的补跑由 module 自己触发，
     // 所以这里不再把 sessionReady / isOffline / historyEpoch 当 key。
     LaunchedEffect(section) {
-        if (!trialActive && !localDownloadsOnly) viewModel.onSectionEntered(section)
+        if (companionTrial != null) companionTrial.onSectionEntered(section)
+        else if (!localDownloadsOnly) viewModel.onSectionEntered(section)
         if (section == LibrarySection.DownloadService) qqViewModel?.refreshJobs()
     }
     // 配对成功或换到新地址时，新的 QQ 会话接续当前查询，不显示上一台电脑的结果。
@@ -1090,6 +1097,9 @@ private fun MusicLibraryScreen(
     val onPlayTrack: (List<Track>, String) -> Unit = { trackList, trackId ->
         playbackSession.dispatch(PlaybackIntent.Play(trackList, trackId))
     }
+    val onPlaySavedPlaylist: (List<Track>, String) -> Unit = { trackList, trackId ->
+        playbackSession.dispatch(PlaybackIntent.PlayPlaylist(trackList, trackId))
+    }
     // 离线过滤生效时给各内容页的统一小字（ADR-0008）：歌变少了得有一句解释。
     // 提示要不要出、出哪一句由策略给类型，文案只从 OfflineNotice.message() 取（#10）。
     val offlineNotice = offline.notice?.message()
@@ -1143,7 +1153,7 @@ private fun MusicLibraryScreen(
                 detailOrigin = LibrarySection.Discover
             }
             is LibrarySection.PlaylistDetail -> {
-                viewModel.clearPlaylistDetail()
+                if (!trialActive) viewModel.clearPlaylistDetail()
                 goTo(detailOrigin, isBack = true)
                 detailOrigin = LibrarySection.Discover
             }
@@ -1308,8 +1318,7 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                if (trialActive && (s == LibrarySection.Discover || s == LibrarySection.Playlists ||
-                        s is LibrarySection.PlaylistDetail || s == LibrarySection.Settings || s == LibrarySection.DownloadService)
+                if (trialActive && (s == LibrarySection.Discover || s == LibrarySection.Settings || s == LibrarySection.DownloadService)
                 ) {
                     LibraryScreenScaffold(
                         title = s.navLabel().orEmpty(),
@@ -1367,11 +1376,25 @@ private fun MusicLibraryScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Playlists -> PlaylistsContent(
-                        library = library,
-                        session = session,
+                        playlists = if (trialPlaylists != null) trialPlaylists.items.takeUnless { library.isOffline || session.errorMessage != null }
+                            else library.playlists,
+                        isOffline = library.isOffline,
+                        isLoading = session.isLoading || trialPlaylists?.isLoading == true,
+                        errorMessage = session.errorMessage ?: trialPlaylists?.error?.message,
                         onOpenPlaylist = openPlaylist,
-                        coverFor = viewModel::playlistCover,
-                        onRetry = viewModel::loadPlaylists,
+                        coverFor = { if (trialActive) null else viewModel.playlistCover(it) },
+                        onRetry = retryPlaylists ?: viewModel::loadPlaylists,
+                        actions = companionTrial?.let { trial ->
+                            {
+                                CompanionPlaylistListActions(
+                                    canCreate = trialPlaylists?.items != null && !library.isOffline && session.errorMessage == null &&
+                                        !session.isLoading && !trialPlaylists.isLoading && !trialPlaylists.isSaving,
+                                    onRefresh = retryPlaylists ?: trial::retry,
+                                    create = trial::createPlaylist,
+                                    onCreated = openPlaylist,
+                                )
+                            }
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Artists -> LibraryGroupsContent(
@@ -1448,23 +1471,57 @@ private fun MusicLibraryScreen(
                         },
                         modifier = Modifier.fillMaxSize()
                     )
-                    is LibrarySection.PlaylistDetail -> PlaylistDetailContent(
-                        library = library,
-                        session = session,
-                        playlist = s.playlist,
-                        playlistTracks = visible.playlistTracks,
-                        offlineNotice = offlineNotice,
-                        coverFor = viewModel::trackCover,
-                        onPlayTrack = onPlayTrack,
-                        onAddToQueue = onAddToQueue,
-                        playlistCoverFor = viewModel::playlistCover,
-                        onRetry = { viewModel.loadPlaylistTracks(s.playlist) },
-                        currentTrackId = currentTrack?.id,
-                        isPlaying = playback.isPlaying,
-                        streamUrl = viewModel::streamUrl,
-                        onDownloadMessage = showMessage,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                    is LibrarySection.PlaylistDetail -> {
+                        val entry = trialPlaylists?.entry(s.playlist)
+                        val editTracks = companionTrial?.playlistTracks(s.playlist)
+                        val playlistError = trialPlaylists?.error?.message ?: if (trialPlaylists?.items != null && entry == null) {
+                            CompanionLibraryError.PlaylistMissing.message
+                        } else null
+                        PlaylistDetailContent(
+                            isOffline = library.isOffline,
+                            offlineUnavailableMessage = if (trialActive) "离线 · 电脑播放列表需要联网才能查看" else null,
+                            session = if (trialActive) session.copy(
+                                isLoading = session.isLoading || trialPlaylists?.isLoading == true,
+                                errorMessage = session.errorMessage ?: playlistError,
+                            ) else session,
+                            playlist = entry?.playlist ?: s.playlist,
+                            playlistTracks = if (trialActive) editTracks else visible.playlistTracks,
+                            offlineNotice = offlineNotice,
+                            coverFor = trackCover,
+                            onPlayTrack = if (trialActive) onPlaySavedPlaylist else onPlayTrack,
+                            onAddToQueue = onAddToQueue,
+                            playlistCoverFor = { if (trialActive) null else viewModel.playlistCover(it) },
+                            onRetry = retryPlaylists ?: { viewModel.loadPlaylistTracks(s.playlist) },
+                            currentTrackId = currentTrack?.id,
+                            isPlaying = playback.isPlaying,
+                            download = if (trialActive || library.isOffline) null else {
+                                {
+                                    DownloadActionButton(
+                                        kind = DownloadKind.PLAYLIST,
+                                        id = s.playlist.id,
+                                        name = s.playlist.name,
+                                        tracks = visible.playlistTracks.orEmpty(),
+                                        serverUrl = session.serverUrl,
+                                        streamUrl = viewModel::streamUrl,
+                                        currentTrackId = currentTrack?.id,
+                                        onMessage = showMessage,
+                                    )
+                                }
+                            },
+                            edit = if (companionTrial != null && entry != null && editTracks != null) {
+                                {
+                                    CompanionPlaylistEditAction(
+                                        playlistId = entry.playlist.id,
+                                        order = entry.trackIds,
+                                        catalog = tracks,
+                                        enabled = !trialPlaylists.isLoading && !trialPlaylists.isSaving,
+                                        save = { base, order -> companionTrial.savePlaylistOrder(entry.playlist, order, base) },
+                                    )
+                                }
+                            } else null,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                     is LibrarySection.GroupDetail -> LibraryGroupDetailContent(
                         library = library,
                         session = session,
@@ -3550,32 +3607,34 @@ private fun AlbumDetailContent(
 /** 播放列表页（工单 05）：按 Auxio 的列表语言呈现，与歌曲页 / 搜索页同构——
  * 封面位 + 名称 + 「N 首」+ 分隔线，不再用卡片网格（封面网格只留给专辑）。
  *
- * 只收自己需要的 slice（#14）：列表与离线标记来自 [LibraryState]，加载 / 错误通道来自
- * [SessionState]，不再收整个 `JellyfinUiState`。
+ * 旧曲库与电脑曲库共用页面骨架，来源各自提供加载状态与操作。
  */
 @Composable
 private fun PlaylistsContent(
-    library: LibraryState,
-    session: SessionState,
+    playlists: List<Playlist>?,
+    isOffline: Boolean,
+    isLoading: Boolean,
+    errorMessage: String?,
     onOpenPlaylist: (Playlist) -> Unit,
     coverFor: (Playlist) -> CoverRequest?,
     onRetry: () -> Unit,
+    actions: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val playlists = library.playlists
     val playlistList = playlists.orEmpty()
     LibraryScreenScaffold(
         title = "播放列表",
         loadState = libraryLoadState(
             items = playlists,
-            isLoading = session.isLoading,
-            errorMessage = session.errorMessage,
+            isLoading = isLoading,
+            errorMessage = errorMessage,
             emptyMessage = "暂无播放列表",
             // 播放列表不进快照（规格「明确不做」）：没数据又断网时明说需要联网。
             // 这条优先于网络错误——断网时重试必然失败，不给按钮。已加载的照常显示。
-            offlineUnavailableMessage = if (library.isOffline) "播放列表需要联网才能查看" else null,
+            offlineUnavailableMessage = if (isOffline) "播放列表需要联网才能查看" else null,
             onRetry = onRetry
         ),
+        actions = actions,
         // 改前这一页的空态 / 错误态是竖直居中的（与专辑页居顶不同），保持一致。
         contentAlignment = Alignment.Center,
         modifier = modifier,
@@ -3818,7 +3877,8 @@ private fun SearchResultRow(
 
 @Composable
 private fun PlaylistDetailContent(
-    library: LibraryState,
+    isOffline: Boolean,
+    offlineUnavailableMessage: String?,
     session: SessionState,
     playlist: Playlist,
     playlistTracks: List<Track>?,
@@ -3830,8 +3890,8 @@ private fun PlaylistDetailContent(
     onRetry: () -> Unit,
     currentTrackId: String?,
     isPlaying: Boolean,
-    streamUrl: (Track) -> String?,
-    onDownloadMessage: (String) -> Unit,
+    download: (@Composable () -> Unit)?,
+    edit: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     // 与专辑详情共用同一套页面骨架（spec §6 / 工单 10）：大封面 + 居中标题 + 播放全部/随机 + 下载。
@@ -3841,7 +3901,6 @@ private fun PlaylistDetailContent(
     // 「已下载」口径只在真正过滤了列表时用（offlineNotice 非空），免得下载名单还没算出来时
     // 把全量当成已下载。
     val offlineView = offlineNotice != null
-    val isOffline = library.isOffline
     MediaDetailScaffold(
         cover = playlistCoverFor(playlist),
         coverDescription = playlist.name,
@@ -3857,31 +3916,21 @@ private fun PlaylistDetailContent(
                 val shuffled = trackList.shuffled()
                 onPlayTrack(shuffled, shuffled.first().id)
             },
-            // 下载（工单 05）：曲目还没加载时按钮禁用（target 为 null）。
-            // 离线时藏起来（ADR-0008）：下不了，且列表里已经全是下载过的。
-            download = if (isOffline) {
-                null
-            } else {
-                {
-                    DownloadActionButton(
-                        kind = DownloadKind.PLAYLIST,
-                        id = playlist.id,
-                        name = playlist.name,
-                        tracks = trackList,
-                        serverUrl = session.serverUrl,
-                        streamUrl = streamUrl,
-                        currentTrackId = currentTrackId,
-                        onMessage = onDownloadMessage
-                    )
-                }
-            }
+            download = download
         ),
         offlineNotice = offlineNotice,
         // 曲目行之间保持原来的 4dp：与下方骨架的 rowSpacing 一致，加载完成不跳。
         tracksArrangement = Arrangement.spacedBy(Dimens.SpaceTiny),
         modifier = modifier
     ) {
+        edit?.let { item(key = "edit") { it() } }
         when {
+            playlistTracks == null && isOffline && offlineUnavailableMessage != null -> item(key = "offline-empty") {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    EmptyState(offlineUnavailableMessage)
+                    TextButton(onClick = onRetry) { Text("刷新") }
+                }
+            }
             // 离线读取本地下载清单期间给骨架；别先闪一句「没有下载」再变成曲目。
             playlistTracks == null && (session.isLoading || (isOffline && session.errorMessage == null)) ->
                 item(key = "skeleton") {

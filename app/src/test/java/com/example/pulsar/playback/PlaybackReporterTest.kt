@@ -35,6 +35,25 @@ class PlaybackReporterTest {
     }
 
     @Test
+    fun `重建队列再次播放同一首时 上次播放先结束再记一次开始`() = runTest {
+        val (reporter, channel) = createReporter()
+        val identity = PlaybackReportIdentity("测试会话", "track-1")
+        reporter.onTrackStarted("track-1", 0, identity, queueEntry = "第一次点播")
+        reporter.onTrackStarted("track-1", 400, identity, queueEntry = "第一次点播")
+        reporter.onPlaybackStopped(1_000, "track-1", queueEntry = "第一次点播")
+        reporter.onTrackStarted("track-1", 0, identity, queueEntry = "再次点播")
+        reporter.onPlaybackStopped(2_000, "track-1", queueEntry = "第一次点播")
+        reporter.onPlaybackStopped(3_000, "track-1", queueEntry = "再次点播")
+        advanceUntilIdle()
+        assertEquals(listOf(
+            Report("/Sessions/Playing", "track-1", 0L),
+            Report("/Sessions/Playing/Stopped", "track-1", 10_000_000L),
+            Report("/Sessions/Playing", "track-1", 0L),
+            Report("/Sessions/Playing/Stopped", "track-1", 30_000_000L),
+        ), channel.reports)
+    }
+
+    @Test
     fun `track change reports stop for previous track then start for next`() = runTest {
         val (reporter, channel) = createReporter()
 
@@ -53,6 +72,23 @@ class PlaybackReporterTest {
             ),
             channel.reports
         )
+    }
+
+    @Test
+    fun `切换会话后 旧曲目的停止不会写进新会话`() = runTest {
+        val original = FakeChannel()
+        val replacement = FakeChannel()
+        val reports = FakeReports(original)
+        val reporter = PlaybackReporter(reports, this)
+        reporter.onTrackStarted("track-1", positionMs = 0)
+        advanceUntilIdle()
+
+        reports.channel = replacement
+        reporter.onPlaybackStopped(positionMs = 1_000)
+        reporter.onTrackStarted("track-2", positionMs = 0)
+        advanceUntilIdle()
+
+        assertEquals(listOf(Report("/Sessions/Playing", "track-2", 0L)), replacement.reports)
     }
 
     @Test
@@ -169,6 +205,9 @@ class PlaybackReporterTest {
         assertEquals(0L, PlaybackReporter.positionTicks(-5))
     }
 
+    private fun PlaybackReporter.onTrackStarted(itemId: String, positionMs: Long) =
+        onTrackStarted(itemId, positionMs, PlaybackReportIdentity("测试会话", itemId))
+
     private data class Report(val path: String, val itemId: String, val positionTicks: Long)
 
     /**
@@ -178,10 +217,18 @@ class PlaybackReporterTest {
     private class FakeReports(
         var channel: FakeChannel? = FakeChannel(),
     ) : PlaybackReportSource {
-        override fun currentChannel(): PlaybackReportChannel? = channel
+        override fun channelFor(identity: PlaybackReportIdentity): PlaybackReportChannel? {
+            if (identity.trackId.isBlank() || ':' in identity.trackId) return null
+            val captured = channel ?: return null
+            return object : PlaybackReportChannel by captured {
+                override fun isCurrent() = channel === captured
+            }
+        }
     }
 
     private class FakeChannel : PlaybackReportChannel {
+        override fun isCurrent() = true
+
         val reports = mutableListOf<Report>()
         var failing = false
 

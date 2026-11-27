@@ -427,12 +427,13 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
     val trialActive = showCompanionLibrary
     val mediaItems = remember(viewModel, trial) {
         TrackMediaItemFactory { track ->
-            val url = when {
-                isExistingDownloadMediaId(track.id) -> existingDownloadPlaybackUri(track.id)
-                isCompanionMediaId(track.id) || isCompanionDownloadMediaId(track.id) -> trial.streamUrl(track)
-                else -> viewModel.streamUrl(track)
+            when {
+                isExistingDownloadMediaId(track.id) -> buildMediaItem(track, existingDownloadPlaybackUri(track.id))
+                isCompanionMediaId(track.id) || isCompanionDownloadMediaId(track.id) -> trial.streamUrl(track)?.let { url ->
+                    buildMediaItem(track, url, trial.playbackReportIdentity(track))
+                }
+                else -> viewModel.playbackMediaItem(track)
             }
-            url?.let { buildMediaItem(track, it) }
         }
     }
     val gate = remember(viewModel, trial) {
@@ -534,6 +535,12 @@ private fun PulsarEntry(controllerFuture: ListenableFuture<MediaController>?, vo
                     library = if (trialActive) LibraryState(
                         tracks = trialState.tracks, albums = trialState.albums,
                         search = trialState.search, isOffline = trialState.isOffline,
+                        discoverAlbums = trialState.albums,
+                        recentlyPlayed = trialState.discover.recentlyPlayed,
+                        mostPlayed = trialState.discover.mostPlayed,
+                        recentlyAdded = trialState.discover.recentlyAdded,
+                        discoverFailedSections = trialState.discover.failedSections,
+                        isDiscoverRefreshing = trialState.isLoading || trialState.discover.loadingSections.isNotEmpty(),
                     ) else state.library,
                     session = if (trialActive) SessionState(isLoading = trialState.isLoading, errorMessage = trialState.error?.message) else state.session,
                     downloads = if (trialActive) DownloadsState(visibleTrackIds = trialState.downloadedTrackIds) else state.downloads,
@@ -1318,8 +1325,7 @@ private fun MusicLibraryScreen(
                 val currentPage = s.saveablePageKey() == section.saveablePageKey()
                 Box(Modifier.fillMaxSize().transitionInput(currentPage && !showNowPlaying)) {
                 pageStates.SaveableStateProvider(s.saveablePageKey()) {
-                if (trialActive && (s == LibrarySection.Discover || s == LibrarySection.Settings || s == LibrarySection.DownloadService)
-                ) {
+                if (trialActive && (s == LibrarySection.Settings || s == LibrarySection.DownloadService)) {
                     LibraryScreenScaffold(
                         title = s.navLabel().orEmpty(),
                         loadState = LoadState.Empty("电脑曲库试用目前支持歌曲、专辑、艺术家、搜索和手动下载"),
@@ -1333,20 +1339,23 @@ private fun MusicLibraryScreen(
                         session = session,
                         dailyPicks = discoverPicks,
                         onNextPicks = { discoverPicksVariant++ },
-                        discoverAlbums = visible.discoverAlbums,
+                        discoverAlbums = if (companionTrial != null) {
+                            remember(visible.discoverAlbums, discoverPicksVariant) { visible.discoverAlbums?.shuffled()?.take(12) }
+                        } else visible.discoverAlbums,
                         sections = offline.discover,
                         emptyKind = offline.emptyKind,
                         isFiltering = offline.isFiltering,
                         offlineNotice = offlineNotice,
                         onOpenAlbum = openAlbum,
-                        coverFor = viewModel::albumCover,
-                        trackCoverFor = viewModel::trackCover,
+                        coverFor = albumCover,
+                        trackCoverFor = trackCover,
                         onPlayTrack = onPlayTrack,
                         onAddToQueue = onAddToQueue,
                         currentTrackId = currentTrack?.id,
                         isPlaying = playback.isPlaying,
-                        onRefresh = viewModel::refreshDiscover,
-                        onRetry = viewModel::loadDiscoverAlbums,
+                        onRefresh = if (companionTrial != null) companionTrial::refreshDiscover else viewModel::refreshDiscover,
+                        onRetry = if (companionTrial != null) companionTrial::retry else viewModel::loadDiscoverAlbums,
+                        onReconnect = companionTrial?.takeIf { library.isOffline }?.let { it::retry },
                         modifier = Modifier.fillMaxSize()
                     )
                     LibrarySection.Tracks -> TracksContent(
@@ -2782,6 +2791,7 @@ private fun DiscoverContent(
     isPlaying: Boolean,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
+    onReconnect: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
     // 「换一批」按钮转圈（spec §9）：**只在刷新进行时**转，停的时候补到最近的 360° 整倍数再停。
@@ -2860,7 +2870,12 @@ private fun DiscoverContent(
         offlineNotice?.let { notice ->
             item(key = "offlineNotice") { OfflineNoticeText(notice) }
         }
-        if (library.tracks == null) {
+        if (onReconnect != null) {
+            item(key = "reconnect") {
+                TextButton(onClick = onReconnect, enabled = !session.isLoading) { Text("重新连接电脑曲库") }
+            }
+        }
+        if (library.tracks == null && (session.isLoading || session.isRestoring)) {
             // 会话还没恢复完：灰色波浪占位。不能走空态文案——那是"确实没有内容"，
             // 而这里是"还在连"，两者语义完全不同。
             item(key = "dailySkeleton") {
@@ -2933,7 +2948,7 @@ private fun DiscoverContent(
         // **离线时这三节整节不组合**（连骨架和空态都不给，spec §7）：数据留在 state 里，回在线自动回来。
         // 「要不要画」= 有内容（[DiscoverSections] 判的，报告 #22）或 该给骨架——两者都不成立才整节缺席。
         fun historyLoading(section: LibrarySectionKey) =
-            !library.isOffline && section !in library.discoverFailedSections
+            !library.isOffline && session.errorMessage == null && section !in library.discoverFailedSections
         if (sections.showRecentlyPlayed || historyLoading(LibrarySectionKey.RecentlyPlayed)) {
             item(key = "recentlyPlayed") {
                 DiscoverTrackStrip(

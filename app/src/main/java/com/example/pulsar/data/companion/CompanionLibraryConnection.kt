@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.example.pulsar.data.CoverRequest
 import com.example.pulsar.domain.model.Playlist
 import com.example.pulsar.domain.model.Track
+import com.example.pulsar.playback.PlaybackReportChannel
+import com.example.pulsar.playback.PlaybackReportIdentity
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -21,6 +23,8 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -34,6 +38,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okio.ByteString.Companion.encodeUtf8
 import java.io.IOException
 import java.net.URI
+import java.util.UUID
 
 /** 只管理电脑曲库的配对；不读写 Jellyfin 会话或下载数据。 */
 internal class CompanionLibraryConnection(
@@ -45,6 +50,8 @@ internal class CompanionLibraryConnection(
     // 播放数据源在后台线程打开；地址和密钥作为一个快照读取，换配对不会串用。
     @Volatile
     private var current: CompanionPairing? = null
+    private val _lastReportedPlay = MutableStateFlow<ReportedPlay?>(null)
+    val lastReportedPlay = _lastReportedPlay.asStateFlow()
 
     /** 保存过的非敏感服务地址。暂时连不上也能独立发起 QQ 搜索，不用等重新配对。 */
     var serviceUrl: String? = null
@@ -114,7 +121,7 @@ internal class CompanionLibraryConnection(
         if (tracks.isSuccess) {
             try {
                 store.save(pairing)
-                current = pairing
+                if (current?.scope != pairing.scope) current = pairing
                 serviceUrl = pairing.serviceUrl
             } catch (error: CancellationException) {
                 throw error
@@ -135,8 +142,55 @@ internal class CompanionLibraryConnection(
             return@withLock Result.failure(CompanionLibraryError.Storage)
         }
         serviceUrl = pairing?.serviceUrl
-        if (pairing == null) return@withLock Result.success(null)
-        fetchTracks(pairing).also { if (it.isSuccess) current = pairing }
+        if (pairing == null) {
+            current = null
+            return@withLock Result.success(null)
+        }
+        fetchTracks(pairing).also {
+            if (it.isSuccess && current?.scope != pairing.scope) current = pairing
+        }
+    }
+
+    fun playbackReportOwner(scope: String): String? = current?.takeIf { it.scope == scope }?.playbackReportOwner
+
+    fun playbackReportChannel(identity: PlaybackReportIdentity): PlaybackReportChannel? {
+        val pairing = current?.takeIf { it.playbackReportOwner == identity.owner } ?: return null
+        val url = pairing.playbackReportUrl(identity.trackId) ?: return null
+        return object : PlaybackReportChannel {
+            private val eventId by lazy { UUID.randomUUID().toString().replace("-", "") }
+
+            override fun isCurrent(): Boolean = current === pairing
+
+            override suspend fun reportPlaybackStarted(itemId: String, positionTicks: Long): Result<Unit> =
+                report("start", positionTicks).onSuccess {
+                    if (isCurrent()) _lastReportedPlay.value = ReportedPlay(pairing.scope, eventId)
+                }
+
+            override suspend fun reportPlaybackStopped(itemId: String, positionTicks: Long): Result<Unit> =
+                report("stop", positionTicks)
+
+            private suspend fun report(event: String, ticks: Long): Result<Unit> = execute {
+                if (!isCurrent()) throw CompanionLibraryError.InvalidPairing
+                val response = client.post(url) {
+                    header(HttpHeaders.Authorization, pairing.authorization)
+                    identity.revision?.takeIf(trackIdPattern::matches)?.let { header(HttpHeaders.IfMatch, "\"$it\"") }
+                    contentType(ContentType.Application.Json)
+                    setBody(json.encodeToString(CompanionPlaybackEvent.serializer(), CompanionPlaybackEvent(eventId, event, ticks)))
+                }
+                if (response.status != HttpStatusCode.NoContent) throw errorFor(response.status)
+            }
+        }
+    }
+
+    suspend fun discoverTrackIds(scope: String, section: CompanionDiscoverSection): Result<List<String>> = execute {
+        val pairing = current?.takeIf { it.scope == scope } ?: throw CompanionLibraryError.InvalidPairing
+        val response = client.get(pairing.discoverUrl(section)) {
+            header(HttpHeaders.Authorization, pairing.authorization)
+        }
+        if (response.status != HttpStatusCode.OK) throw errorFor(response.status)
+        val ids = json.decodeFromString<DiscoverTrackIds>(response.bodyAsText()).ids
+        require(ids.all(trackIdPattern::matches) && ids.distinct().size == ids.size)
+        ids.map(pairing::mediaId)
     }
 
     suspend fun playlists(scope: String): Result<List<CompanionPlaylist>> =
@@ -249,6 +303,22 @@ internal sealed class CompanionLibraryError(message: String) : Exception(message
     data object PlaylistStorage : CompanionLibraryError("无法读写电脑上的播放列表，请检查 PC 服务目录")
 }
 
+internal data class ReportedPlay(val scope: String, val eventId: String)
+
+@Serializable
+private data class CompanionPlaybackEvent(
+    @SerialName("event_id") val eventId: String,
+    val event: String,
+    @SerialName("position_ticks") val positionTicks: Long,
+)
+
+internal enum class CompanionDiscoverSection(val path: String) {
+    RecentlyPlayed("recently-played"), MostPlayed("most-played"), RecentlyAdded("recently-added"),
+}
+
+@Serializable
+private data class DiscoverTrackIds(@SerialName("track_ids") val ids: List<String>)
+
 internal data class CompanionPlaylist(val playlist: Playlist, val trackIds: List<String>)
 
 @Serializable
@@ -340,6 +410,8 @@ internal class CompanionPairing private constructor(
     // 服务端 ID 来自相对路径，两台电脑可以相同；本机播放身份必须包含服务归属。
     private val mediaIdPrefix = "$MEDIA_ID_PREFIX${serviceUrl.encodeUtf8().sha256().hex()}:"
     val scope: String = serviceUrl.encodeUtf8().hmacSha256(accessKey.encodeUtf8()).hex()
+    // 媒体项只带这个进程内的随机标识，不带密钥或由密钥派生的归属。
+    val playbackReportOwner: String = UUID.randomUUID().toString()
 
     fun mediaId(trackId: String): String = "$mediaIdPrefix$trackId"
     fun trackId(mediaId: String): String? = mediaId.removePrefix(mediaIdPrefix)
@@ -357,11 +429,15 @@ internal class CompanionPairing private constructor(
         edit[companionAccessKey] = accessKey
     }
 
+    fun discoverUrl(section: CompanionDiscoverSection): String = origin.newBuilder()
+        .encodedPath("/api/library/discover/${section.path}").build().toString()
+
     fun tracksUrl(): String = origin.newBuilder().encodedPath(TRACKS_PATH).build().toString()
     fun evidenceUrl(): String = origin.newBuilder().encodedPath("/api/library/evidence").build().toString()
 
     fun streamUrl(mediaId: String): String? = trackUrl(mediaId, "audio")
     fun artworkUrl(mediaId: String): String? = trackUrl(mediaId, "artwork")
+    fun playbackReportUrl(mediaId: String): String? = trackUrl(mediaId, "playback")
 
     private fun trackUrl(mediaId: String, resource: String): String? {
         if (!mediaId.startsWith(mediaIdPrefix)) return null

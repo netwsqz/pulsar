@@ -31,6 +31,8 @@ QQ 音乐导入需要 QQ 凭证；若 `E:\music\qqmusic_cred.json` 缺失/失效
 | `/api/library/evidence` | POST | 访问密钥：按 `{"paths":[...]}` 在索引内找候选，返回完整字节大小及 SHA-256；只在核对已有下载时使用 |
 | `/api/library/tracks/{id}/audio` | GET | 访问密钥：读取原文件字节，支持 HTTP Range；手机手动下载用 `If-Match` 锁定文件版本 |
 | `/api/library/tracks/{id}/artwork` | GET | 访问密钥：读取曲目内嵌封面，优先正面；缺失或不支持返回 `404`，`If-Match` 版本不符返回 `412`；不读取目录图片或在线链接 |
+| `/api/library/discover/recently-added`、`/api/library/discover/recently-played`、`/api/library/discover/most-played` | GET | 访问密钥：返回按该节排序的 `track_ids`；`200` 空数组表示确实没有结果，读取失败不会返回空数组 |
+| `/api/library/tracks/{id}/playback` | POST | 访问密钥：提交 `{"event_id":"32 位小写十六进制","event":"start 或 stop","position_ticks":0}`；同一次播放的开始与结束共用 ID，成功回 `204`，重复上报不重复计数；开始上报可用 `If-Match` 校验入队时的文件版本，不符回 `412` |
 | `/api/library/playlists` | GET / POST | 访问密钥：列出新播放列表（每项含 `id`、`name`、`track_ids`）；`POST {"name":"通勤"}` 新建空列表 |
 | `/api/library/playlists/{id}` | PUT | 访问密钥：提交 `{"previous_track_ids":[...],"track_ids":[...]}`；按给定顺序保存，旧顺序不匹配时回 `409`，不覆盖其他设备的修改 |
 | `/api/library/delete` | POST | 🔒 `{"paths": [...]}` → `{"deleted": [...], "failed": [{"path", "error"}]}`（挪进回收站） |
@@ -49,6 +51,7 @@ QQ 音乐导入需要 QQ 凭证；若 `E:\music\qqmusic_cred.json` 缺失/失效
 - 核对旧副本时，电脑只读已索引的音频，手机在本机比对完整副本的大小和 SHA-256。路径及 `revision` 不是内容相同的证据；刷新时用 `revision` 撤下已变化的关联。
 - 手动下载发送 `If-Match: "<revision>"`；文件版本不符回 `412`，手机刷新清单后可手动下载新版本，不会接着写旧片段。音频响应的 `ETag` 与清单的 `revision` 一致；手机不把不支持此校验的旧服务响应写入下载。
 - 新播放列表只存名称和有序曲目 ID，保存在 `server/.library_playlists.json`，重启复用。首次使用是空白，不导入旧列表；编辑不动音频文件或手机下载。备份或迁移 PC 服务目录时请保留这个文件。
+- 发现页「最近添加」在 Windows 按音频文件创建时间排序，不因改内嵌标签置顶。电脑曲库的「最近播放」和「最常播放」从首次实际开播开始积累，存于 `server/.library_history.sqlite3`，不导入旧听歌记录。停止服务后可备份数据库；上报失败不影响播放，断网期间不补报。
 - 局域网 HTTP **不加密**。只在可信家庭网络使用，不做端口转发，也不要把服务开放到公网。
 
 ## 文件操作密钥

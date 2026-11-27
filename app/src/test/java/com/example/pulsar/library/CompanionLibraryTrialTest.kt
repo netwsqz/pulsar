@@ -17,6 +17,8 @@ import com.example.pulsar.offline.OfflineNotice
 import com.example.pulsar.offline.offlineView
 import com.example.pulsar.playback.FakePlaybackRemote
 import com.example.pulsar.playback.FakeTrackMediaItemFactory
+import com.example.pulsar.playback.LibraryPlaybackReportSource
+import com.example.pulsar.playback.PlaybackReporter
 import com.example.pulsar.playback.PlaybackIntent
 import com.example.pulsar.playback.PlaybackSession
 import com.example.pulsar.playback.RemoteSnapshot
@@ -105,6 +107,155 @@ class CompanionLibraryTrialTest {
             assertEquals(List(2) { "http://192.168.1.8:8900/api/library/tracks/$id/audio" }, requestedUrls)
             assertEquals(listOf("http://192.168.1.8:8900/api/library/tracks"), listRequests)
             playback.close()
+        }
+    }
+
+    @Test
+    fun `发现页显示最近添加 单节请求失败不当成无记录 重试后能显示新历史`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        var played = false
+        val otherId = "b".repeat(64)
+        HttpClient(MockEngine { request ->
+            assertEquals("Bearer test-key", request.headers[HttpHeaders.Authorization])
+            when (request.url.encodedPath) {
+                "/api/library/tracks" -> respond("""{"tracks":[
+                    {"id":"$id","title":"新歌","artist":"歌手","album":"新专辑"},
+                    {"id":"$otherId","title":"旧歌","artist":"歌手","album":"旧专辑"}]}""")
+                "/api/library/discover/recently-added" -> respond("""{"track_ids":["$id","$otherId"]}""")
+                "/api/library/discover/recently-played" -> respond(
+                    if (played) """{"track_ids":["$id"]}""" else """{"track_ids":[]}""",
+                )
+                "/api/library/discover/most-played" -> if (played) respond("""{"track_ids":["$id"]}""")
+                    else respond("", HttpStatusCode.InternalServerError)
+                else -> error("不应调用 ${request.url}")
+            }
+        }).use { client ->
+            val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+            connection.pair("192.168.1.8", "test-key").getOrThrow()
+            val trial = CompanionLibraryTrial(connection, backgroundScope, StandardTestDispatcher(testScheduler))
+            trial.enter()
+            trial.onSectionEntered(LibrarySection.Discover)
+            val initial = trial.state.first { it.discover.failedSections.isNotEmpty() &&
+                it.discover.recentlyAdded != null && it.discover.recentlyPlayed != null }
+            assertEquals(listOf("新专辑", "旧专辑"), initial.discover.recentlyAdded?.map { it.name })
+            assertEquals(emptyList<Track>(), initial.discover.recentlyPlayed)
+            assertNull(initial.discover.mostPlayed)
+            assertEquals(false, initial.isOffline)
+
+            played = true
+            trial.refreshDiscover()
+            assertEquals(initial.tracks, trial.state.value.tracks)
+            assertEquals(initial.discover.recentlyAdded, trial.state.value.discover.recentlyAdded)
+            val refreshed = trial.state.first { it.discover.mostPlayed != null &&
+                it.discover.recentlyPlayed.orEmpty().isNotEmpty() }
+            val songs = refreshed.discover.recentlyPlayed.orEmpty()
+            assertEquals(listOf("新歌"), songs.map(Track::title))
+            assertEquals(songs, refreshed.discover.mostPlayed)
+            assertEquals(emptySet<Any>(), refreshed.discover.failedSections)
+            assertEquals("http://192.168.1.8:8900/api/library/tracks/$id/audio", trial.streamUrl(songs.single()))
+        }
+    }
+
+    @Test
+    fun `发现页读到未同步曲目不当成无记录 电脑断开后只显示已下载`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        var connected = true
+        val otherId = "b".repeat(64)
+        HttpClient(MockEngine { request ->
+            when (request.url.encodedPath) {
+                "/api/library/tracks" -> respond("""{"tracks":[{"id":"$id","title":"未下载","artist":"歌手","album":"专辑"}]}""")
+                "/api/library/discover/recently-played" -> {
+                    if (!connected) throw IOException("电脑关机")
+                    respond("""{"track_ids":["$otherId"]}""")
+                }
+                else -> respond("""{"track_ids":[]}""")
+            }
+        }).use { client ->
+            val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+            connection.pair("192.168.1.8", "test-key").getOrThrow()
+            val trial = CompanionLibraryTrial(connection, backgroundScope, StandardTestDispatcher(testScheduler))
+            trial.enter()
+            trial.state.first { !it.isLoading }
+            trial.onSectionEntered(LibrarySection.Discover)
+            val stale = trial.state.first { it.discover.failedSections.isNotEmpty() || it.discover.recentlyPlayed != null }
+            assertNull(stale.discover.recentlyPlayed)
+            assertEquals(false, stale.isOffline)
+
+            connected = false
+            trial.onSectionEntered(LibrarySection.Tracks)
+            trial.onSectionEntered(LibrarySection.Discover)
+            val offline = trial.state.first { it.isOffline }
+            assertEquals(emptyList<Track>(), offline.tracks)
+            assertNull(offline.discover.recentlyPlayed)
+        }
+    }
+
+    @Test
+    fun `实际开播后自动补跑发现页 上报失败不切离线 换密钥不接收旧队列事件`() = runTest {
+        val preferences = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temp.root.resolve("pulsar.preferences_pb")
+        }
+        val events = mutableListOf<Triple<String?, String?, String>>()
+        val revision = "c".repeat(64)
+        var played = false
+        var fail = false
+        HttpClient(MockEngine { request ->
+            when (request.url.encodedPath) {
+                "/api/library/tracks" -> respond("""{"tracks":[{"id":"$id","title":"新歌","artist":"歌手","album":"专辑","revision":"$revision"}]}""")
+                "/api/library/discover/recently-added" -> respond("""{"track_ids":["$id"]}""")
+                "/api/library/discover/recently-played", "/api/library/discover/most-played" -> respond(
+                    if (played) """{"track_ids":["$id"]}""" else """{"track_ids":[]}""",
+                )
+                "/api/library/tracks/$id/playback" -> {
+                    events += Triple(request.headers[HttpHeaders.Authorization], request.headers[HttpHeaders.IfMatch],
+                        (request.body as TextContent).text)
+                    if (fail) throw IOException("上报断连")
+                    played = true
+                    respond("", HttpStatusCode.NoContent)
+                }
+                else -> error("不应调用 ${request.url}")
+            }
+        }).use { client ->
+            val connection = CompanionLibraryConnection(client, CompanionPairingStore(preferences))
+            connection.pair("192.168.1.8", "test-key").getOrThrow()
+            val trial = CompanionLibraryTrial(connection, backgroundScope, StandardTestDispatcher(testScheduler))
+            trial.enter()
+            trial.onSectionEntered(LibrarySection.Discover)
+            val before = trial.state.first { it.discover.recentlyPlayed != null && it.discover.mostPlayed != null }
+            val track = before.tracks!!.single()
+            val identity = checkNotNull(trial.playbackReportIdentity(track))
+            var jellyfinCalls = 0
+            val reports = LibraryPlaybackReportSource(connection) { _ ->
+                jellyfinCalls++
+                null
+            }
+            val reporter = PlaybackReporter(reports, this)
+            reporter.onTrackStarted(track.id, 0, identity)
+            assertTrue(events.isEmpty())
+            val after = trial.state.first { it.discover.recentlyPlayed == listOf(track) && it.discover.mostPlayed == listOf(track) }
+            reporter.onTrackStarted(track.id, 100, identity)
+            fail = true
+            reporter.onPlaybackStopped(2_000, track.id)
+            testScheduler.advanceUntilIdle()
+            assertEquals(false, trial.state.value.isOffline)
+            assertEquals(after.tracks, trial.state.value.tracks)
+
+            trial.pair("192.168.1.8", "different-key").getOrThrow()
+            reporter.onTrackStarted(track.id, 0, identity)
+            reporter.onPlaybackStopped(200, track.id)
+            testScheduler.advanceUntilIdle()
+            assertEquals(0, jellyfinCalls)
+            assertEquals(List(2) { "Bearer test-key" }, events.map { it.first })
+            assertEquals(List(2) { "\"$revision\"" }, events.map { it.second })
+            val (start, stop) = events.map { Json.parseToJsonElement(it.third).jsonObject }
+            assertEquals("start", start.getValue("event").jsonPrimitive.content)
+            assertEquals("stop", stop.getValue("event").jsonPrimitive.content)
+            assertEquals("20000000", stop.getValue("position_ticks").jsonPrimitive.content)
+            assertEquals(start.getValue("event_id"), stop.getValue("event_id"))
         }
     }
 

@@ -37,9 +37,10 @@ class SessionPlaybackReportSourceTest {
 
     @Test
     fun `no channel before a session is published`() = runTest {
-        val source = SessionPlaybackReportSource(managerFor(FakeSessionRepository(null)))
+        val manager = managerFor(FakeSessionRepository(null))
+        val source = SessionPlaybackReportSource(manager)
 
-        assertNull(source.currentChannel())
+        assertNull(source.channelFor(PlaybackReportIdentity("无会话", "track-1")))
     }
 
     @Test
@@ -49,12 +50,13 @@ class SessionPlaybackReportSourceTest {
         val manager = managerFor(FakeSessionRepository(saved), factory)
         manager.restore()
         val source = SessionPlaybackReportSource(manager)
+        val owner = checkNotNull(manager.currentConnection()).playbackReportOwner
 
-        val channel = source.currentChannel()
+        val channel = source.channelFor(PlaybackReportIdentity(owner, "track-1"))
         assertNotNull(channel)
         channel!!.reportPlaybackStarted("track-1", 10_000)
         // 再取一次通道（相当于切歌后的下一次上报）：仍然复用同一个 API，不新建数据源。
-        source.currentChannel()!!.reportPlaybackStopped("track-1", 20_000)
+        source.channelFor(PlaybackReportIdentity(owner, "track-1"))!!.reportPlaybackStopped("track-1", 20_000)
 
         assertEquals(
             listOf(
@@ -71,11 +73,12 @@ class SessionPlaybackReportSourceTest {
         val manager = managerFor(FakeSessionRepository(saved))
         manager.restore()
         val source = SessionPlaybackReportSource(manager)
-        assertNotNull(source.currentChannel())
+        val identity = PlaybackReportIdentity(checkNotNull(manager.currentConnection()).playbackReportOwner, "track-1")
+        assertNotNull(source.channelFor(identity))
 
         manager.signOut()
 
-        assertNull(source.currentChannel())
+        assertNull(source.channelFor(identity))
     }
 
     @Test
@@ -85,13 +88,17 @@ class SessionPlaybackReportSourceTest {
         val manager = managerFor(FakeSessionRepository(null), factory)
 
         manager.login("https://media.example.com", "alice", "pw").getOrThrow()
-        SessionPlaybackReportSource(manager).currentChannel()!!.reportPlaybackStarted("track-1", 1_000)
+        val source = SessionPlaybackReportSource(manager)
+        val oldOwner = manager.currentConnection()!!.playbackReportOwner
+        source.channelFor(PlaybackReportIdentity(oldOwner, "track-1"))!!.reportPlaybackStarted("track-1", 1_000)
 
         factory.loginResult = Result.success(
             Session("https://media.example.com", "user-2", "bob", "token-2")
         )
         manager.login("https://media.example.com", "bob", "pw").getOrThrow()
-        SessionPlaybackReportSource(manager).currentChannel()!!.reportPlaybackStarted("track-2", 2_000)
+        assertNull(source.channelFor(PlaybackReportIdentity(oldOwner, "track-1")))
+        source.channelFor(PlaybackReportIdentity(checkNotNull(manager.currentConnection()).playbackReportOwner, "track-2"))!!
+            .reportPlaybackStarted("track-2", 2_000)
 
         assertEquals(
             listOf(

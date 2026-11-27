@@ -43,10 +43,13 @@ import com.example.pulsar.download.isExistingDownloadPlaybackUri
 import com.example.pulsar.download.isLinkedDownloadPlaybackUri
 import com.example.pulsar.download.linkedOriginalId
 import com.example.pulsar.playback.DeviceVolumeSource
+import com.example.pulsar.playback.LibraryPlaybackReportSource
 import com.example.pulsar.playback.LoudnessGainAudioSink
 import com.example.pulsar.playback.LoudnessGainProvider
 import com.example.pulsar.playback.PlaybackDiagnostics
 import com.example.pulsar.playback.PlaybackReporter
+import com.example.pulsar.playback.playbackReportIdentity
+import com.example.pulsar.playback.playbackReportQueueEntry
 import com.example.pulsar.playback.PlayerRebuildState
 import com.example.pulsar.playback.RemoteVolumePlayer
 import com.example.pulsar.playback.SessionPlaybackReportSource
@@ -141,8 +144,7 @@ class PlaybackService : MediaSessionService() {
     private val playbackReporter by lazy {
         val app = application as PulsarApplication
         PlaybackReporter(
-            // 上报与播放流共用 SessionManager 的当前会话 / API（#22）：不再每次重建数据源。
-            reports = SessionPlaybackReportSource(app.sessionManager),
+            reports = LibraryPlaybackReportSource(app.companionLibrary, SessionPlaybackReportSource(app.sessionManager)),
             scope = app.playbackReportScope,
         )
     }
@@ -180,9 +182,10 @@ class PlaybackService : MediaSessionService() {
             controller: ControllerInfo,
             mediaItems: List<MediaItem>,
         ): ListenableFuture<List<MediaItem>> {
-            // 外部控制器仍能操作队列和进度，但不能要求读取应用私有的下载。
+            // 外部控制器可以操作现有队列和进度，但不能代替 App 读私有下载或产生曲库上报。
             if (controller.uid != applicationInfo.uid && mediaItems.any { item ->
-                    isExistingDownloadMediaId(item.mediaId) || isCompanionDownloadMediaId(item.mediaId) ||
+                    item.playbackReportIdentity != null ||
+                        isExistingDownloadMediaId(item.mediaId) || isCompanionDownloadMediaId(item.mediaId) ||
                         item.localConfiguration?.uri?.toString()?.let { uri ->
                             isExistingDownloadPlaybackUri(uri) || isLinkedDownloadPlaybackUri(uri) || isCompanionDownloadPlaybackUri(uri)
                         } == true
@@ -611,30 +614,33 @@ class PlaybackService : MediaSessionService() {
                 newPosition: Player.PositionInfo,
                 reason: Int
             ) {
-                val oldId = oldPosition.mediaItem?.mediaId
-                val newId = newPosition.mediaItem?.mediaId
-                // 同一首歌内 seek 不算切歌；单曲循环保持同一 id，也不重复计数
-                if (oldId != null && oldId != newId) {
-                    playbackReporter.onPlaybackStopped(oldPosition.positionMs)
+                val oldItem = oldPosition.mediaItem
+                val newItem = newPosition.mediaItem
+                // 同一项拖进度或单曲循环不重复计数；再次点同一首生成新队列项。
+                if (oldItem != null && (oldItem.mediaId != newItem?.mediaId ||
+                        oldItem.playbackReportQueueEntry != newItem.playbackReportQueueEntry)
+                ) {
+                    playbackReporter.onPlaybackStopped(oldPosition.positionMs, oldItem.mediaId, oldItem.playbackReportQueueEntry)
                 }
-                // 这里只收尾，不报开始：真正开播统一由 onIsPlayingChanged 触发，
-                // 避免「只是加入队列 / 还在缓冲」被算成听过。
             }
 
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    // 首次 setMediaItems 时的 transition 早于 play()，这条才是真正的开播信号
-                    // （重复调用会被 PlaybackReporter 去重）。
-                    exoPlayer.currentMediaItem?.mediaId?.let { id ->
-                        playbackReporter.onTrackStarted(id, exoPlayer.currentPosition)
-                    }
+            override fun onEvents(player: Player, events: Player.Events) {
+                // 无缝切歌或队列替换时 isPlaying 可能一直为 true；拖进度仍由上报器去重。
+                if (player.isPlaying && (events.contains(Player.EVENT_IS_PLAYING_CHANGED) ||
+                        events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION) || events.contains(Player.EVENT_POSITION_DISCONTINUITY))
+                ) {
+                    val item = player.currentMediaItem ?: return
+                    val identity = item.playbackReportIdentity ?: return
+                    playbackReporter.onTrackStarted(item.mediaId, player.currentPosition, identity, item.playbackReportQueueEntry)
                 }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 // 队列放完停在最后一首：没有下一次 transition，得在这里收尾
-                if (playbackState == Player.STATE_ENDED) {
-                    playbackReporter.onPlaybackStopped(exoPlayer.currentPosition)
+                if (playbackState == Player.STATE_ENDED || playbackState == Player.STATE_IDLE) {
+                    exoPlayer.currentMediaItem?.let {
+                        playbackReporter.onPlaybackStopped(exoPlayer.currentPosition, it.mediaId, it.playbackReportQueueEntry)
+                    }
                 }
             }
         })

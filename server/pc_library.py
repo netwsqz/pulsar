@@ -1,8 +1,9 @@
-"""现有 PC 伴生服务的曲库接口：只读音频，独立保存新播放列表。"""
+"""现有 PC 伴生服务的曲库接口：只读音频，独立保存播放列表和播放历史。"""
 
 import logging
 import os
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from secrets import compare_digest, token_hex
@@ -13,6 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, StrictStr
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from library_history import LibraryHistory, PlaybackEvent
 from library_index import LibraryIndex, audio_revision, same_audio_file
 from library_playlists import (
     InvalidPlaylistTracks, LibraryPlaylist, LibraryPlaylists, NewPlaylist, PlaylistEdit, PlaylistEditConflict,
@@ -102,6 +104,7 @@ class EvidenceRequest(BaseModel):
 def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
     access_key: bytes | None = None
     playlists = LibraryPlaylists(key_file.with_name(".library_playlists.json"))
+    history = LibraryHistory(key_file.with_name(".library_history.sqlite3"))
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -133,6 +136,45 @@ def library_router(index: LibraryIndex, key_file: Path) -> APIRouter:
     @router.get("/tracks")
     def tracks() -> dict:
         return {"tracks": index.catalog()}
+
+    @router.get("/discover/recently-added")
+    def recently_added() -> dict:
+        return {"track_ids": index.recently_added()}
+
+    def history_ids(by_frequency: bool) -> dict:
+        try:
+            ranked = history.ranked_ids(by_frequency=by_frequency)
+        except sqlite3.Error:
+            raise HTTPException(500, "无法读取电脑曲库的播放历史") from None
+        # 暂时移走的歌不显示，也不清掉记录；恢复后仍能看到原历史。
+        available = []
+        for track_id in ranked:
+            if index.audio_file(track_id) is not None:
+                available.append(track_id)
+                if len(available) == 20:
+                    break
+        return {"track_ids": available}
+
+    @router.get("/discover/recently-played")
+    def recently_played() -> dict:
+        return history_ids(by_frequency=False)
+
+    @router.get("/discover/most-played")
+    def most_played() -> dict:
+        return history_ids(by_frequency=True)
+
+    @router.post("/tracks/{track_id}/playback", status_code=204, response_class=Response)
+    def report_playback(track_id: str, event: PlaybackEvent, if_match: str | None = Header(None)) -> None:
+        if event.event == "start":
+            file = index.audio_file(track_id)
+            if file is None:
+                raise HTTPException(404, "曲目不存在")
+            # 下载副本可能还在播，但同一路径换过文件时不能给新版本记播放。
+            _checked_revision(file[1], if_match)
+        try:
+            history.record(track_id, event)
+        except sqlite3.Error:
+            raise HTTPException(500, "无法保存电脑曲库的播放历史") from None
 
     @router.get("/playlists")
     def list_playlists() -> dict[str, list[LibraryPlaylist]]:

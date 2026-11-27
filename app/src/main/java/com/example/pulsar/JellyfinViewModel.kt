@@ -22,6 +22,8 @@ import com.example.pulsar.domain.model.Track
 import com.example.pulsar.library.LibraryCache
 import com.example.pulsar.offline.offlineIsPlayable
 import com.example.pulsar.offline.offlineUnplayableReason
+import com.example.pulsar.playback.PlaybackReportIdentity
+import com.example.pulsar.playback.buildMediaItem
 import com.example.pulsar.playback.isScopedLibraryTrack
 import com.example.pulsar.session.Session
 import com.example.pulsar.session.SessionConnection
@@ -444,6 +446,14 @@ class JellyfinViewModel(
         if (isScopedLibraryTrack(track.id)) return null
         val src = activeConnection()?.api ?: return null
         return src.streamUrl(track.id)
+    }
+
+    internal fun playbackMediaItem(track: Track): MediaItem? {
+        if (isScopedLibraryTrack(track.id)) return null
+        val connection = activeConnection() ?: return null
+        return buildMediaItem(
+            track, connection.api.streamUrl(track.id), PlaybackReportIdentity(connection.playbackReportOwner, track.id),
+        )
     }
 
     /**

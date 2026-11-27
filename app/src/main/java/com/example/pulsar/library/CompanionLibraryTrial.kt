@@ -2,6 +2,10 @@ package com.example.pulsar.library
 
 import com.example.pulsar.LibrarySection
 import com.example.pulsar.data.companion.CompanionArtworkRequest
+import com.example.pulsar.data.companion.CompanionDiscoverSection
+import com.example.pulsar.data.companion.CompanionDiscoverSection.RecentlyAdded
+import com.example.pulsar.data.companion.CompanionDiscoverSection.RecentlyPlayed
+import com.example.pulsar.data.companion.CompanionDiscoverSection.MostPlayed
 import com.example.pulsar.data.companion.CompanionLibraryConnection
 import com.example.pulsar.data.companion.CompanionLibraryError
 import com.example.pulsar.data.companion.CompanionPlaylist
@@ -16,6 +20,8 @@ import com.example.pulsar.download.LinkedDownload
 import com.example.pulsar.download.isCompanionDownloadMediaId
 import com.example.pulsar.offline.offlineUnplayableReason
 import com.example.pulsar.playback.PlaybackGate
+import com.example.pulsar.playback.PlaybackReportIdentity
+import com.example.pulsar.state.LibrarySectionKey
 import com.example.pulsar.state.SearchState
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -40,12 +46,21 @@ internal data class CompanionLibraryTrialState(
     val isOffline: Boolean = false,
     val downloadedTrackIds: Set<String> = emptySet(),
     val downloads: List<CompanionDownloadedAlbum> = emptyList(),
+    val discover: CompanionDiscoverState = CompanionDiscoverState(),
 ) {
     val tracks: List<Track>? get() = catalog?.tracks
     val albums: List<Album>? get() = catalog?.albums
 
     fun contains(track: Track): Boolean = catalog?.track(track.id) == track
 }
+
+internal data class CompanionDiscoverState(
+    val recentlyPlayed: List<Track>? = null,
+    val mostPlayed: List<Track>? = null,
+    val recentlyAdded: List<Album>? = null,
+    val failedSections: Set<LibrarySectionKey> = emptySet(),
+    val loadingSections: Set<CompanionDiscoverSection> = emptySet(),
+)
 
 internal data class CompanionPlaylistsState(
     val entries: List<CompanionPlaylist>? = null,
@@ -83,10 +98,26 @@ internal class CompanionLibraryTrial(
     private var playlistLoadJob: Job? = null
     private var showingPlaylists = false
     private var playlistGeneration = 0L
+    private var showingDiscover = false
+    private val discoverJobs = mutableMapOf<CompanionDiscoverSection, Job>()
+    private var historyObserver: Job? = null
 
     fun enter() {
         if (active) return
         active = true
+        var lastReportedPlay = connection.lastReportedPlay.value
+        historyObserver = scope.launch(dispatcher) {
+            connection.lastReportedPlay.collect { played ->
+                if (played == lastReportedPlay) return@collect
+                lastReportedPlay = played
+                if (played != null && showingDiscover && played.scope == onlineScope()) {
+                    // 旧请求可能读到开播前的结果；只重拉两节播放历史，不刷新曲库或「最近添加」。
+                    val history = listOf(RecentlyPlayed, MostPlayed)
+                    history.forEach { discoverJobs.remove(it)?.cancel() }
+                    loadDiscover(history)
+                }
+            }
+        }
         retry()
     }
 
@@ -103,14 +134,21 @@ internal class CompanionLibraryTrial(
         links = emptyMap()
         copies = emptyMap()
         showingPlaylists = false
+        showingDiscover = false
+        historyObserver?.cancel()
+        historyObserver = null
+        cancelDiscoverLoads()
         resetPlaylists()
         _state.value = CompanionLibraryTrialState()
     }
 
     fun retry() = reload { applyLoad(connection.refresh()) }
 
-    private fun reload(load: suspend () -> Unit) {
+    fun refreshDiscover() = reload(keepCatalog = true) { applyLoad(connection.refresh()) }
+
+    private fun reload(keepCatalog: Boolean = false, load: suspend () -> Unit) {
         if (!active || loadJob?.isActive == true) return
+        cancelDiscoverLoads()
         playlistLoadJob?.cancel()
         playlistLoadJob = null
         _playlists.value = playlists.value.copy(isLoading = false)
@@ -118,9 +156,10 @@ internal class CompanionLibraryTrial(
         localJob?.cancel()
         val current = state.value
         _state.value = current.copy(
-            catalog = null,
+            catalog = current.catalog.takeIf { keepCatalog },
             isLoading = true,
             error = null,
+            discover = if (keepCatalog) current.discover.copy(loadingSections = emptySet()) else CompanionDiscoverState(),
             search = SearchState(query = current.search.query, isSearching = current.search.query.isNotBlank()),
         )
         loadJob = scope.launch(dispatcher) { load() }
@@ -135,6 +174,7 @@ internal class CompanionLibraryTrial(
             loadJob?.cancel()
             localJob?.cancel()
             searchJob?.cancel()
+            cancelDiscoverLoads()
             resetPlaylists()
             pairingScope = null
             onlineTracks = null
@@ -152,19 +192,66 @@ internal class CompanionLibraryTrial(
         val error = result.exceptionOrNull() as? CompanionLibraryError
         val catalog = result.getOrNull()
         val pairing = connection.savedScopeOrNull()
-        if (pairing != pairingScope) resetPlaylists()
+        if (pairing != pairingScope) {
+            resetPlaylists()
+            _state.value = state.value.copy(discover = CompanionDiscoverState())
+        }
         if (pairing != null && catalog != null) checkCatalog(pairing, catalog)
         applyLocalCopies(pairing, catalog, error)
+        if (showingDiscover) loadDiscover()
         if (showingPlaylists) refreshPlaylists()
     }
 
     fun onSectionEntered(section: LibrarySection) {
+        showingDiscover = section == LibrarySection.Discover
         showingPlaylists = section == LibrarySection.Playlists || section is LibrarySection.PlaylistDetail
+        if (showingDiscover) loadDiscover()
         if (showingPlaylists) refreshPlaylists()
     }
 
+    private fun cancelDiscoverLoads() {
+        discoverJobs.values.forEach { it.cancel() }
+        discoverJobs.clear()
+    }
+
+    private fun loadDiscover(sections: List<CompanionDiscoverSection> = CompanionDiscoverSection.entries) {
+        val pairing = onlineScope() ?: return
+        val catalog = state.value.catalog ?: return
+        for (section in sections) {
+            if (discoverJobs[section]?.isActive == true) continue
+            val before = state.value
+            _state.value = before.copy(discover = before.discover.copy(loadingSections = before.discover.loadingSections + section))
+            discoverJobs[section] = scope.launch(dispatcher) {
+                val result = connection.discoverTrackIds(pairing, section)
+                currentCoroutineContext().ensureActive()
+                val current = state.value
+                val discover = current.discover
+                val key = when (section) {
+                    RecentlyPlayed -> LibrarySectionKey.RecentlyPlayed
+                    MostPlayed -> LibrarySectionKey.MostPlayed
+                    RecentlyAdded -> LibrarySectionKey.RecentlyAdded
+                }
+                val ids = result.getOrNull()
+                val matches = ids?.mapNotNull(catalog::track)
+                // 清单可能比榜单旧；只在榜单确实不存在记录时把这一节写成空列表。
+                val tracks = matches?.takeUnless { it.isEmpty() && ids.isNotEmpty() }
+                val data = if (tracks == null) discover else when (section) {
+                    RecentlyPlayed -> discover.copy(recentlyPlayed = tracks)
+                    MostPlayed -> discover.copy(mostPlayed = tracks)
+                    RecentlyAdded -> discover.copy(recentlyAdded = tracks.asSequence()
+                        .mapNotNull(catalog::albumFor).distinct().take(12).toList())
+                }
+                val failures = if (tracks == null) data.failedSections + key else data.failedSections - key
+                _state.value = current.copy(discover = data.copy(
+                    failedSections = failures, loadingSections = data.loadingSections - section,
+                ))
+                handleConnectionFailure(result.exceptionOrNull())
+            }
+        }
+    }
+
     fun refreshPlaylists() {
-        val pairing = onlinePlaylistScope() ?: return
+        val pairing = onlineScope() ?: return
         if (playlistLoadJob?.isActive == true || playlists.value.isSaving) return
         val generation = playlistGeneration
         _playlists.value = playlists.value.copy(isLoading = true, error = null)
@@ -174,22 +261,22 @@ internal class CompanionLibraryTrial(
             _playlists.value = CompanionPlaylistsState(
                 entries = result.getOrNull(), error = result.exceptionOrNull() as? CompanionLibraryError,
             )
-            handlePlaylistConnectionFailure(result.exceptionOrNull())
+            handleConnectionFailure(result.exceptionOrNull())
         }
     }
 
-    private fun handlePlaylistConnectionFailure(error: Throwable?) {
+    private fun handleConnectionFailure(error: Throwable?) {
         val connectionError = when (error) {
             CompanionLibraryError.Network -> CompanionLibraryError.Network
             CompanionLibraryError.Unauthorized -> CompanionLibraryError.Unauthorized
             else -> return
         }
-        val pairing = onlinePlaylistScope() ?: return
-        // 让整份曲库按同一规则转离线或提示配对，而不是只在播放列表节留下网络错误。
+        val pairing = onlineScope() ?: return
+        // 曲库读取的网络错误和 401 全局处理，与静默的播放上报分开。
         reload { applyLocalCopies(pairing, null, connectionError) }
     }
 
-    private fun onlinePlaylistScope(): String? {
+    private fun onlineScope(): String? {
         val current = state.value
         return pairingScope.takeIf { active && !current.isLoading && !current.isOffline && current.error == null }
     }
@@ -202,7 +289,7 @@ internal class CompanionLibraryTrial(
     }
 
     fun playlistTracks(playlist: Playlist): List<Track>? {
-        if (onlinePlaylistScope() == null) return null
+        if (onlineScope() == null) return null
         val catalog = state.value.catalog ?: return null
         return playlists.value.entry(playlist)?.trackIds?.mapNotNull(catalog::track)
     }
@@ -230,7 +317,7 @@ internal class CompanionLibraryTrial(
     }
 
     private suspend fun editPlaylist(request: suspend (String) -> Result<CompanionPlaylist>): Result<Playlist> {
-        val pairing = onlinePlaylistScope() ?: return Result.failure(CompanionLibraryError.Unavailable)
+        val pairing = onlineScope() ?: return Result.failure(CompanionLibraryError.Unavailable)
         val current = playlists.value
         if (current.isSaving || current.isLoading || current.entries == null) {
             return Result.failure(CompanionLibraryError.Unavailable)
@@ -251,7 +338,7 @@ internal class CompanionLibraryTrial(
             _playlists.value = CompanionPlaylistsState(entries = updated)
         }.onFailure { error ->
             when (error) {
-                CompanionLibraryError.Unauthorized, CompanionLibraryError.Network -> handlePlaylistConnectionFailure(error)
+                CompanionLibraryError.Unauthorized, CompanionLibraryError.Network -> handleConnectionFailure(error)
                 CompanionLibraryError.PlaylistConflict, CompanionLibraryError.PlaylistMissing -> refreshPlaylists()
                 else -> Unit
             }
@@ -300,11 +387,12 @@ internal class CompanionLibraryTrial(
             needsPairing = error == CompanionLibraryError.Unauthorized || (error == null && catalog == null),
             serviceUrl = connection.serviceUrl,
             pairingScope = pairing,
+            discover = if (browseCatalog === current.catalog && catalog != null) current.discover else CompanionDiscoverState(),
             search = if (resultsChanged) SearchState(
                 query = query, isSearching = query.isNotBlank() && tracks != null, isOfflineSearch = offline,
             ) else current.search,
         )
-        if (resultsChanged) updateSearchQuery(query)
+        if (resultsChanged || (current.isLoading && query.isNotBlank())) updateSearchQuery(query)
     }
 
     /** 名单、完整副本或旧账号变化时，只重读本机，不重新请求电脑。 */
@@ -377,6 +465,16 @@ internal class CompanionLibraryTrial(
         }
         if (!current.contains(track)) return current.error?.message ?: "请从当前电脑曲库重新选择歌曲"
         return offlineUnplayableReason(track, current.downloadedTrackIds, current.isOffline)
+    }
+
+    fun playbackReportIdentity(track: Track): PlaybackReportIdentity? {
+        val owner = pairingScope?.let(connection::playbackReportOwner) ?: return null
+        val source = if (isCompanionDownloadMediaId(track.id)) {
+            val saved = copies[track.id]?.track ?: return null
+            // 副本不再对应电脑上的文件时仍可播，但不能给替换后的文件增加次数。
+            state.value.catalog?.track(saved.id)?.takeIf { it.sourceRevision == saved.sourceRevision } ?: return null
+        } else track
+        return PlaybackReportIdentity(owner, source.id, source.sourceRevision)
     }
 
     fun streamUrl(track: Track): String? = if (!isPlayable(track)) null

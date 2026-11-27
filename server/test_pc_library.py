@@ -94,6 +94,71 @@ class PcLibraryHttpTest(unittest.TestCase):
                              restarted.get(self.PLAYLISTS, headers=self.AUTH).json())
         self.assertEqual(original_audio, [file.read_bytes() for file in files])
 
+    def test_discover_starts_with_no_history_and_lists_added_tracks(self):
+        self.make_track("专辑/01 歌曲.flac", title="已添加")
+        self.index.refresh()
+        with self.client() as client:
+            track_id = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]["id"]
+            for section, expected in (("recently-added", [track_id]), ("recently-played", []), ("most-played", [])):
+                with self.subTest(section=section):
+                    url = f"/api/library/discover/{section}"
+                    self.assertEqual(401, client.get(url).status_code)
+                    response = client.get(url, headers=self.AUTH)
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual({"track_ids": expected}, response.json())
+
+    def test_playback_history_keeps_recent_and_frequent_order_after_restart(self):
+        files = [self.make_track(f"专辑/{title}.flac", title=title) for title in ("甲", "乙", "未播放")]
+        original = [file.read_bytes() for file in files]
+        self.index.refresh()
+        with self.client() as client:
+            ids = {row["title"]: row["id"] for row in client.get(self.TRACKS, headers=self.AUTH).json()["tracks"]}
+            for number, title in enumerate(("甲", "甲", "乙")):
+                url = f"{self.TRACKS}/{ids[title]}/playback"
+                start = {"event_id": f"{number:032x}", "event": "start", "position_ticks": 0}
+                end = {**start, "event": "stop", "position_ticks": 50_000}
+                self.assertEqual(401, client.post(url, headers={"X-Pulsar-Key": self.KEY}, json=start).status_code)
+                self.assertEqual(204, client.post(url, headers=self.AUTH, json=start).status_code)
+                self.assertEqual(204, client.post(url, headers=self.AUTH, json=end).status_code)
+            # 重试、无对应开始的停止都不能增加次数或改变最近播放顺序。
+            url = f"{self.TRACKS}/{ids['甲']}/playback"
+            self.assertEqual(204, client.post(url, headers=self.AUTH, json={
+                "event_id": "0" * 32, "event": "start", "position_ticks": 0,
+            }).status_code)
+            url = f"{self.TRACKS}/{ids['未播放']}/playback"
+            self.assertEqual(204, client.post(url, headers=self.AUTH, json={
+                "event_id": "8" * 32, "event": "stop", "position_ticks": 50_000,
+            }).status_code)
+            unknown = client.post(f"{self.TRACKS}/{'0' * 64}/playback", headers=self.AUTH, json={
+                "event_id": "9" * 32, "event": "start", "position_ticks": 0,
+            })
+            self.assertEqual(404, unknown.status_code)
+
+        self.index = LibraryIndex(self.root)
+        self.index.refresh()
+        with self.client() as client:
+            for section, expected in (("recently-played", [ids["乙"], ids["甲"]]),
+                                      ("most-played", [ids["甲"], ids["乙"]])):
+                response = client.get(f"/api/library/discover/{section}", headers=self.AUTH)
+                self.assertEqual(200, response.status_code)
+                self.assertEqual({"track_ids": expected}, response.json())
+        self.assertEqual(original, [file.read_bytes() for file in files])
+
+    def test_stale_playback_version_cannot_count_for_replacement(self):
+        track = self.make_track("专辑/歌曲.flac")
+        self.index.refresh()
+        with self.client() as client:
+            row = client.get(self.TRACKS, headers=self.AUTH).json()["tracks"][0]
+            before = row["revision"]
+            os.utime(track, (1_800_000_000, 1_800_000_000))
+            response = client.post(f"{self.TRACKS}/{row['id']}/playback", headers={**self.AUTH, "If-Match": f'"{before}"'}, json={
+                "event_id": "a" * 32, "event": "start", "position_ticks": 0,
+            })
+            self.assertEqual(412, response.status_code)
+            self.assertEqual({"track_ids": []}, client.get(
+                "/api/library/discover/recently-played", headers=self.AUTH,
+            ).json())
+
     def make_track(self, name, **tags):
         path = self.root / name
         path.parent.mkdir(parents=True, exist_ok=True)

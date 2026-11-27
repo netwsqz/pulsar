@@ -314,6 +314,17 @@ class LibraryIndex:
                 result.append({**asdict(track), "revision": audio_revision(info)})
         return result
 
+    def recently_added(self) -> list[str]:
+        """Windows 以文件创建时间排序，避免改内嵌标签把旧歌算作新添加。"""
+        added = []
+        for track in self.tracks():
+            file = self.audio_file(track.id)
+            if file is not None:
+                _, info = file
+                fallback = info.st_ctime_ns if os.name == "nt" else info.st_mtime_ns
+                added.append((getattr(info, "st_birthtime_ns", fallback), track.id))
+        return [track_id for _, track_id in sorted(added, reverse=True)]
+
     def audio_file(self, track_id: str) -> tuple[Path, os.stat_result] | None:
         """只按索引 ID 查找音频；即使文件在扫描后被替换，也重新检查曲库边界。"""
         with self._lock:

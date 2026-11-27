@@ -30,6 +30,9 @@ server/.library_access_key
 # 伴生服务持久化的播放列表与原子写入临时文件
 server/.library_playlists.json
 server/.library_playlists.json.*.tmp
+# 电脑曲库播放历史及 SQLite 日志
+server/.library_history.sqlite3
+server/.library_history.sqlite3-*
 
 # Project-local experiments and downloaded assets
 node_modules/
